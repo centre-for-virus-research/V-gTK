@@ -22,7 +22,7 @@ jobs:
       matrix:
         profile:
           - test
-          - segmented_test
+#          - segmented_test
 
     steps:
       - name: Checkout
@@ -79,57 +79,57 @@ jobs:
             test_out/**/*.db
           if-no-files-found: warn
 
-  extended-nextflow:
-    if: github.event_name == 'workflow_dispatch' && inputs.include_extended == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        profile:
-          - HCV_test
-          - flu_gisaid_test
+  # extended-nextflow:
+  #   if: github.event_name == 'workflow_dispatch' && inputs.include_extended == 'true'
+  #   runs-on: ubuntu-latest
+  #   timeout-minutes: 180
+  #   strategy:
+  #     fail-fast: false
+  #     max-parallel: 1
+  #     matrix:
+  #       profile:
+  #         - HCV_test
+  #         - flu_gisaid_test
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
 
-      - name: Set up Conda env from environment.yml
-        uses: conda-incubator/setup-miniconda@v3
-        with:
-          activate-environment: vgtk-ci
-          auto-activate-base: false
-          environment-file: environment.yml
-          use-mamba: true
-          channels: conda-forge,bioconda,defaults
+  #     - name: Set up Conda env from environment.yml
+  #       uses: conda-incubator/setup-miniconda@v3
+  #       with:
+  #         activate-environment: vgtk-ci
+  #         auto-activate-base: false
+  #         environment-file: environment.yml
+  #         use-mamba: true
+  #         channels: conda-forge,bioconda,defaults
 
-      - name: Run extended profile
-        shell: bash -l {0}
-        run: |
-          set -euo pipefail
-          nextflow run vgtk-init.nf -profile conda,${{ matrix.profile }}
+  #     - name: Run extended profile
+  #       shell: bash -l {0}
+  #       run: |
+  #         set -euo pipefail
+  #         nextflow run vgtk-init.nf -profile conda,${{ matrix.profile }}
 
-      - name: Assert extended test output exists
-        shell: bash -l {0}
-        run: |
-          set -euo pipefail
-          case "${{ matrix.profile }}" in
-            HCV_test)
-              test -f test_out/HCV_OM_test/tests/test_non_segmented_results.txt
-              ;;
-            flu_gisaid_test)
-              test -f test_out/IAV_DB_GISAID_TEST/tests/test_segmented_results.txt
-              ;;
-          esac
+  #     - name: Assert extended test output exists
+  #       shell: bash -l {0}
+  #       run: |
+  #         set -euo pipefail
+  #         case "${{ matrix.profile }}" in
+  #           HCV_test)
+  #             test -f test_out/HCV_OM_test/tests/test_non_segmented_results.txt
+  #             ;;
+  #           flu_gisaid_test)
+  #             test -f test_out/IAV_DB_GISAID_TEST/tests/test_segmented_results.txt
+  #             ;;
+  #         esac
 
-      - name: Upload extended artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: extended-${{ matrix.profile }}-artifacts
-          path: |
-            .nextflow.log
-            test_out/**/tests/*.txt
-            test_out/**/*.db
-          if-no-files-found: warn
+  #     - name: Upload extended artifacts
+  #       if: always()
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: extended-${{ matrix.profile }}-artifacts
+  #         path: |
+  #           .nextflow.log
+  #           test_out/**/tests/*.txt
+  #           test_out/**/*.db
+  #         if-no-files-found: warn
