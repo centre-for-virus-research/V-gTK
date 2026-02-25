@@ -435,6 +435,9 @@ class GenBankFetcher:
 			print('[update] Nothing to download.')
 
 # still appending references to fetch list in update mode, which is probably stupid if there's loads?
+# better method- see if references have been updated / any differences between refs nominated in db vs file
+# then only add to fetch list if not already present in db or if updated version is newer than db version (if version info available)
+
 if __name__ == "__main__":
 	parser = ArgumentParser(description='This script downloads and updates GenBank XML files for a given taxonomic group identified by an NCBI taxonomic ID, usually a species')
 	parser.add_argument('-t', '--taxid', help='TaxID example: 11292', required=True)

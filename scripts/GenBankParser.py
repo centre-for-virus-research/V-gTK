@@ -429,6 +429,10 @@ class GenBankParser:
 		print(f"Input XML dir used: {self.input_dir}")
 		print(f"Output dir used:    {self.out_root}")
 		
+# if running in update mode, need to check all the references are in the xml input or if they're in the DB
+# if they're in the DB then pull them out of the DB and add to the output tsv
+# # then pull the raw fastas out of the DB for the existing references and 
+
 if __name__ == "__main__":
 	parser = ArgumentParser(description='Extract GenBank XML files to a TSV table')
 	parser.add_argument('-d', '--input_dir', help='Input directory (optional override)', default=None)
