@@ -3,6 +3,8 @@ from pathlib import Path
 import types
 
 from Bio import SeqIO
+from Bio.Seq import Seq
+from Bio.SeqRecord import SeqRecord
 
 from PadAlignment import PadAlignment
 
@@ -102,3 +104,15 @@ def test_process_all_masters_uses_precomputed_by_segment_then_falls_back(tmp_pat
 
     assert "refset_1_aln.fasta" in called_refs
     assert "MASTER2.aligned.fasta" in called_refs
+
+
+def test_insert_gaps_pads_when_sequence_shorter_than_reference(tmp_path: Path):
+    processor = _make_processor(tmp_path)
+
+    reference_aligned = "ACGT--ACGT"
+    subalignment = [SeqRecord(Seq("ACGTAC"), id="Q1")]
+
+    updated = processor.insert_gaps(reference_aligned, subalignment)
+    assert len(updated) == 1
+    assert str(updated[0].seq) == "ACGT--AC--"
+    assert len(str(updated[0].seq)) == len(reference_aligned)

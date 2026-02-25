@@ -118,12 +118,15 @@ process TEST_DEPENDENCIES{
     check_cmd seqkit version
     check_cmd nextalign --version
     check_cmd mmseqs --version
-    if command -v iqtree2 >/dev/null 2>&1; then
-        check_cmd iqtree2 --version
-    elif command -v iqtree >/dev/null 2>&1; then
-        check_cmd iqtree --version
+    if command -v iqtree3 >/dev/null 2>&1; then
+        iqv="$(iqtree3 --version 2>&1 | head -n 1)"
+        echo "OK   iqtree3 :: ${iqv}" >> dependency_test.txt
+        if echo "$iqv" | grep -qi 'COVID-edition'; then
+            echo "MISS iqtree3 :: COVID-edition build detected (use standard iqtree3 build)" >> dependency_test.txt
+            missing_count=$((missing_count + 1))
+        fi
     else
-        echo "MISS iqtree2/iqtree :: not found in PATH" >> dependency_test.txt
+        echo "MISS iqtree3 :: not found in PATH" >> dependency_test.txt
         missing_count=$((missing_count + 1))
     fi
     check_cmd usher --version
@@ -566,13 +569,50 @@ process IQ_TREE{
             fi
         fi
 
+        LEN_STATS=$(seqkit fx2tab -n -s "$CLUSTER_REP" | awk '
+            BEGIN{count=0; min=-1; max=0}
+            {
+                l=length($2)
+                count++
+                if(min==-1 || l<min) min=l
+                if(l>max) max=l
+            }
+            END{
+                if(count==0){
+                    print "0\t0\t0"
+                } else {
+                    print count "\t" min "\t" max
+                }
+            }
+        ')
+
+        ALN_COUNT=$(echo "$LEN_STATS" | cut -f1)
+        ALN_MIN_LEN=$(echo "$LEN_STATS" | cut -f2)
+        ALN_MAX_LEN=$(echo "$LEN_STATS" | cut -f3)
+
+        if [ "$ALN_COUNT" -eq 0 ]; then
+            echo "[error] Cluster representative FASTA is empty: $CLUSTER_REP" >&2
+            exit 1
+        fi
+
+        if [ "$ALN_MIN_LEN" -ne "$ALN_MAX_LEN" ]; then
+            echo "[error] Alignment length mismatch in $CLUSTER_REP (min=${ALN_MIN_LEN}, max=${ALN_MAX_LEN})." >&2
+            echo "[error] IQ-TREE requires aligned sequences of equal length." >&2
+            exit 1
+        fi
+
         IQTREE_BIN=""
-        if command -v iqtree2 >/dev/null 2>&1; then
-            IQTREE_BIN="iqtree2"
-        elif command -v iqtree >/dev/null 2>&1; then
-            IQTREE_BIN="iqtree"
+        if command -v iqtree3 >/dev/null 2>&1; then
+            IQTREE_BIN="iqtree3"
         else
-            echo "[error] iqtree2/iqtree not found in PATH" >&2
+            echo "[error] iqtree3 not found in PATH. Activate the vgtk conda environment / conda profile." >&2
+            exit 1
+        fi
+
+        IQTREE_VER=$($IQTREE_BIN --version 2>&1 | head -n 1 || true)
+        echo "[info] Using $IQTREE_BIN at $(command -v $IQTREE_BIN): $IQTREE_VER"
+        if echo "$IQTREE_VER" | grep -qi 'COVID-edition'; then
+            echo "[error] Detected COVID-edition IQ-TREE build, which is incompatible here. Install standard iqtree3 in vgtk env." >&2
             exit 1
         fi
 

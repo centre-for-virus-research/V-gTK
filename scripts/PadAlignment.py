@@ -144,6 +144,8 @@ class PadAlignment:
 					if seq_idx < len(sequence):
 						gapped_sequence.append(sequence[seq_idx])
 						seq_idx += 1
+					else:
+						gapped_sequence.append('-')
 			gapped_seq_str = ''.join(gapped_sequence)
 			seq_record.seq = Seq(gapped_seq_str)
 			updated_sequences.append(seq_record)
