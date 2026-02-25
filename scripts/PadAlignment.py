@@ -315,3 +315,67 @@ if __name__ == "__main__":
 
 	processor.remove_redundant_sequences()
 
+# -----------------------------------------------------------------------------
+# UPDATE-MODE PLAN FOR PADALIGNMENT (COMMENT ONLY)
+# Goal: project incoming partial/new sequences onto an existing DB-consistent
+# alignment backbone, while preserving historical insertion structure.
+#
+# 1) Inputs required for robust update mode:
+#    - Existing DB-derived per-segment backbone alignments (or equivalent files
+#      exported from sequence_alignment) as primary projection targets.
+#    - Incoming nextalign query_aln outputs for newly fetched/changed accessions.
+#    - Master list + segment mapping from ref_list/metadata.
+#
+# 2) Segment-first processing contract:
+#    - Partition all operations by segment before padding.
+#    - Build one work unit per segment: {segment_key, masters, references,
+#      incoming query alignments, existing backbone alignment}.
+#    - Unsegmented viruses run as a single segment bucket.
+#    - Never allow cross-segment projection (segment N query -> segment M
+#      backbone is invalid and should be rejected).
+#
+# 3) Backbone selection order per segment:
+#    - Preferred: existing DB backbone for that segment (preserves historic
+#      insertion columns and coordinate compatibility).
+#    - Fallback 1: precomputed segment reference alignment
+#      (e.g., refset_<segment>_aln.fasta).
+#    - Fallback 2: nextalign reference_aln output.
+#    - If no segment-specific backbone exists, fail that segment explicitly
+#      (do not silently reuse another segment's backbone).
+#
+# 4) Gap projection behavior per segment:
+#    - For each reference subalignment in the segment, insert gaps according to
+#      the segment backbone reference alignment.
+#    - Preserve existing columns from historic backbone exactly.
+#    - If incoming data introduces genuinely novel insertion columns, append them
+#      in a deterministic segment-local manner (stable ordering), without
+#      removing historical columns.
+#
+# 5) Merging outputs:
+#    - Produce segment-scoped merged MSA outputs first.
+#    - Optional global merged output is a concatenation of segment outputs only
+#      when downstream expects a combined file; otherwise keep per-segment files
+#      as canonical update artifacts.
+#    - Keep mapping manifest: accession -> segment -> output file.
+#
+# 6) Orphans and unresolved references:
+#    - Keep current orphan detection, but report per segment.
+#    - Distinguish:
+#      * orphan due to missing reference in segment backbone
+#      * orphan due to unknown/missing segment assignment
+#    - Route unresolved records to exclusion/quarantine list for DB audit tables.
+#
+# 7) Idempotency and determinism requirements:
+#    - Rerunning same update batch with same inputs yields byte-stable segment
+#      outputs (or equivalent sequence+coordinate content).
+#    - Deduplication should be segment-aware if accession reuse across segments
+#      is possible (key by accession+segment where required).
+#
+# 8) Hand-off to CalcAlignmentCord and DB update:
+#    - Emit explicit segment metadata alongside padded outputs (filename
+#      convention or manifest TSV) so coordinate calculation selects the correct
+#      master GFF per segment.
+#    - Ensure only update-scope accessions are forwarded for feature recalculation
+#      and DB upsert.
+# -----------------------------------------------------------------------------
+
