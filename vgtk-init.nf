@@ -22,16 +22,13 @@ def parsePositiveInt = { value, paramName ->
 def maxThreadsRaw = params.max_threads ?: Math.min(8, Runtime.getRuntime().availableProcessors())
 def MAX_THREADS = parsePositiveInt(maxThreadsRaw, 'max_threads')
 
-def MMSEQS_THREADS_REQUESTED = parsePositiveInt(params.mmseqs_threads ?: MAX_THREADS, 'mmseqs_threads')
-params.mmseqs_threads = Math.min(MMSEQS_THREADS_REQUESTED, MAX_THREADS)
-
 def SEGMENT_PARALLEL_THREADS = Math.max(1, (int)Math.floor(MAX_THREADS / 8))
 // 1. List your script's explicitly defined parameters (keep this in sync!)
 def scriptDefinedParams = [
     'tax_id', 'db_name', 'is_segmented', 'extra_info_fill', 'test',
     "scripts_dir", "publish_dir", "email", "ref_list", "bulk_fillup_table", "is_flu", "gene_info",
     "xml_dir", "update", "update_file", "update_db",
-    "mmseqs_min_seq_id", "mmseqs_threads", "mmseqs_trim_cds_file",
+    "mmseqs_min_seq_id", "mmseqs_trim_cds_file",
     "gisaid_dir", "previous_db", "conda_path", "test_max_cluster_seqs", "max_threads", "ref_set_aligned"
     // Add all parameter names defined above
 ]
