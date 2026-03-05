@@ -13,15 +13,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Conda environment
+        uses: conda-incubator/setup-miniconda@v3
         with:
-          python-version: "3.11"
+          environment-file: environment.yml
+          activate-environment: vgtk
+          auto-activate-base: false
+          miniforge-variant: Miniforge3
+          miniforge-version: latest
 
-      - name: Install test dependencies
+      - name: Verify test tooling in env
         run: |
-          python -m pip install --upgrade pip
-          pip install pytest pytest-cov biopython pandas numpy requests python-dateutil
+          conda run -n vgtk python --version
+          conda run -n vgtk pytest --version
 
       - name: Run unit tests
-        run: pytest -q tests/unit
+        run: conda run -n vgtk pytest -q tests/unit
