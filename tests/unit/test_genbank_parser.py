@@ -14,8 +14,14 @@ def _gbseq_xml(
     country: str = "UK:London",
     collection_date: str = "12-Jan-2020",
     accession_version: Optional[str] = None,
+    segment: Optional[str] = None,
 ) -> str:
     accession_version = accession_version or f"{primary_accession}.1"
+    segment_tag = (
+        f"<GBQualifier><GBQualifier_name>segment</GBQualifier_name><GBQualifier_value>{segment}</GBQualifier_value></GBQualifier>"
+        if segment is not None
+        else ""
+    )
     return f"""
 <GBSeq>
   <GBSeq_locus>{primary_accession}</GBSeq_locus>
@@ -38,6 +44,7 @@ def _gbseq_xml(
         <GBQualifier><GBQualifier_name>country</GBQualifier_name><GBQualifier_value>{country}</GBQualifier_value></GBQualifier>
         <GBQualifier><GBQualifier_name>host</GBQualifier_name><GBQualifier_value>bat</GBQualifier_value></GBQualifier>
         <GBQualifier><GBQualifier_name>collection_date</GBQualifier_name><GBQualifier_value>{collection_date}</GBQualifier_value></GBQualifier>
+                {segment_tag}
       </GBFeature_quals>
     </GBFeature>
     <GBFeature>
@@ -291,3 +298,37 @@ def test_process_update_mode_keeps_reference_rows(tmp_path: Path):
 
     df = pd.read_csv(tmp_path / "GenBank-matrix" / "gB_matrix_raw.tsv", sep="\t")
     assert set(df["primary_accession"].tolist()) == {"REF1", "NEW1"}
+
+
+def test_process_update_mode_keeps_same_accession_across_segments(tmp_path: Path):
+    xml_dir = tmp_path / "GenBank-XML"
+    xml_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_xml(
+        xml_dir / "batch-1.xml",
+        [
+            _gbseq_xml("SEG_ACC", "ATGC", segment="1"),
+            _gbseq_xml("SEG_ACC", "ATGA", segment="2"),
+        ],
+    )
+
+    update_db = tmp_path / "previous.db"
+    _write_update_db(update_db, existing_accessions=[], excluded_accessions=[])
+
+    ref_file = tmp_path / "refs.tsv"
+    ref_file.write_text("REF1\tmaster\n", encoding="utf-8")
+
+    parser = GenBankParser(
+        input_dir=None,
+        base_dir=str(tmp_path),
+        output_dir="GenBank-matrix",
+        ref_list=str(ref_file),
+        exclusion_list=None,
+        is_segmented_virus="Y",
+        update=str(update_db),
+    )
+    parser.process()
+
+    df = pd.read_csv(tmp_path / "GenBank-matrix" / "gB_matrix_raw.tsv", sep="\t")
+    seg_rows = df[df["primary_accession"] == "SEG_ACC"]
+    assert sorted(seg_rows["segment"].astype(str).tolist()) == ["1", "2"]

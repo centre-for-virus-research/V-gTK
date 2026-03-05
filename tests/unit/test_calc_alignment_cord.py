@@ -135,3 +135,76 @@ def test_load_blast_hits_raises_on_malformed_row(tmp_path: Path):
 
     with pytest.raises(ValueError, match="Malformed BLAST hits row"):
         processor.load_blast_hits()
+
+
+def test_find_gaps_in_fasta_update_scope_emits_only_scoped_accessions(tmp_path: Path):
+    scope = tmp_path / "scope.tsv"
+    scope.write_text("primary_accession\nNON_EXISTENT\n", encoding="utf-8")
+
+    processor = CalculateAlignmentCoordinates(
+        paded_alignment=str(DATA_DIR / "padded_alignment"),
+        master_gff=[str(DATA_DIR / "MASTER1.gff3")],
+        tmp_dir=str(tmp_path),
+        output_dir="Tables",
+        output_file="features.tsv",
+        master_accession=str(DATA_DIR / "master_list.tsv"),
+        blast_uniq_hits=str(DATA_DIR / "query_uniq_tophits.tsv"),
+        update_scope_tsv=str(scope),
+    )
+    processor.find_gaps_in_fasta()
+
+    rows = read_tsv_as_dicts(tmp_path / "Tables" / "features.tsv")
+    assert rows == []
+
+
+def test_find_gaps_in_fasta_update_db_skips_existing_feature_accessions(tmp_path: Path):
+    update_db = tmp_path / "update.db"
+    import sqlite3
+
+    conn = sqlite3.connect(str(update_db))
+    try:
+        conn.execute("CREATE TABLE features (accession TEXT)")
+        conn.execute("INSERT INTO features(accession) VALUES ('Q_A')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    processor = CalculateAlignmentCoordinates(
+        paded_alignment=str(DATA_DIR / "padded_alignment"),
+        master_gff=[str(DATA_DIR / "MASTER1.gff3")],
+        tmp_dir=str(tmp_path),
+        output_dir="Tables",
+        output_file="features.tsv",
+        master_accession=str(DATA_DIR / "master_list.tsv"),
+        blast_uniq_hits=str(DATA_DIR / "query_uniq_tophits.tsv"),
+        update_db=str(update_db),
+    )
+    processor.find_gaps_in_fasta()
+
+    rows = read_tsv_as_dicts(tmp_path / "Tables" / "features.tsv")
+    assert rows
+    assert all(row["accession"] != "Q_A" for row in rows)
+
+
+def test_find_gaps_in_fasta_raises_on_segment_mismatch(tmp_path: Path):
+    segment_map = tmp_path / "segment_map.tsv"
+    segment_map.write_text(
+        "primary_accession\tsegment\n"
+        "Q_A\t2\n"
+        "MASTER1\t1\n",
+        encoding="utf-8",
+    )
+
+    processor = CalculateAlignmentCoordinates(
+        paded_alignment=str(DATA_DIR / "padded_alignment"),
+        master_gff=[str(DATA_DIR / "MASTER1.gff3")],
+        tmp_dir=str(tmp_path),
+        output_dir="Tables",
+        output_file="features.tsv",
+        master_accession=str(DATA_DIR / "master_list.tsv"),
+        blast_uniq_hits=str(DATA_DIR / "query_uniq_tophits.tsv"),
+        segment_map_tsv=str(segment_map),
+    )
+
+    with pytest.raises(ValueError, match="Segment mismatch"):
+        processor.find_gaps_in_fasta()

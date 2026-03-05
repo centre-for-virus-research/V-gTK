@@ -91,7 +91,23 @@ def main(args):
 	if "alignment_name" not in df_aln.columns:
 		df_aln["alignment_name"] = "0"
 
-	df_join = df_aln.merge(df_meta[["primary_accession", "accession_type", "segment"]], on="primary_accession", how="left")
+	df_join = df_aln.merge(
+		df_meta[["primary_accession", "accession_type", "segment"]],
+		on="primary_accession",
+		how="left",
+		suffixes=("_aln", "_meta"),
+	)
+	if "segment" not in df_join.columns:
+		if "segment_meta" in df_join.columns:
+			df_join["segment"] = df_join["segment_meta"]
+		elif "segment_aln" in df_join.columns:
+			df_join["segment"] = df_join["segment_aln"]
+		elif "segment_y" in df_join.columns:
+			df_join["segment"] = df_join["segment_y"]
+		elif "segment_x" in df_join.columns:
+			df_join["segment"] = df_join["segment_x"]
+		else:
+			df_join["segment"] = "0"
 	df_join["segment"] = df_join["segment"].apply(_segment_norm)
 	df_join = df_join[df_join["accession_type"].fillna("").str.lower().isin(["master", "reference"])]
 

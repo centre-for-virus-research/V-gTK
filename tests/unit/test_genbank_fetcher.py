@@ -520,3 +520,35 @@ def test_update_adds_only_missing_refs_from_ref_list(tmp_path: Path, monkeypatch
     fetcher.update(str(db_path))
 
     assert captured["ids"] == ["REF2"]
+
+
+def test_update_ref_list_parser_ignores_malformed_and_excluded_refs(tmp_path: Path, monkeypatch, basic_update_db: Path):
+    ref_file = tmp_path / "refs.tsv"
+    ref_file.write_text(
+        "REF1\tmaster\n"
+        "REF_NEW\treference\n"
+        "BROKEN_ONLY_ONE_COL\n"
+        "Q_EXCL\treference\n",
+        encoding="utf-8",
+    )
+
+    fetcher = GenBankFetcher(
+        taxid="11292",
+        base_url="https://example/",
+        email="x@y.com",
+        output_dir=str(tmp_path),
+        batch_size=100,
+        sleep_time=0,
+        base_dir="GenBank-XML",
+        update_file=str(basic_update_db),
+        ref_list=str(ref_file),
+    )
+
+    monkeypatch.setattr(fetcher, "fetch_accs", lambda: ["Q_OLD.1"])  # no NCBI deltas
+    captured = {}
+    monkeypatch.setattr(fetcher, "fetch_genbank_data", lambda ids: captured.setdefault("ids", ids))
+
+    fetcher.update(str(basic_update_db))
+
+    # REF1 already in DB, Q_EXCL is excluded in DB, malformed line ignored -> only REF_NEW remains
+    assert captured["ids"] == ["REF_NEW"]

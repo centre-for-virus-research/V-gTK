@@ -57,7 +57,7 @@ def _inputs(tmp_path: Path, suffix: str, aln_a: str = "ATGC"):
     }
 
 
-def _build_db(tmp_path: Path, inp: dict, update=False, update_db=None):
+def _build_db(tmp_path: Path, inp: dict, update=False, update_db=None, filtered_ids_file=None):
     db = CreateSqliteDB(
         meta_data=str(inp["meta"]),
         features=str(inp["features"]),
@@ -78,6 +78,7 @@ def _build_db(tmp_path: Path, inp: dict, update=False, update_db=None):
         update=update,
         update_db=str(update_db) if update_db else None,
         batch_id="batch_test",
+        filtered_ids_file=str(filtered_ids_file) if filtered_ids_file else None,
     )
     db.create_db()
 
@@ -104,5 +105,43 @@ def test_create_sqlite_db_update_mode_upserts_without_growth(tmp_path: Path):
         _build_db(tmp_path, update_inputs, update=True, update_db=db_path)
         cur.execute("SELECT COUNT(*) FROM sequence_alignment WHERE primary_accession='A' AND segment='1'")
         assert cur.fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_create_sqlite_db_filtered_ids_do_not_exclude_reference_rows(tmp_path: Path):
+    inp = _inputs(tmp_path, "filtered_refs", aln_a="ATGC")
+
+    # Override meta_data to include explicit master/query typing
+    pd.DataFrame(
+        [
+            ["REF1", "", "1", "master"],
+            ["Q1", "", "1", "query"],
+        ],
+        columns=["primary_accession", "exclusion", "segment", "accession_type"],
+    ).to_csv(inp["meta"], sep="\t", index=False)
+
+    # Keep alignment/sequence rows for both accessions to make filtering behavior explicit
+    pd.DataFrame(
+        [["REF1", "REF1", "ATGC", "1"], ["Q1", "REF1", "AT--", "1"]],
+        columns=["primary_accession", "alignment_name", "alignment", "segment"],
+    ).to_csv(inp["aln"], sep="\t", index=False)
+    inp["fasta"].write_text(">REF1\nATGC\n>Q1\nATTT\n", encoding="utf-8")
+
+    filtered_ids = tmp_path / "filtered_ids.txt"
+    filtered_ids.write_text("REF1\nQ1\n", encoding="utf-8")
+
+    _build_db(tmp_path, inp, update=False, filtered_ids_file=filtered_ids)
+
+    conn = sqlite3.connect(str(tmp_path / "SqliteDB" / "upd_db.db"))
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT primary_accession FROM meta_data ORDER BY primary_accession")
+        kept = [row[0] for row in cur.fetchall()]
+        assert kept == ["REF1"]
+
+        cur.execute("SELECT primary_accession, reason FROM excluded_accessions ORDER BY primary_accession")
+        excluded = cur.fetchall()
+        assert excluded == [("Q1", "alignment_filtering")]
     finally:
         conn.close()

@@ -424,6 +424,16 @@ class CreateSqliteDB:
 			after_count = len(df_meta_data)
 			if before_count != after_count:
 				print(f"[CreateSqliteDB] Removed {before_count - after_count} filtered non-reference sequences from meta_data")
+			if acc_type_col:
+				ref_or_master_ids = set(
+					df_meta_data[
+						df_meta_data[acc_type_col].fillna("").str.strip().str.lower().isin(["master", "reference"])
+					]["primary_accession"].astype(str).str.strip().tolist()
+				)
+				excluded_records = [
+					r for r in excluded_records
+					if str(r.get("primary_accession", "")).strip() not in ref_or_master_ids
+				]
 		is_ref_or_master = is_ref_or_master.reindex(df_meta_data.index, fill_value=False)
 		if "exclusion" in df_meta_data.columns:
 			exclusion_mask = df_meta_data["exclusion"].notna() & (df_meta_data["exclusion"] != "")

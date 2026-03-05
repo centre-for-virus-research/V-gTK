@@ -1,52 +1,12 @@
-import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
 from ExportUpdateAssets import main as export_update_assets_main
 
-
-def _build_update_db(db_path: Path):
-    conn = sqlite3.connect(str(db_path))
-    try:
-        cur = conn.cursor()
-        cur.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT, segment TEXT)")
-        cur.executemany(
-            "INSERT INTO meta_data(primary_accession, accession_type, segment) VALUES (?, ?, ?)",
-            [
-                ("REF1", "master", "1"),
-                ("REF2", "reference", "2"),
-                ("Q1", "query", "1"),
-            ],
-        )
-        cur.execute("CREATE TABLE sequence_alignment (primary_accession TEXT, alignment_name TEXT, alignment TEXT)")
-        cur.executemany(
-            "INSERT INTO sequence_alignment(primary_accession, alignment_name, alignment) VALUES (?, ?, ?)",
-            [
-                ("REF1", "REF1", "ATGC"),
-                ("REF2", "REF2", "A-GC"),
-            ],
-        )
-        cur.execute("CREATE TABLE trees (source TEXT, segment TEXT, newick TEXT)")
-        cur.executemany(
-            "INSERT INTO trees(source, segment, newick) VALUES (?, ?, ?)",
-            [
-                ("usher", "1", "(REF1:0.1,Q1:0.2);"),
-                ("iqtree", "2", "(REF2:0.1);"),
-            ],
-        )
-        cur.execute("CREATE TABLE excluded_accessions (primary_accession TEXT, reason TEXT)")
-        cur.execute("INSERT INTO excluded_accessions(primary_accession, reason) VALUES ('Q1', 'x')")
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def test_export_update_assets_emits_manifest_and_existing_ids(tmp_path: Path):
-    db_path = tmp_path / "prev.db"
+def test_export_update_assets_emits_manifest_and_existing_ids(tmp_path: Path, basic_update_db: Path):
     out_dir = tmp_path / "UpdateAssets"
-    _build_update_db(db_path)
 
-    export_update_assets_main(SimpleNamespace(db=str(db_path), output_dir=str(out_dir)))
+    export_update_assets_main(SimpleNamespace(db=str(basic_update_db), output_dir=str(out_dir)))
 
     assert (out_dir / "ref_backbones" / "refset_1_aln.fasta").exists()
     assert (out_dir / "ref_backbones" / "refset_2_aln.fasta").exists()
@@ -55,7 +15,32 @@ def test_export_update_assets_emits_manifest_and_existing_ids(tmp_path: Path):
 
     ids_seg1 = (out_dir / "existing_ids" / "segment_1_ids.txt").read_text(encoding="utf-8").splitlines()
     assert "REF1" in ids_seg1
-    assert "Q1" not in ids_seg1
+    assert "Q_EXCL" not in ids_seg1
+
+
+def test_export_update_assets_prefers_usher_tree_source(tmp_path: Path, basic_update_db: Path):
+    out_dir = tmp_path / "UpdateAssets"
+    export_update_assets_main(SimpleNamespace(db=str(basic_update_db), output_dir=str(out_dir)))
+
+    tree_manifest = (out_dir / "tree_manifest.tsv").read_text(encoding="utf-8")
+    assert "usher" in tree_manifest
+    assert "segment_1.nwk" in tree_manifest
+
+
+def test_export_update_assets_writes_tree_manifest_header_when_no_trees(tmp_path: Path, basic_update_db: Path):
+    import sqlite3
+
+    conn = sqlite3.connect(str(basic_update_db))
+    try:
+        conn.execute("DELETE FROM trees")
+        conn.commit()
+    finally:
+        conn.close()
+
+    out_dir = tmp_path / "UpdateAssets"
+    export_update_assets_main(SimpleNamespace(db=str(basic_update_db), output_dir=str(out_dir)))
+    content = (out_dir / "tree_manifest.tsv").read_text(encoding="utf-8").strip()
+    assert content == "segment\tsource\tpath"
 
 
 def test_workflow_update_glue_contains_skip_and_guard():
