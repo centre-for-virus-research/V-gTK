@@ -558,6 +558,7 @@ process IQ_TREE{
         path "IQTree_${mmseq_cluster_dir.baseName}", emit: iqtree_out
     shell:
     '''
+        ulimit -s unlimited
         CLUSTER_REP=$(find -L !{mmseq_cluster_dir} -name "*_cluster_rep.fasta" -print -quit)
         if [ -z "$CLUSTER_REP" ]; then
             CLUSTER_REP=$(find -L !{mmseq_cluster_dir} -name "*.fasta" -print -quit)
@@ -617,7 +618,7 @@ process IQ_TREE{
         fi
 
         mkdir -p IQTree_!{mmseq_cluster_dir.baseName}
-        "$IQTREE_BIN" -s "$CLUSTER_REP" -nt !{task.cpus} -m GTR -pre IQTree_!{mmseq_cluster_dir.baseName}/iqtree
+        "$IQTREE_BIN" -s "$CLUSTER_REP" -nt !{task.cpus} -m GTR -pre IQTree_!{mmseq_cluster_dir.baseName}/iqtree -mem 100G
     '''
 }
 
