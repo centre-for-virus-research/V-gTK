@@ -146,10 +146,6 @@ class GenBankParser:
 			content['primary_accession'] = gbseq.find('GBSeq_primary-accession').text
 			content['accession_version'] = gbseq.find('GBSeq_accession-version').text
 
-			if self.update_mode and self._existing_accessions:
-				if content['primary_accession'] in self._existing_accessions:
-					continue
-
 			content['gi_number'] = content['primary_accession']
 			content['source'] = gbseq.find('GBSeq_source').text
 			content['organism'] = gbseq.find('GBSeq_organism').text
@@ -159,6 +155,11 @@ class GenBankParser:
 				content['accession_type'] = ref_seq_dict[content['primary_accession']]
 			else:
 				content['accession_type'] = 'query'
+
+			if self.update_mode and self._existing_accessions:
+				acc_type = str(content['accession_type']).strip().lower()
+				if content['primary_accession'] in self._existing_accessions and acc_type not in {'master', 'reference'}:
+					continue
 	
 			if content['primary_accession'] in exclusion_acc_list:
 				content['accession_type'] = 'excluded'
@@ -374,6 +375,12 @@ class GenBankParser:
 
 		if self.update_mode:
 			self._existing_accessions = self.load_existing_accessions_from_db(self.update_db_path)
+			# Update-mode references are DB-backed source-of-truth; if missing in DB we still
+			# allow parsing from XML, but emit deterministic diagnostics.
+			ref_accs = sorted(ref_seq_dict.keys())
+			missing_in_db = [r for r in ref_accs if r not in self._existing_accessions]
+			if missing_in_db:
+				print(f"[update] {len(missing_in_db)} references from ref_list are not present in DB and will be parsed from XML if available")
 
 		xml_files = self.list_xml_files()
 		if self.require_refs and self.ref_list is None:
@@ -419,7 +426,10 @@ class GenBankParser:
 
 		df = pd.DataFrame(merged_data)
   		# this was subsetting on locus-??
-		df = df.drop_duplicates(subset='primary_accession', keep="last")
+		if 'segment' in df.columns:
+			df = df.drop_duplicates(subset=['primary_accession', 'segment'], keep="last")
+		else:
+			df = df.drop_duplicates(subset='primary_accession', keep="last")
 		with open(join(self.out_root, 'sequences.fa'), 'w') as fasta_file:
 			for _, row in df.iterrows():
 				fasta_file.write(f">{row['primary_accession']}\n{row['sequence']}\n")

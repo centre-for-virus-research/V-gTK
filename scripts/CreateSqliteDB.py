@@ -1,20 +1,47 @@
+#!/usr/bin/env python3
 import os
 import re
 import csv
-import time
 import sqlite3
 import sys
-import read_file
-import subprocess
 import pandas as pd
 from Bio import SeqIO
-from os.path import join
+from os.path import join, normpath
 from datetime import datetime
 from argparse import ArgumentParser
-from collections import defaultdict
+
 
 class CreateSqliteDB:
-	def __init__(self, meta_data, features, pad_aln, gene_info, m49_countries, m49_interm_region, m49_regions, m49_sub_regions, proj_settings, fasta_sequence_file, insertions, host_taxa_file, base_dir, output_dir, db_name, db_status, tree_file=None, iqtree_file=None, usher_tree=None, cluster_tsv=None, cluster_min_seq_id=None, filtered_ids_file=None, filtered_details_file=None, tree_manifest=None):
+	def __init__(
+		self,
+		meta_data,
+		features,
+		pad_aln,
+		gene_info,
+		m49_countries,
+		m49_interm_region,
+		m49_regions,
+		m49_sub_regions,
+		proj_settings,
+		fasta_sequence_file,
+		insertions,
+		host_taxa_file,
+		base_dir,
+		output_dir,
+		db_name,
+		db_status,
+		tree_file=None,
+		iqtree_file=None,
+		usher_tree=None,
+		cluster_tsv=None,
+		cluster_min_seq_id=None,
+		filtered_ids_file=None,
+		filtered_details_file=None,
+		tree_manifest=None,
+		update=False,
+		update_db=None,
+		batch_id=None,
+	):
 		self.meta_data = meta_data
 		self.features = features
 		self.pad_aln = pad_aln
@@ -39,6 +66,9 @@ class CreateSqliteDB:
 		self.filtered_ids_file = filtered_ids_file
 		self.filtered_details_file = filtered_details_file
 		self.tree_manifest = tree_manifest
+		self.update = bool(update)
+		self.update_db = update_db
+		self.batch_id = batch_id or datetime.now().strftime("batch_%Y%m%d_%H%M%S")
 
 	@staticmethod
 	def _read_tree_file(tree_path):
@@ -91,8 +121,7 @@ class CreateSqliteDB:
 				return m.group(1)
 		return None
 
-	def _load_filtered_ids(self) -> set:
-		"""Load the set of sequence IDs that were filtered during alignment."""
+	def _load_filtered_ids(self):
 		if not self.filtered_ids_file:
 			return set()
 		try:
@@ -102,12 +131,12 @@ class CreateSqliteDB:
 			return set()
 
 	@staticmethod
-	def _require_file(path: str, label: str):
+	def _require_file(path, label):
 		if not path or not os.path.isfile(path):
 			raise FileNotFoundError(f"{label} file not found: {path}")
 
 	@staticmethod
-	def _read_tsv_required(path: str, required_columns, label: str, dtype=None):
+	def _read_tsv_required(path, required_columns, label, dtype=None):
 		df = pd.read_csv(path, sep="\t", dtype=dtype)
 		missing = [c for c in required_columns if c not in df.columns]
 		if missing:
@@ -115,7 +144,7 @@ class CreateSqliteDB:
 		return df
 
 	@staticmethod
-	def _read_csv_required(path: str, required_columns, label: str, dtype=None):
+	def _read_csv_required(path, required_columns, label, dtype=None):
 		df = pd.read_csv(path, sep=",", dtype=dtype)
 		missing = [c for c in required_columns if c not in df.columns]
 		if missing:
@@ -123,9 +152,8 @@ class CreateSqliteDB:
 		return df
 
 	@staticmethod
-	def _ensure_primary_accession(df: pd.DataFrame, label: str, aliases=None) -> pd.DataFrame:
-		if aliases is None:
-			aliases = []
+	def _ensure_primary_accession(df, label, aliases=None):
+		aliases = aliases or []
 		if "primary_accession" in df.columns:
 			return df
 		for alias in aliases:
@@ -135,7 +163,7 @@ class CreateSqliteDB:
 		raise ValueError(f"{label} is missing required columns: primary_accession")
 
 	@staticmethod
-	def _normalize_alignment_columns(df: pd.DataFrame, label: str) -> pd.DataFrame:
+	def _normalize_alignment_columns(df, label):
 		if "primary_accession" not in df.columns and "sequence_id" in df.columns:
 			df["primary_accession"] = df["sequence_id"]
 		elif "primary_accession" in df.columns and "sequence_id" not in df.columns:
@@ -146,8 +174,7 @@ class CreateSqliteDB:
 				raise ValueError(f"{label} is missing required columns: {', '.join(missing)}")
 		return df
 
-	def _load_filtered_details(self) -> dict:
-		"""Load filtered sequence reasons from filtered_sequences.tsv if available."""
+	def _load_filtered_details(self):
 		reasons = {}
 		if not self.filtered_details_file or not os.path.isfile(self.filtered_details_file):
 			return reasons
@@ -155,10 +182,8 @@ class CreateSqliteDB:
 			df = pd.read_csv(self.filtered_details_file, sep="\t", dtype=str).fillna("")
 		except Exception:
 			return reasons
-
 		if "seq_name" not in df.columns:
 			return reasons
-
 		for _, row in df.iterrows():
 			seq = str(row.get("seq_name", "")).strip()
 			if not seq:
@@ -181,25 +206,16 @@ class CreateSqliteDB:
 			cluster_df = pd.read_csv(self.cluster_tsv, sep="\t", header=None, dtype=str)
 		except FileNotFoundError:
 			return df_meta_data
-
 		if cluster_df.shape[1] < 2:
 			return df_meta_data
-
 		cluster_df = cluster_df.iloc[:, :2]
 		cluster_df.columns = ["cluster_rep", "member"]
 		cluster_map = dict(zip(cluster_df["member"], cluster_df["cluster_rep"]))
-
 		try:
 			min_id = float(self.cluster_min_seq_id) if self.cluster_min_seq_id is not None else None
 		except (TypeError, ValueError):
 			min_id = None
-
-		if min_id is not None:
-			pct = int(round(min_id * 100))
-			col_name = f"cluster_{pct}pct"
-		else:
-			col_name = "cluster"
-
+		col_name = f"cluster_{int(round(min_id * 100))}pct" if min_id is not None else "cluster"
 		if "primary_accession" in df_meta_data.columns:
 			df_meta_data[col_name] = df_meta_data["primary_accession"].map(cluster_map)
 		return df_meta_data
@@ -208,11 +224,10 @@ class CreateSqliteDB:
 		fasta_data = []
 		for record in SeqIO.parse(self.fasta_sequence_file, "fasta"):
 			fasta_data.append({"header": record.id, "sequence": str(record.seq)})
-
 		return pd.DataFrame(fasta_data)
 
 	@staticmethod
-	def _normalize_db_status(db_status: str):
+	def _normalize_db_status(db_status):
 		s = (db_status or "").strip().lower()
 		if s in {"new", "new db", "create", "created", "fresh"}:
 			return "new db"
@@ -220,11 +235,159 @@ class CreateSqliteDB:
 			return "last updated"
 		return db_status
 
+	def _db_path(self):
+		if self.update:
+			if not self.update_db:
+				raise ValueError("--update requires --update_db path")
+			return self.update_db
+		return join(self.base_dir, self.output_dir, self.db_name + ".db")
+
+	@staticmethod
+	def _table_exists(conn, table):
+		row = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+		return row is not None
+
+	@staticmethod
+	def _normalize_key_series(s):
+		return s.fillna("").astype(str).str.strip()
+
+	def _fetch_existing_keys(self, conn, table, key_cols):
+		if not self._table_exists(conn, table):
+			return set()
+		df = pd.read_sql_query(f"SELECT {', '.join(key_cols)} FROM {table}", conn)
+		for c in key_cols:
+			if c not in df.columns:
+				raise ValueError(f"DB table '{table}' is missing expected key column '{c}'")
+			df[c] = self._normalize_key_series(df[c])
+		if len(key_cols) == 1:
+			return set(df[key_cols[0]].tolist())
+		return set(map(tuple, df[key_cols].itertuples(index=False, name=None)))
+
+	@staticmethod
+	def _dedupe_incoming_df(df, key_cols):
+		before = len(df)
+		df2 = df.drop_duplicates(subset=key_cols, keep="first")
+		return df2, (before - len(df2))
+
+	def _infer_key_cols(self, table, df):
+		cols = list(df.columns)
+		if table == "meta_data":
+			return ["primary_accession", "segment"] if "segment" in cols else ["primary_accession"]
+		if table == "sequences":
+			return ["header"]
+		if table == "sequence_alignment":
+			key = ["primary_accession"]
+			if "alignment_name" in cols:
+				key.append("alignment_name")
+			if "segment" in cols:
+				key.append("segment")
+			return key
+		if table == "features":
+			key = ["accession", "master_ref_accession", "reference_accession", "aln_start", "aln_end", "cds_start", "cds_end", "product"]
+			if "segment" in cols:
+				key.append("segment")
+			missing = [c for c in key if c not in cols]
+			if not missing:
+				return key
+			if "primary_accession" in cols and "segment" in cols:
+				return ["primary_accession", "segment"]
+			if "primary_accession" in cols:
+				return ["primary_accession"]
+			if "accession" in cols and "segment" in cols:
+				return ["accession", "segment"]
+			if "accession" in cols:
+				return ["accession"]
+			return cols[:1]
+		if table == "insertions":
+			key = [c for c in ["primary_accession", "reference", "insertion"] if c in cols]
+			if "segment" in cols:
+				key.append("segment")
+			return key if key else cols[:1]
+		if table == "host_taxa":
+			for c in ["taxonomy_id", "host_taxa_id", "tax_id", "id"]:
+				if c in cols:
+					return [c]
+			return [cols[0]] if cols else []
+		if table == "genes":
+			for c in ["name", "gene_name", "description"]:
+				if c in cols:
+					return [c]
+			return cols[:1]
+		if table in ["m49_country", "m49_intermediate", "m49_regions", "m49_sub_regions", "project_settings"]:
+			return cols[:1] if cols else []
+		return cols[:1] if cols else []
+
+	def merge_table_append_nonredundant(self, conn, df, table, key_cols=None, update_exclusions=None):
+		if df is None:
+			return 0
+		df = df.copy()
+		key_cols = key_cols if key_cols is not None else self._infer_key_cols(table, df)
+		if not key_cols:
+			if not self.update:
+				df.to_sql(table, conn, if_exists="replace", index=False)
+			else:
+				df.to_sql(table, conn, if_exists="append" if self._table_exists(conn, table) else "replace", index=False)
+			return len(df)
+		for c in key_cols:
+			if c not in df.columns:
+				raise ValueError(f"Incoming '{table}' dataframe missing key column '{c}'")
+			df[c] = self._normalize_key_series(df[c])
+		df, dropped_internal = self._dedupe_incoming_df(df, key_cols)
+		if dropped_internal:
+			print(f"[CreateSqliteDB] Dropped {dropped_internal} duplicate incoming rows in '{table}' by key {key_cols}")
+		if not self.update:
+			df.to_sql(table, conn, if_exists="replace", index=False)
+			return len(df)
+		if not self._table_exists(conn, table):
+			df.to_sql(table, conn, if_exists="replace", index=False)
+			print(f"[CreateSqliteDB] Created table '{table}' with {len(df)} rows (table did not exist)")
+			return len(df)
+		existing_keys = self._fetch_existing_keys(conn, table, key_cols)
+		upsert_tables = {"meta_data", "sequence_alignment", "features", "insertions", "sequences"}
+		if table in upsert_tables:
+			if len(key_cols) == 1:
+				key = key_cols[0]
+				keys_to_replace = sorted(set(df[key].tolist()))
+				if keys_to_replace:
+					placeholders = ",".join(["?"] * len(keys_to_replace))
+					conn.execute(f"DELETE FROM {table} WHERE {key} IN ({placeholders})", keys_to_replace)
+			else:
+				where_clause = " AND ".join([f"{c}=?" for c in key_cols])
+				for key_tuple in set(map(tuple, df[key_cols].itertuples(index=False, name=None))):
+					conn.execute(f"DELETE FROM {table} WHERE {where_clause}", tuple(key_tuple))
+			df.to_sql(table, conn, if_exists="append", index=False)
+			print(f"[CreateSqliteDB] Upserted {len(df)} rows into '{table}' by key {key_cols}")
+			return len(df)
+
+		if len(key_cols) == 1:
+			key = key_cols[0]
+			new_mask = ~df[key].isin(existing_keys)
+			dup_keys = df.loc[~new_mask, key].tolist()
+		else:
+			incoming_keys = list(map(tuple, df[key_cols].itertuples(index=False, name=None)))
+			keep_flags = [k not in existing_keys for k in incoming_keys]
+			new_mask = pd.Series(keep_flags, index=df.index)
+			dup_keys = [k for k, keep in zip(incoming_keys, keep_flags) if not keep]
+		df_new = df.loc[new_mask].copy()
+		if not df_new.empty:
+			df_new.to_sql(table, conn, if_exists="append", index=False)
+			print(f"[CreateSqliteDB] Appended {len(df_new)} new rows into '{table}' (non-redundant)")
+		else:
+			print(f"[CreateSqliteDB] No new rows to append into '{table}' (all duplicates)")
+		if update_exclusions is not None and dup_keys:
+			now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+			for k in dup_keys:
+				update_exclusions.append({"batch_id": self.batch_id, "table_name": table, "key": str(k), "reason": "duplicate_key_in_db", "date": now_str})
+		return len(df_new)
+
+	@staticmethod
+	def _table_row_count(conn, table):
+		if not CreateSqliteDB._table_exists(conn, table):
+			return 0
+		row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+		return int(row[0]) if row else 0
 
 	def create_db(self):
-		output_dir = join(self.base_dir, self.output_dir)
-		os.makedirs(output_dir, exist_ok=True)
-
 		self._require_file(self.meta_data, "meta_data")
 		self._require_file(self.features, "features")
 		self._require_file(self.pad_aln, "pad_aln")
@@ -237,33 +400,23 @@ class CreateSqliteDB:
 		self._require_file(self.fasta_sequence_file, "fasta_sequences")
 		self._require_file(self.insertions, "insertions")
 		self._require_file(self.host_taxa_file, "host_taxa_file")
-		
-		excluded_records = []
 
-		# Load filtered sequence IDs to exclude
+		excluded_records = []
+		update_exclusions = []
 		filtered_ids = self._load_filtered_ids()
 		filtered_details = self._load_filtered_details()
 		if filtered_ids:
 			print(f"[CreateSqliteDB] Excluding {len(filtered_ids)} filtered sequences from DB")
 			for fid in filtered_ids:
 				excluded_records.append({"primary_accession": fid, "reason": filtered_details.get(fid, "alignment_filtering")})
-		
-		df_meta_data = self._read_tsv_required(
-			join(self.meta_data),
-			["primary_accession"],
-			"meta_data",
-			dtype=str,
-		)
 
-		# Track reference/master rows so they are always retained in meta_data
+		df_meta_data = self._read_tsv_required(self.meta_data, ["primary_accession"], "meta_data", dtype=str)
 		acc_type_col = "accession_type" if "accession_type" in df_meta_data.columns else None
 		if acc_type_col:
 			acc_type_norm = df_meta_data[acc_type_col].fillna("").str.strip().str.lower()
 			is_ref_or_master = acc_type_norm.isin(["reference", "master"])
 		else:
 			is_ref_or_master = pd.Series(False, index=df_meta_data.index)
-		
-		# Exclude filtered sequences from meta_data, but never remove reference/master rows
 		if filtered_ids and "primary_accession" in df_meta_data.columns:
 			before_count = len(df_meta_data)
 			remove_mask = df_meta_data["primary_accession"].isin(filtered_ids) & (~is_ref_or_master)
@@ -271,23 +424,16 @@ class CreateSqliteDB:
 			after_count = len(df_meta_data)
 			if before_count != after_count:
 				print(f"[CreateSqliteDB] Removed {before_count - after_count} filtered non-reference sequences from meta_data")
-
 		is_ref_or_master = is_ref_or_master.reindex(df_meta_data.index, fill_value=False)
-		
-		# Collect exclusions from meta_data (e.g. invalid division)
 		if "exclusion" in df_meta_data.columns:
-			# Find rows with non-empty exclusion
 			exclusion_mask = df_meta_data["exclusion"].notna() & (df_meta_data["exclusion"] != "")
 			excluded_rows = df_meta_data[exclusion_mask]
-			
 			if not excluded_rows.empty:
 				print(f"[CreateSqliteDB] Found {len(excluded_rows)} rows with exclusions in meta_data")
 				for _, row in excluded_rows.iterrows():
 					acc = row.get("primary_accession", "")
 					if acc:
 						excluded_records.append({"primary_accession": acc, "reason": row["exclusion"]})
-
-				# Remove excluded rows from main meta_data, but never remove reference/master rows
 				remove_mask = exclusion_mask & (~is_ref_or_master)
 				df_meta_data = df_meta_data[~remove_mask]
 				retained_refs = (exclusion_mask & is_ref_or_master).sum()
@@ -295,61 +441,62 @@ class CreateSqliteDB:
 					print(f"[CreateSqliteDB] Retained {retained_refs} reference/master rows despite exclusion flags")
 
 		df_meta_data = self._add_cluster_column(df_meta_data)
-		df_features = self._read_tsv_required(join(self.features), [], "features")
-		df_aln = self._read_tsv_required(join(self.pad_aln), [], "pad_aln")
+		df_features = self._read_tsv_required(self.features, [], "features")
+		df_aln = self._read_tsv_required(self.pad_aln, [], "pad_aln")
 		df_aln = self._normalize_alignment_columns(df_aln, "pad_aln")
-		df_gene = self._read_tsv_required(join(self.gene_info), [], "gene_info")
-		df_m49_country = self._read_csv_required(join(self.m49_countries), ["m49_code"], "m49_countries", dtype={'m49_code': str})
-		df_m49_interm = self._read_csv_required(join(self.m49_interm_region), [], "m49_interm_region")
-		df_m49_region = self._read_csv_required(join(self.m49_regions), [], "m49_regions")
-		df_m49_sub_region = self._read_csv_required(join(self.m49_sub_regions), [], "m49_sub_regions")
-		df_proj_setting = self._read_tsv_required(join(self.proj_settings), [], "proj_settings")
-		df_insertions = self._read_tsv_required(join(self.insertions), [], "insertions")
+		df_gene = self._read_tsv_required(self.gene_info, [], "gene_info")
+		df_m49_country = self._read_csv_required(self.m49_countries, ["m49_code"], "m49_countries", dtype={"m49_code": str})
+		df_m49_interm = self._read_csv_required(self.m49_interm_region, [], "m49_interm_region")
+		df_m49_region = self._read_csv_required(self.m49_regions, [], "m49_regions")
+		df_m49_sub_region = self._read_csv_required(self.m49_sub_regions, [], "m49_sub_regions")
+		df_proj_setting = self._read_tsv_required(self.proj_settings, [], "proj_settings")
+		df_insertions = self._read_tsv_required(self.insertions, [], "insertions")
 		df_insertions = self._ensure_primary_accession(df_insertions, "insertions", aliases=["accession", "sequence_id"])
-		df_host_taxa = self._read_tsv_required(join(self.host_taxa_file), [], "host_taxa_file", dtype=str)
+		df_host_taxa = self._read_tsv_required(self.host_taxa_file, [], "host_taxa_file", dtype=str)
 		df_fasta_sequences = self.load_fasta()
-		conn = sqlite3.connect(join(output_dir, self.db_name + ".db"))
+
+		db_path = self._db_path()
+		os.makedirs(os.path.dirname(db_path), exist_ok=True)
+		conn = sqlite3.connect(db_path)
 		cursor = conn.cursor()
-
-		df_meta_data.to_sql("meta_data", conn, if_exists="replace", index=False)
-		df_features.to_sql("features", conn, if_exists="replace", index=False)
-		df_aln.to_sql("sequence_alignment", conn, if_exists="replace", index=False)
-		df_gene.to_sql("genes", conn, if_exists="replace", index=False)
-		df_m49_country.to_sql("m49_country", conn, if_exists="replace", index=False)
-		df_m49_interm.to_sql("m49_intermediate", conn, if_exists="replace", index=False)
-		df_m49_region.to_sql("m49_regions", conn, if_exists="replace", index=False)
-		df_m49_sub_region.to_sql("m49_sub_regions", conn, if_exists="replace", index=False)
-		df_proj_setting.to_sql("project_settings", conn, if_exists="replace", index=False)
-		df_fasta_sequences.to_sql("sequences", conn, if_exists="replace", index=False)
-		df_insertions.to_sql("insertions", conn, if_exists="replace", index=False)
-		df_host_taxa.to_sql("host_taxa", conn, if_exists="replace", index=False)
-		
-		if excluded_records:
-			df_excluded = pd.DataFrame(excluded_records)
-			df_excluded = df_excluded.drop_duplicates(subset=["primary_accession"])
-			df_excluded.to_sql("excluded_accessions", conn, if_exists="replace", index=False)
-			print(f"[CreateSqliteDB] Created excluded_accessions table with {len(df_excluded)} records")
-		else:
-			cursor.execute("CREATE TABLE IF NOT EXISTS excluded_accessions (primary_accession TEXT, reason TEXT)")
-
 		cursor.execute("PRAGMA foreign_keys = ON;")
+		cursor.execute("CREATE TABLE IF NOT EXISTS trees (name TEXT, source TEXT, segment_key TEXT, segment TEXT, newick TEXT, created_at TEXT);")
+		cursor.execute("CREATE TABLE IF NOT EXISTS info (creation_type TEXT, date TEXT);")
+		cursor.execute("CREATE TABLE IF NOT EXISTS excluded_accessions (primary_accession TEXT, reason TEXT);")
+		cursor.execute("CREATE TABLE IF NOT EXISTS update_exclusions (batch_id TEXT, table_name TEXT, key TEXT, reason TEXT, date TEXT);")
+		cursor.execute("CREATE TABLE IF NOT EXISTS update_batches (batch_id TEXT PRIMARY KEY, started_at TEXT, finished_at TEXT, update_db TEXT, mode TEXT);")
+		cursor.execute("CREATE TABLE IF NOT EXISTS update_table_deltas (batch_id TEXT, table_name TEXT, before_count INTEGER, after_count INTEGER, delta INTEGER);")
 
-		cursor.execute("""CREATE TABLE IF NOT EXISTS meta_data AS SELECT * FROM meta_data;""")
-		cursor.execute("""CREATE TABLE IF NOT EXISTS features AS SELECT * FROM features;""")
-		cursor.execute("""CREATE TABLE IF NOT EXISTS sequence_alignment AS SELECT * FROM sequence_alignment;""")
-		cursor.execute("""CREATE TABLE IF NOT EXISTS genes AS SELECT * FROM genes;""")
-		cursor.execute("""CREATE TABLE IF NOT EXISTS m49_country AS SELECT * FROM m49_country;""")
-		cursor.execute("""CREATE TABLE IF NOT EXISTS m49_intermediate AS SELECT * FROM m49_intermediate;""")
-		cursor.execute("""CREATE TABLE IF NOT EXISTS m49_regions AS SELECT * FROM m49_regions;""")
-		cursor.execute("""CREATE TABLE IF NOT EXISTS m49_sub_regions AS SELECT * FROM m49_sub_regions;""")
-		cursor.execute("""CREATE TABLE IF NOT EXISTS project_settings AS SELECT * FROM project_settings;""")
-		cursor.execute("""CREATE TABLE IF NOT EXISTS sequences AS SELECT * FROM sequences;""")
-		cursor.execute("""CREATE TABLE IF NOT EXISTS insertions AS SELECT * FROM insertions;""")
-		cursor.execute("""CREATE TABLE IF NOT EXISTS host_taxa AS SELECT * FROM host_taxa;""")
-		cursor.execute("""CREATE TABLE IF NOT EXISTS excluded_accessions AS SELECT * FROM excluded_accessions;""")
-
-		cursor.execute("""CREATE TABLE IF NOT EXISTS trees (name TEXT, source TEXT, segment_key TEXT, segment TEXT, newick TEXT, created_at TEXT);""")
 		now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+		cursor.execute("INSERT OR REPLACE INTO update_batches (batch_id, started_at, finished_at, update_db, mode) VALUES (?, ?, ?, ?, ?)", (self.batch_id, now_str, None, db_path if self.update else None, "update" if self.update else "create"))
+
+		tables_for_delta = ["meta_data", "features", "sequence_alignment", "genes", "sequences", "insertions", "host_taxa"]
+		before_counts = {t: self._table_row_count(conn, t) for t in tables_for_delta}
+
+		self.merge_table_append_nonredundant(conn, df_meta_data, "meta_data", None, update_exclusions)
+		self.merge_table_append_nonredundant(conn, df_features, "features", None, update_exclusions)
+		self.merge_table_append_nonredundant(conn, df_aln, "sequence_alignment", None, update_exclusions)
+		self.merge_table_append_nonredundant(conn, df_gene, "genes", None, update_exclusions)
+		self.merge_table_append_nonredundant(conn, df_m49_country, "m49_country", ["m49_code"], update_exclusions)
+		self.merge_table_append_nonredundant(conn, df_m49_interm, "m49_intermediate", None, update_exclusions)
+		self.merge_table_append_nonredundant(conn, df_m49_region, "m49_regions", None, update_exclusions)
+		self.merge_table_append_nonredundant(conn, df_m49_sub_region, "m49_sub_regions", None, update_exclusions)
+		self.merge_table_append_nonredundant(conn, df_proj_setting, "project_settings", None, update_exclusions)
+		self.merge_table_append_nonredundant(conn, df_fasta_sequences, "sequences", ["header"], update_exclusions)
+		self.merge_table_append_nonredundant(conn, df_insertions, "insertions", None, update_exclusions)
+		self.merge_table_append_nonredundant(conn, df_host_taxa, "host_taxa", None, update_exclusions)
+
+		if excluded_records:
+			df_excluded = pd.DataFrame(excluded_records).drop_duplicates(subset=["primary_accession"])
+			if self.update and self._table_exists(conn, "excluded_accessions"):
+				df_excluded.to_sql("excluded_accessions", conn, if_exists="append", index=False)
+			else:
+				df_excluded.to_sql("excluded_accessions", conn, if_exists="replace", index=False)
+			print(f"[CreateSqliteDB] excluded_accessions now has >= {len(df_excluded)} newly added records")
+
+		if update_exclusions:
+			pd.DataFrame(update_exclusions).to_sql("update_exclusions", conn, if_exists="append", index=False)
+			print(f"[CreateSqliteDB] Logged {len(update_exclusions)} update-mode duplicate keys into update_exclusions")
 
 		accession_to_segment = {}
 		if "primary_accession" in df_meta_data.columns and "segment" in df_meta_data.columns:
@@ -360,20 +507,10 @@ class CreateSqliteDB:
 					accession_to_segment[acc] = seg
 
 		tree_records = []
-		for name, source, tree_path in [
-			("veryfasttree", "veryfasttree", self.tree_file),
-			("iqtree", "iqtree", self.iqtree_file),
-			("usher", "usher", self.usher_tree),
-		]:
+		for name, source, tree_path in [("veryfasttree", "veryfasttree", self.tree_file), ("iqtree", "iqtree", self.iqtree_file), ("usher", "usher", self.usher_tree)]:
 			newick = self._read_tree_file(tree_path)
 			if newick:
-				tree_records.append({
-					"name": name,
-					"source": source,
-					"segment_key": None,
-					"segment": None,
-					"newick": newick,
-				})
+				tree_records.append({"name": name, "source": source, "segment_key": None, "segment": None, "newick": newick})
 
 		for entry in self._load_tree_manifest(self.tree_manifest):
 			newick = self._read_tree_file(entry["path"])
@@ -384,72 +521,73 @@ class CreateSqliteDB:
 			if seg_num is None:
 				seg_num = self._segment_from_key(seg_key)
 			name = entry.get("name") or f"{entry['source']}_{seg_key or 'tree'}"
-			tree_records.append({
-				"name": name,
-				"source": entry["source"],
-				"segment_key": seg_key,
-				"segment": seg_num,
-				"newick": newick,
-			})
+			tree_records.append({"name": name, "source": entry["source"], "segment_key": seg_key, "segment": seg_num, "newick": newick})
 
-		source_priority = {"usher": 0, "iqtree": 1, "veryfasttree": 2}
-		tree_records = sorted(
-			tree_records,
-			key=lambda tr: (
-				source_priority.get(tr.get("source"), 9),
-				str(tr.get("segment") or ""),
-				str(tr.get("segment_key") or ""),
-				str(tr.get("name") or ""),
-			),
-		)
+		if tree_records:
+			df_tree = pd.DataFrame(tree_records)
+			df_tree["created_at"] = now_str
+			if not self.update:
+				df_tree.to_sql("trees", conn, if_exists="replace", index=False)
+			else:
+				existing = set()
+				if self._table_exists(conn, "trees"):
+					for s, n, sk, sg in conn.execute("SELECT source, name, segment_key, segment FROM trees"):
+						existing.add((str(s or "").strip(), str(n or "").strip(), str(sk or "").strip(), str(sg or "").strip()))
+				append_rows = []
+				for _, tr in df_tree.iterrows():
+					k = (str(tr.get("source") or "").strip(), str(tr.get("name") or "").strip(), str(tr.get("segment_key") or "").strip(), str(tr.get("segment") or "").strip())
+					if k in existing:
+						continue
+					append_rows.append(tr)
+				if append_rows:
+					pd.DataFrame(append_rows).to_sql("trees", conn, if_exists="append", index=False)
 
-		seen_tree_names = set()
-		for tr in tree_records:
-			key = (tr["source"], tr["name"])
-			if key in seen_tree_names:
-				continue
-			seen_tree_names.add(key)
-			cursor.execute(
-				"INSERT INTO trees (name, source, segment_key, segment, newick, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-				(tr["name"], tr["source"], tr["segment_key"], tr["segment"], tr["newick"], now_str),
-			)
+		creation_type = self._normalize_db_status(self.db_status if self.db_status else ("last updated" if self.update else "new db"))
+		pd.DataFrame([{"creation_type": creation_type, "date": now_str}]).to_sql("info", conn, if_exists="append", index=False)
 
-		cursor.execute("""CREATE TABLE IF NOT EXISTS info (creation_type TEXT,date TEXT);""")
-		creation_type = self._normalize_db_status(self.db_status)
-
-		info_df = pd.DataFrame([{"creation_type": creation_type, "date": now_str}])
-		info_df.to_sql("info", conn, if_exists="append", index=False)
+		after_counts = {t: self._table_row_count(conn, t) for t in tables_for_delta}
+		deltas = []
+		for table_name in tables_for_delta:
+			before = before_counts.get(table_name, 0)
+			after = after_counts.get(table_name, 0)
+			deltas.append({"batch_id": self.batch_id, "table_name": table_name, "before_count": int(before), "after_count": int(after), "delta": int(after - before)})
+		pd.DataFrame(deltas).to_sql("update_table_deltas", conn, if_exists="append", index=False)
+		cursor.execute("UPDATE update_batches SET finished_at=? WHERE batch_id=?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), self.batch_id))
 
 		conn.commit()
 		conn.close()
 
+
 def process(args):
 	db_creator = CreateSqliteDB(
-			args.meta_data,
-			args.features,
-			args.pad_aln,
-			args.gene_info,
-			args.m49_countries,
-			args.m49_interm_region,
-			args.m49_regions,
-			args.m49_sub_regions,
-			args.proj_settings,
-			args.fasta_sequences,
-			args.insertion_file,
-			args.host_taxa_file,
-			args.base_dir,
-			args.output_dir,
-			args.db_name,
-			args.db_status,
-			args.tree_file,
-			args.iqtree_file,
-			args.usher_tree,
-			args.cluster_tsv,
-			args.cluster_min_seq_id,
-			args.filtered_ids,
-			args.filtered_details,
-			args.tree_manifest,
-		)
+		args.meta_data,
+		args.features,
+		args.pad_aln,
+		args.gene_info,
+		args.m49_countries,
+		args.m49_interm_region,
+		args.m49_regions,
+		args.m49_sub_regions,
+		args.proj_settings,
+		args.fasta_sequences,
+		args.insertion_file,
+		args.host_taxa_file,
+		args.base_dir,
+		args.output_dir,
+		args.db_name,
+		args.db_status,
+		args.tree_file,
+		args.iqtree_file,
+		args.usher_tree,
+		args.cluster_tsv,
+		args.cluster_min_seq_id,
+		args.filtered_ids,
+		args.filtered_details,
+		args.tree_manifest,
+		update=args.update,
+		update_db=args.update_db,
+		batch_id=args.batch_id,
+	)
 	db_creator.create_db()
 
 
@@ -459,7 +597,6 @@ if __name__ == "__main__":
 	parser.add_argument('-b', '--base_dir', help='Base directory', default="tmp")
 	parser.add_argument('-o', '--output_dir', help='tmp directory where the database is stored', default="SqliteDB")
 	parser.add_argument('-rf', '--features', help='Features table', default="tmp/Tables/features.tsv")
-	#parser.add_argument('-qf', '--query_features', help='Query feature table', default="tmp/Tables/query_features.tsv")
 	parser.add_argument('-p', '--pad_aln', help='Padded alignment file', default="tmp/Tables/sequence_alignment.tsv")
 	parser.add_argument('-g', '--gene_info', help='Gene table', default="generic/rabv/Tables/gene_info.csv")
 	parser.add_argument('-mc', '--m49_countries', help='M49 countries', default="assets/m49_country.csv")
@@ -471,7 +608,7 @@ if __name__ == "__main__":
 	parser.add_argument('-i', '--insertion_file', help='Nextalign insertion file', default="tmp/Tables/insertions.tsv")
 	parser.add_argument('-ht', '--host_taxa_file', help='Host Taxanomy file', default="tmp/HostTaxa/Host_taxa.tsv")
 	parser.add_argument('-d', '--db_name', help='Name of the Sqlite database', default="gdb")
-	parser.add_argument('-ds', '--db_status', help='Database status: "new db" (default) or "last modified"/"last updated". Determines info.creation_type.',default="new db")
+	parser.add_argument('-ds', '--db_status', help='Database status: "new db" (default) or "last modified"/"last updated". Determines info.creation_type.', default="new db")
 	parser.add_argument('-t', '--tree_file', help='VeryFastTree Newick file', default=None)
 	parser.add_argument('-it', '--iqtree_file', help='IQ-TREE Newick file', default=None)
 	parser.add_argument('-ut', '--usher_tree', help='UShER output Newick file', default=None)
@@ -480,11 +617,14 @@ if __name__ == "__main__":
 	parser.add_argument('-ci', '--cluster_min_seq_id', help='MMseqs min sequence identity used for clustering', default=None)
 	parser.add_argument('-fi', '--filtered_ids', help='File with filtered sequence IDs (one per line) to exclude from DB', default=None)
 	parser.add_argument('-fd', '--filtered_details', help='TSV with filtered sequence details (seq_name, reference, error, warnings)', default=None)
-
+	parser.add_argument('--update', action='store_true', help='Append/update into an existing DB instead of replacing tables')
+	parser.add_argument('--update_db', default=None, help='Path to existing DB file for update mode')
+	parser.add_argument('--batch_id', default=None, help='Optional update batch identifier for audit logging')
 	args = parser.parse_args()
+	if args.update_db:
+		args.update_db = normpath(args.update_db)
 	try:
 		process(args)
 	except Exception as exc:
 		print(f"ERROR: {exc}", file=sys.stderr)
 		sys.exit(2)
-

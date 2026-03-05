@@ -113,11 +113,27 @@ class GenerateTables:
 			acc_dict[query] = ref
 		return acc_dict
 
-	def created_alignment_table(self, blast_dict):
+	def load_segment_map(self):
+		segment_map = {}
+		if not self.genbank_matrix or not os.path.isfile(self.genbank_matrix):
+			return segment_map
+		with open(self.genbank_matrix, newline='') as handle:
+			reader = csv.DictReader(handle, delimiter='\t')
+			if not reader.fieldnames or 'primary_accession' not in reader.fieldnames or 'segment' not in reader.fieldnames:
+				return segment_map
+			for row in reader:
+				acc = (row.get('primary_accession') or '').strip()
+				seg = (row.get('segment') or '').strip()
+				if acc:
+					segment_map[acc] = seg
+		return segment_map
+
+	def created_alignment_table(self, blast_dict, segment_map=None):
+		segment_map = segment_map or {}
 		accessions = {}
 		missing_accs = []
 		seqs = {}
-		header = ["primary_accession", "alignment_name", "alignment"]
+		header = ["primary_accession", "alignment_name", "alignment", "segment"]
 		write_file = open(join(self.base_dir, self.output_dir, "sequence_alignment.tsv"), 'w')
 		write_file.write("\t".join(header) + "\n")
 		
@@ -134,8 +150,9 @@ class GenerateTables:
 				if rows[0] not in accessions:
 					seqs[rows[0]] = rows[1]
 					accessions[rows[0]] = 1
+					seg = segment_map.get(rows[0].strip(), "")
 					if rows[0] in blast_dict:
-						write_file.write(rows[0].strip() + '\t' + blast_dict[rows[0].strip()] + '\t' + rows[1] + '\n')
+						write_file.write(rows[0].strip() + '\t' + blast_dict[rows[0].strip()] + '\t' + rows[1] + '\t' + seg + '\n')
 					else:
 						missing_accs.append(rows[0].strip())
 
@@ -144,7 +161,8 @@ class GenerateTables:
 				rds = read_file.fasta(join(self.nextalign_dir, each_ref_aln, each_ref_aln_file, each_ref_aln_file + ".aligned.fasta"))
 				for rows in rds:
 					if rows[0].strip() in missing_accs:
-						write_file.write(rows[0].strip() + '\t' + each_ref_aln_file + '\t' + seqs[rows[0]] + '\n')
+						seg = segment_map.get(rows[0].strip(), "")
+						write_file.write(rows[0].strip() + '\t' + each_ref_aln_file + '\t' + seqs[rows[0]] + '\t' + seg + '\n')
 						accessions[rows[0].strip()] = 1
 
 			
@@ -157,10 +175,20 @@ class GenerateTables:
 		lines_to_write = []
 
 		with open(file_path, "r") as infile:
+			header = infile.readline()
+			if header:
+				lines_to_write.append(header)
+				cols = header.strip().split(delimiter)
+				segment_idx = cols.index("segment") if "segment" in cols else None
+			else:
+				segment_idx = None
 			for line in infile:
 				if not line.strip():
 					continue  # skip empty lines
-				key = line.strip().split(delimiter)[0]
+				parts = line.strip().split(delimiter)
+				acc = parts[0] if len(parts) > 0 else ""
+				seg = parts[segment_idx] if segment_idx is not None and segment_idx < len(parts) else ""
+				key = (acc, seg)
 				if key not in seen:
 					seen.add(key)
 					lines_to_write.append(line)
@@ -169,9 +197,10 @@ class GenerateTables:
 			outfile.writelines(lines_to_write)
 		print(f"Redundancy removed. File updated: {file_path}")
 
-	def create_insertion_table(self):
+	def create_insertion_table(self, segment_map=None):
+		segment_map = segment_map or {}
 		write_file = open(join(self.base_dir, self.output_dir, "insertions.tsv"), 'w')
-		header = ["primary_accession", "reference", "insertion"]
+		header = ["primary_accession", "reference", "insertion", "segment"]
 		write_file.write("\t".join(header) + "\n")
 		for aln_dir in os.listdir(self.nextalign_dir):
 			for each_aln_dir in os.listdir(join(self.nextalign_dir, aln_dir)):
@@ -179,7 +208,7 @@ class GenerateTables:
 					for each_line in islice(f, 1, None):
 						accession, insertion, aa_insertion = each_line.strip().split(",")
 						if len(insertion) > 0:
-							data = [accession, each_aln_dir, insertion]
+							data = [accession, each_aln_dir, insertion, segment_map.get(accession, "")]
 							write_file.write("\t".join(data) + "\n")
 
 		write_file.close()
@@ -187,10 +216,11 @@ class GenerateTables:
 	def process(self):
 		
 		blast_dictionary = self.load_blast_hits(self.blast_hits)
+		segment_map = self.load_segment_map()
 		#self.load_gb_matrix()
-		self.created_alignment_table(blast_dictionary)
+		self.created_alignment_table(blast_dictionary, segment_map)
 		self.host_table()
-		self.create_insertion_table()
+		self.create_insertion_table(segment_map)
 
 if __name__ == "__main__":
 	parser = ArgumentParser(description='Generating tables sqlite DB')

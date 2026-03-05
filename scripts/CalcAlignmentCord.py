@@ -1,5 +1,6 @@
 import os
 import sys
+import sqlite3
 import pandas as pd
 from Bio import SeqIO
 from os.path import join
@@ -9,7 +10,7 @@ from CalcGenomeCords import CalculateGenomeCoordinates
 
 class CalculateAlignmentCoordinates:
 
-	def __init__(self, paded_alignment, master_gff, tmp_dir, output_dir, output_file, master_accession, blast_uniq_hits):
+	def __init__(self, paded_alignment, master_gff, tmp_dir, output_dir, output_file, master_accession, blast_uniq_hits, update_db=None, update_scope_tsv=None, segment_map_tsv=None):
 		self.paded_alignment = paded_alignment
 		self.master_gff = master_gff
 		self.tmp_dir = tmp_dir
@@ -17,6 +18,44 @@ class CalculateAlignmentCoordinates:
 		self.output_file = output_file
 		self.master_accession = master_accession
 		self.blast_uniq_hits = blast_uniq_hits
+		self.update_db = update_db
+		self.update_scope_tsv = update_scope_tsv
+		self.segment_map_tsv = segment_map_tsv
+
+	def load_existing_feature_accessions(self):
+		if not self.update_db:
+			return set()
+		if not os.path.isfile(self.update_db):
+			raise FileNotFoundError(f"Update DB not found: {self.update_db}")
+		conn = sqlite3.connect(self.update_db)
+		try:
+			row = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='features'").fetchone()
+			if row is None:
+				return set()
+			df = pd.read_sql_query("SELECT accession FROM features WHERE accession IS NOT NULL", conn)
+			if "accession" not in df.columns:
+				return set()
+			return set(df["accession"].astype(str).str.strip().tolist())
+		finally:
+			conn.close()
+
+	def load_update_scope_accessions(self):
+		if not self.update_scope_tsv or not os.path.isfile(self.update_scope_tsv):
+			return set()
+		df = pd.read_csv(self.update_scope_tsv, sep='\t', dtype=str)
+		if 'primary_accession' not in df.columns:
+			return set()
+		return set(df['primary_accession'].fillna('').astype(str).str.strip().tolist())
+
+	def load_segment_map(self):
+		if not self.segment_map_tsv or not os.path.isfile(self.segment_map_tsv):
+			return {}
+		df = pd.read_csv(self.segment_map_tsv, sep='\t', dtype=str)
+		if 'primary_accession' not in df.columns or 'segment' not in df.columns:
+			return {}
+		df['primary_accession'] = df['primary_accession'].fillna('').astype(str).str.strip()
+		df['segment'] = df['segment'].fillna('').astype(str).str.strip()
+		return dict(zip(df['primary_accession'], df['segment']))
 
 	def get_master_list(self):
 		if os.path.isfile(self.master_accession):
@@ -127,6 +166,9 @@ class CalculateAlignmentCoordinates:
 
 	def find_gaps_in_fasta(self): #, fasta_file_dir, gff_file):
 		os.makedirs(join(self.tmp_dir, self.output_dir), exist_ok=True)
+		existing_feature_accessions = self.load_existing_feature_accessions()
+		update_scope_accessions = self.load_update_scope_accessions()
+		segment_map = self.load_segment_map()
 
 		fasta_file_dir = self.paded_alignment
 		if not fasta_file_dir or not os.path.isdir(fasta_file_dir):
@@ -141,6 +183,8 @@ class CalculateAlignmentCoordinates:
 			raise ValueError("No master accession could be resolved from --master_accession")
 
 		header = ["accession", "master_ref_accession", "reference_accession", "aln_start", "aln_end", "cds_start", "cds_end", "product"]
+		if segment_map:
+			header.append("segment")
 		with open(join(self.tmp_dir, self.output_dir, self.output_file), "w") as out_f:
 
 			out_f.write("\t".join(header))
@@ -173,6 +217,11 @@ class CalculateAlignmentCoordinates:
 				calc = CalculateGenomeCoordinates(join(fasta_file_dir, fasta_file), current_master)
 				genome_coords = calc.extract_alignment_coordinates()
 				for record in SeqIO.parse(join(fasta_file_dir, fasta_file), "fasta"):
+					record_id = str(record.id).strip()
+					if update_scope_accessions and record_id not in update_scope_accessions:
+						continue
+					if existing_feature_accessions and record.id in existing_feature_accessions:
+						continue
 
 					sequence = str(record.seq)
 					gaps = self.get_gap_ranges(sequence)
@@ -196,12 +245,26 @@ class CalculateAlignmentCoordinates:
 							genome_cord_start, genome_cord_end = "NA", "NA"
 
 						for overlap_product in product:
+							reference_acc = blast_dict[record.id] if record.id in blast_dict else current_master
+							if segment_map:
+								record_segment = segment_map.get(record.id, "")
+								master_segment = segment_map.get(current_master, record_segment)
+								ref_segment = segment_map.get(reference_acc, record_segment)
+								if record_segment and master_segment and record_segment != master_segment:
+									raise ValueError(f"Segment mismatch for {record.id}: record={record_segment}, master={master_segment}")
+								if record_segment and ref_segment and record_segment != ref_segment:
+									raise ValueError(f"Segment mismatch for {record.id}: record={record_segment}, ref={ref_segment}")
+
 							if record.id in blast_dict:
 								data = [record.id, current_master, blast_dict[record.id], str(genome_cord_start), str(genome_cord_end), str(each_cords[0]), str(each_cords[1]), overlap_product['product']]
+								if segment_map:
+									data.append(segment_map.get(record.id, ""))
 								out_f.write('\t'.join(data))
 								out_f.write("\n")
 							else:
 								data = [record.id, current_master, current_master, str(genome_cord_start), str(genome_cord_end), str(each_cords[0]), str(each_cords[1]), overlap_product['product']]
+								if segment_map:
+									data.append(segment_map.get(record.id, ""))
 								out_f.write('\t'.join(data))	
 								out_f.write("\n")				
 if __name__ == "__main__":
@@ -213,9 +276,12 @@ if __name__ == "__main__":
 	parser.add_argument('-m', '--master_accession', help='Master accession', required=True)
 	parser.add_argument('-bh', '--blast_uniq_hits', help='Blast unique hits file', default='tmp/Blast/query_uniq_tophits.tsv')
 	parser.add_argument('-g', '--master_gff', help='Master GFF3 file(s)', required=True, nargs='+')
+	parser.add_argument('--update_db', help='Existing DB path; when set, only emit feature rows for accessions not already in DB features table', default=None)
+	parser.add_argument('--update_scope_tsv', help='TSV with primary_accession column; when set, only recalculate coordinates for these accessions', default=None)
+	parser.add_argument('--segment_map_tsv', help='TSV with primary_accession and segment columns for segment-consistency checks', default=None)
 	args = parser.parse_args()
 
-	processor = CalculateAlignmentCoordinates(args.paded_alignment, args.master_gff, args.tmp_dir, args.output_dir, args.output_file, args.master_accession, args.blast_uniq_hits)
+	processor = CalculateAlignmentCoordinates(args.paded_alignment, args.master_gff, args.tmp_dir, args.output_dir, args.output_file, args.master_accession, args.blast_uniq_hits, args.update_db, args.update_scope_tsv, args.segment_map_tsv)
 	try:
 		processor.find_gaps_in_fasta()
 	except Exception as exc:

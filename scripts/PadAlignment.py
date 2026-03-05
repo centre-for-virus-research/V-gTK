@@ -8,13 +8,16 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 
 class PadAlignment:
-	def __init__(self, reference_alignment, input_dir, base_dir, output_dir, keep_intermediate_files, new_outputfile=False):
+	def __init__(self, reference_alignment, input_dir, base_dir, output_dir, keep_intermediate_files, new_outputfile=False, segment_manifest_out=None, strict_segment_backbone=False):
 		self.reference_alignment = reference_alignment
 		self.input_dir = input_dir
 		self.base_dir = base_dir
 		self.output_dir = output_dir
 		self.keep_intermediate_files = keep_intermediate_files
 		self.new_outputfile = new_outputfile
+		self.segment_manifest_out = segment_manifest_out
+		self.strict_segment_backbone = strict_segment_backbone
+		self.segment_manifest_rows = []
 
 	def get_master_list(self, master_acc):
 		if os.path.isfile(master_acc):
@@ -106,8 +109,8 @@ class PadAlignment:
 	def process_all_masters(self, master_list, nextalign_dir, master_segment_map=None, precomputed_ref_dir=None):
 		for master in master_list:
 			ref_aln_file = None
+			segment_val = (master_segment_map or {}).get(master)
 			if precomputed_ref_dir and os.path.isdir(precomputed_ref_dir):
-				segment_val = (master_segment_map or {}).get(master)
 				precomputed_ref = self.find_precomputed_reference_alignment(precomputed_ref_dir, segment_val)
 				if precomputed_ref:
 					ref_aln_file = precomputed_ref
@@ -120,15 +123,19 @@ class PadAlignment:
 						f"[warn] No precomputed segment alignment found for master {master} "
 						f"(segment {segment_val}). Falling back to nextalign reference output."
 					)
+					if self.strict_segment_backbone:
+						raise ValueError(f"Missing DB/precomputed backbone for segment {segment_val} (master {master}) in strict update mode")
 
 			if not ref_aln_file:
 				ref_aln_file = join(nextalign_dir, "reference_aln", master, f"{master}.aligned.fasta")
 
 			if os.path.exists(ref_aln_file):
 				print(f"Processing master {master}...")
-				self.process_master_alignment(ref_aln_file, self.input_dir, self.base_dir, self.output_dir, self.keep_intermediate_files)
+				self.process_master_alignment(ref_aln_file, self.input_dir, self.base_dir, self.output_dir, self.keep_intermediate_files, segment_val)
 			else:
 				print(f"Reference alignment for {master} not found at {ref_aln_file}")
+				if self.strict_segment_backbone:
+					raise FileNotFoundError(f"Reference alignment missing for master {master} segment {segment_val}: {ref_aln_file}")
 
 	def insert_gaps(self, reference_aligned, subalignment_seqs):
 		ref_with_gaps_list = list(reference_aligned)
@@ -188,7 +195,7 @@ class PadAlignment:
 
 		return orphans
 
-	def process_master_alignment(self, reference_alignment_file, input_dir, base_dir, output_dir, keep_intermediate_files=False):
+	def process_master_alignment(self, reference_alignment_file, input_dir, base_dir, output_dir, keep_intermediate_files=False, segment_value=None):
 		master_alignment = SeqIO.to_dict(SeqIO.parse(reference_alignment_file, "fasta"))
 		merged_sequences = []
 		for ref_id, ref_record in master_alignment.items():
@@ -228,6 +235,12 @@ class PadAlignment:
 			with open(merged_output_file, "w") as merged_output_handle:
 				SeqIO.write(merged_sequences, merged_output_handle, "fasta")
 				print(f"Saved merged alignment to {merged_output_file}")
+			for rec in merged_sequences:
+				self.segment_manifest_rows.append({
+					"accession": rec.id,
+					"segment": self._normalize_segment(segment_value) or "0",
+					"output_file": merged_output_file,
+				})
 		else:
 			print(f"No sequences found for {reference_alignment_file}, skipping merged file creation.")
 
@@ -290,10 +303,12 @@ if __name__ == "__main__":
 	parser.add_argument("-m", "--master_acc", help="Path to ref_list file (TSV with columns: accession, type, segment) OR comma-separated master accession IDs. For segmented viruses, the script extracts all 'master' entries to process each segment separately.")
 	parser.add_argument("-nd", "--nextalign_dir", help="Path to Nextalign output directory containing reference_aln/ and query_aln/ subdirectories.")
 	parser.add_argument("--precomputed_ref_dir", default=None, help="Optional directory containing precomputed segment alignments (e.g. refset_<segment>_aln.fasta). If absent or unmatched, falls back to nextalign reference_aln outputs.")
+	parser.add_argument("--segment_manifest_out", default=None, help="Optional TSV path for accession-to-segment-to-output mapping")
+	parser.add_argument("--strict_segment_backbone", action="store_true", help="Fail if segment-specific precomputed backbone is missing")
  
 	args = parser.parse_args()
 
-	processor = PadAlignment(args.reference_alignment, args.input_dir, args.base_dir, args.output_dir, args.keep_intermediate_files, args.new_outputfile)
+	processor = PadAlignment(args.reference_alignment, args.input_dir, args.base_dir, args.output_dir, args.keep_intermediate_files, args.new_outputfile, args.segment_manifest_out, args.strict_segment_backbone)
 
 	if args.master_acc and args.nextalign_dir:
 		masters = processor.get_master_list(args.master_acc)
@@ -316,6 +331,13 @@ if __name__ == "__main__":
 		print("Error: Either -r (reference alignment) or both -m (master acc) and -nd (nextalign dir) must be provided.")
 
 	processor.remove_redundant_sequences()
+
+	if args.segment_manifest_out:
+		manifest_dir = os.path.dirname(args.segment_manifest_out)
+		if manifest_dir:
+			os.makedirs(manifest_dir, exist_ok=True)
+		df_manifest = pd.DataFrame(processor.segment_manifest_rows).drop_duplicates()
+		df_manifest.to_csv(args.segment_manifest_out, sep='\t', index=False)
 
 # -----------------------------------------------------------------------------
 # UPDATE-MODE PLAN FOR PADALIGNMENT (COMMENT ONLY)

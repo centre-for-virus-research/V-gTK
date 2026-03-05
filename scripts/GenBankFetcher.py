@@ -189,7 +189,7 @@ class GenBankFetcher:
 			ids = random.sample(ids, k=min(50, len(ids)))
 			batch_n=10
 
-		if self.ref_list:
+		if self.ref_list and not self.update_file:
 			try:
 				ref_list = []
 				with open(self.ref_list, 'r') as f:
@@ -344,6 +344,21 @@ class GenBankFetcher:
 		print("first 10 values in DB:", meta_accessions[:10])
 		return meta_accessions, excluded_primary
 
+	def _load_ref_accessions(self):
+		if not self.ref_list or not os.path.exists(self.ref_list):
+			return []
+		refs = []
+		with open(self.ref_list, "r", encoding="utf-8") as handle:
+			for line in handle:
+				parts = line.strip().split("\t")
+				if len(parts) < 2:
+					continue
+				acc = parts[0].strip()
+				typ = parts[1].strip().lower()
+				if acc and typ in {"master", "reference"}:
+					refs.append(acc)
+		return sorted(set(refs))
+
 	def _write_update_log(self, updated_versions, new_accessions):
 		if not self.update_log:
 			return
@@ -419,6 +434,18 @@ class GenBankFetcher:
 		print("first 10 IDs in NCBI:", ids[:10])
 
 		missing_ids, updated_versions, new_accessions = self._compute_missing_ids(ids, meta_accessions, excluded_primary)
+
+		# References are handled deterministically in update mode: only fetch when missing in DB context.
+		local_primary = set()
+		for acc_ver in meta_accessions:
+			base, _ = self._split_accession_version(acc_ver)
+			if base:
+				local_primary.add(base)
+		ref_candidates = [r for r in self._load_ref_accessions() if r not in local_primary and r not in excluded_primary]
+		if ref_candidates:
+			print(f"[update] Adding {len(ref_candidates)} missing reference/master accessions from ref_list")
+			missing_ids.extend(ref_candidates)
+			missing_ids = sorted(set(missing_ids))
 
 		if updated_versions:
 			print('Updated accessions found (old -> new):')

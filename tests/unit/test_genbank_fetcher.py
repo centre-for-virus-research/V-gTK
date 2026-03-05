@@ -487,3 +487,36 @@ def test_download_test_run_fallbacks_to_empty_ids_on_error(tmp_path: Path, monke
     fetcher.download()
 
     assert captured["ids"] == []
+
+
+def test_update_adds_only_missing_refs_from_ref_list(tmp_path: Path, monkeypatch):
+    db_path = tmp_path / "prev_refs.db"
+    _write_db(
+        db_path,
+        meta_col="accession_version",
+        meta_values=["REF1.1", "Q1.1"],
+        excluded_values=[],
+    )
+
+    ref_file = tmp_path / "refs.tsv"
+    ref_file.write_text("REF1\tmaster\nREF2\treference\n", encoding="utf-8")
+
+    fetcher = GenBankFetcher(
+        taxid="11292",
+        base_url="https://example/",
+        email="x@y.com",
+        output_dir=str(tmp_path),
+        batch_size=100,
+        sleep_time=0,
+        base_dir="GenBank-XML",
+        update_file=str(db_path),
+        ref_list=str(ref_file),
+    )
+
+    monkeypatch.setattr(fetcher, "fetch_accs", lambda: ["Q1.1"])
+    captured = {}
+    monkeypatch.setattr(fetcher, "fetch_genbank_data", lambda ids: captured.setdefault("ids", ids))
+
+    fetcher.update(str(db_path))
+
+    assert captured["ids"] == ["REF2"]

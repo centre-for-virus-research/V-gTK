@@ -30,7 +30,7 @@ def SEGMENT_PARALLEL_THREADS = Math.max(1, (int)Math.floor(MAX_THREADS / 8))
 def scriptDefinedParams = [
     'tax_id', 'db_name', 'is_segmented', 'extra_info_fill', 'test',
     "scripts_dir", "publish_dir", "email", "ref_list", "bulk_fillup_table", "is_flu", "gene_info",
-    "xml_dir", "update", "update_file",
+    "xml_dir", "update", "update_file", "update_db",
     "mmseqs_min_seq_id", "mmseqs_threads", "mmseqs_trim_cds_file",
     "gisaid_dir", "previous_db", "conda_path", "test_max_cluster_seqs", "max_threads", "ref_set_aligned"
     // Add all parameter names defined above
@@ -49,9 +49,12 @@ def knownNextflowParams = [
 // 3. Combine allowed parameters
 def allowedParams = (scriptDefinedParams + knownNextflowParams).unique()
 
-// Backward-compatible alias: update_file -> update
-if( params.update_file && !params.update ){
-    params.update = params.update_file
+// Backward-compatible aliases: update_file/update -> update_db
+if( params.update_file && !params.update_db ){
+    params.update_db = params.update_file
+}
+if( params.update && !params.update_db ){
+    params.update_db = params.update
 }
 
 // Normalize optional params used as `val` process inputs
@@ -218,6 +221,40 @@ process VALIDATE_REF_LIST{
 
     '''
 }
+
+process VALIDATE_REF_LIST_DB {
+    when:
+        params.update_db
+    input:
+        path ref_list
+        path update_db
+    output:
+        path "ref_list_db_validated.txt"
+    shell:
+    '''
+    python !{scripts_dir}/ValidateRefListAgainstDb.py --ref_list !{ref_list} --db !{update_db}
+    echo "ok" > ref_list_db_validated.txt
+    '''
+}
+
+process EXPORT_UPDATE_ASSETS {
+    when:
+        params.update_db
+    input:
+        path update_db
+    output:
+        path "UpdateAssets", emit: update_assets
+        path "UpdateAssets/ref_list_from_db.tsv", emit: ref_list_from_db
+        path "UpdateAssets/ref_backbones", emit: ref_backbones
+        path "UpdateAssets/tree_manifest.tsv", emit: tree_manifest
+        path "UpdateAssets/existing_ids", emit: existing_ids
+    shell:
+    '''
+    mkdir -p UpdateAssets
+    python !{scripts_dir}/ExportUpdateAssets.py --db !{update_db} --output_dir UpdateAssets
+    '''
+}
+
 process FETCH_GENBANK{
     publishDir "${params.publish_dir}"
     input:
@@ -233,8 +270,8 @@ process FETCH_GENBANK{
         extra="${extra} --test_run --ref_list !{ref_list}"
     fi
 
-    if [ "!{params.update}" != "null" ] && [ -n "!{params.update}" ]; then
-        extra="${extra} --update !{params.update}"
+    if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
+        extra="${extra} --update !{params.update_db}"
     fi
 
     python !{scripts_dir}/GenBankFetcher.py --taxid !{TAX_ID} -b 50 \
@@ -285,6 +322,10 @@ process GENBANK_PARSER{
             if [ "!{params.test}" -eq "1" ]; then
                 extra="${extra} --test_run"
             fi
+        fi
+
+        if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
+            extra="${extra} --update !{params.update_db}"
         fi
         
         echo "DEBUG: Final extra args: ${extra}"
@@ -463,14 +504,19 @@ process PAD_ALIGNMENT{
         fi
 
         PRECOMP_ARGS=""
+        UPDATE_PAD_ARGS=""
         if [ -n "!{ref_set_aligned_dir}" ] && [ "!{ref_set_aligned_dir}" != "null" ] && [ "!{ref_set_aligned_dir}" != "UNSET" ] && [ -d "!{ref_set_aligned_dir}" ]; then
             PRECOMP_ARGS="--precomputed_ref_dir !{ref_set_aligned_dir}"
             echo "Using precomputed segment alignments from !{ref_set_aligned_dir}"
         fi
 
+        if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
+            UPDATE_PAD_ARGS="--strict_segment_backbone --segment_manifest_out pad_alignment_manifest.tsv"
+        fi
+
         python !{scripts_dir}/PadAlignment.py -nd !{nextalign_dir} \
         -m "$TARGET_M" \
-        -o . -d . -i !{nextalign_dir}/query_aln --keep_intermediate_files ${PRECOMP_ARGS}
+        -o . -d . -i !{nextalign_dir}/query_aln --keep_intermediate_files ${PRECOMP_ARGS} ${UPDATE_PAD_ARGS}
     '''
 }
 
@@ -704,11 +750,68 @@ process USHER_PLACEMENT{
     '''
 }
 
+process USHER_UPDATE_PLACEMENT {
+    publishDir "${params.publish_dir}"
+    cpus { params.is_segmented == 'Y' ? SEGMENT_PARALLEL_THREADS : MAX_THREADS }
+    input:
+        tuple path(padded_aln), path(tree_manifest), path(existing_ids_dir)
+    output:
+        path "UsherUpdate_${padded_aln.baseName}", emit: usher_out
+    shell:
+    '''
+        SEG_NUM=$(basename "!{padded_aln}" | sed -E "s/_dedup\\.fasta$//" | grep -oE "[0-9]+" | head -n 1)
+        if [ -z "$SEG_NUM" ]; then
+            SEG_NUM="0"
+        fi
+
+        TREE_FILE=$(awk -F "\t" -v seg="$SEG_NUM" "NR>1 && \$1==seg {print \$3; exit}" !{tree_manifest})
+        if [ -z "$TREE_FILE" ] || [ ! -f "$TREE_FILE" ]; then
+            echo "[error] Missing tree for segment ${SEG_NUM} in !{tree_manifest}" >&2
+            exit 1
+        fi
+
+        EXISTING_IDS_FILE="!{existing_ids_dir}/segment_${SEG_NUM}_ids.txt"
+        if [ ! -f "$EXISTING_IDS_FILE" ]; then
+            EXISTING_IDS_FILE=""
+        fi
+
+        REF_ID=$(seqkit seq -n "!{padded_aln}" | head -n 1)
+        if [ -z "$REF_ID" ]; then
+            echo "[error] Could not resolve reference ID from !{padded_aln}" >&2
+            exit 1
+        fi
+
+        mkdir -p UsherUpdate_!{padded_aln.baseName}
+        if [ -n "$EXISTING_IDS_FILE" ]; then
+            faToVcf -ref="$REF_ID" -excludeFile="$EXISTING_IDS_FILE" "!{padded_aln}" UsherUpdate_!{padded_aln.baseName}/all_samples.vcf
+        else
+            faToVcf -ref="$REF_ID" "!{padded_aln}" UsherUpdate_!{padded_aln.baseName}/all_samples.vcf
+        fi
+
+        if usher --help 2>&1 | grep -q -- " -T "; then
+            usher \
+                -v UsherUpdate_!{padded_aln.baseName}/all_samples.vcf \
+                -t "$TREE_FILE" \
+                -d UsherUpdate_!{padded_aln.baseName} \
+                -o UsherUpdate_!{padded_aln.baseName}/usher.pb \
+                -C -u -T !{task.cpus}
+        else
+            usher \
+                -v UsherUpdate_!{padded_aln.baseName}/all_samples.vcf \
+                -t "$TREE_FILE" \
+                -d UsherUpdate_!{padded_aln.baseName} \
+                -o UsherUpdate_!{padded_aln.baseName}/usher.pb \
+                -C -u
+        fi
+    '''
+}
+
 process CALC_ALIGNMENT_CORD {
     input:
         path padded_fasta
         path gff_file
         path blast_hits
+        path update_scope_tsv
         val master_acc_str
         path master_file_opt
     output:
@@ -723,10 +826,15 @@ process CALC_ALIGNMENT_CORD {
     # CalcAlignmentCord expects a directory for -i
     mkdir padded_alignments
     cp !{padded_fasta} padded_alignments/
+
+    EXTRA_CALC_ARGS=""
+    if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
+        EXTRA_CALC_ARGS="--update_db !{params.update_db} --update_scope_tsv !{update_scope_tsv} --segment_map_tsv !{update_scope_tsv}"
+    fi
     
     python !{scripts_dir}/CalcAlignmentCord.py -i padded_alignments \
     -m "$TARGET_M" -g !{gff_file} -bh !{blast_hits} \
-    -b . -d . -o features.tsv
+    -b . -d . -o features.tsv ${EXTRA_CALC_ARGS}
     '''
 }
 
@@ -806,6 +914,10 @@ process CREATE_SQLITE_DB {
     TREE_MANIFEST="tree_manifest.tsv"
     printf "source\tname\tsegment_key\tpath\n" > "$TREE_MANIFEST"
 
+    if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ] && [ -f "UpdateAssets/tree_manifest.tsv" ]; then
+        awk -F '\t' 'NR>1 {printf "%s\t%s_%s\t%s\t%s\n", $2, $2, $1, $1, $3}' UpdateAssets/tree_manifest.tsv >> "$TREE_MANIFEST"
+    fi
+
     for d in IQTree_MMseqClusters_*; do
         [ -d "$d" ] || continue
         tf=$(find -L "$d" -name "*.treefile" -print -quit || true)
@@ -823,6 +935,17 @@ process CREATE_SQLITE_DB {
         [ -n "$tf" ] || continue
         seg_key=$(basename "$d" | sed -E 's/^Usher_MMseqClusters_//' | sed -E 's/_dedup.*$//' | cut -d'.' -f1)
         printf "usher\tusher_%s\t%s\t%s\n" "$seg_key" "$seg_key" "$tf" >> "$TREE_MANIFEST"
+    done
+
+    for d in UsherUpdate_*; do
+        [ -d "$d" ] || continue
+        tf=$(find -L "$d" -name "final-tree.nh" -print -quit || true)
+        if [ -z "$tf" ]; then
+            tf=$(find -L "$d" -name "uncondensed-final-tree.nh" -print -quit || true)
+        fi
+        [ -n "$tf" ] || continue
+        seg_key=$(basename "$d" | sed -E 's/^UsherUpdate_//' | sed -E 's/_dedup.*$//' | cut -d'.' -f1)
+        printf "usher\tusher_update_%s\t%s\t%s\n" "$seg_key" "$seg_key" "$tf" >> "$TREE_MANIFEST"
     done
 
     TREE_MANIFEST_ARG=""
@@ -853,6 +976,11 @@ process CREATE_SQLITE_DB {
         FILTERED_DETAILS_ARG="-fd !{filtered_tsv}"
     fi
 
+    UPDATE_ARGS=""
+    if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
+        UPDATE_ARGS="--update --update_db !{params.update_db} --batch_id nf_${workflow.runName}"
+    fi
+
     python !{scripts_dir}/CreateSqliteDB.py -m !{meta_data} \
     -rf !{features} -p !{sequence_alignment} \
     -i !{insertions} -ht !{host_taxa} \
@@ -862,7 +990,7 @@ process CREATE_SQLITE_DB {
     -mir !{projectDir}/assets/m49_intermediate_region.csv \
     -mr !{projectDir}/assets/m49_region.csv \
     -msr !{projectDir}/assets/m49_sub_region.csv \
-    -d !{params.db_name} -b . -o . ${IQTREE_ARG} ${USHER_ARG} ${CLUSTER_ARG} ${FILTERED_ARG} ${FILTERED_DETAILS_ARG} ${TREE_MANIFEST_ARG}
+    -d !{params.db_name} -b . -o . ${IQTREE_ARG} ${USHER_ARG} ${CLUSTER_ARG} ${FILTERED_ARG} ${FILTERED_DETAILS_ARG} ${TREE_MANIFEST_ARG} ${UPDATE_ARGS}
     # need to make gene info come from gff file rather than hardcoded rabv one
     '''
 }
@@ -881,6 +1009,9 @@ process TEST_DB_VALIDATION {
     EXTRA_ARGS=""
     if [ "!{params.is_segmented}" = "Y" ]; then
         EXTRA_ARGS="--expect-segment-trees"
+    fi
+    if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
+        EXTRA_ARGS="${EXTRA_ARGS} --check-update-integrity"
     fi
 
     python !{scripts_dir}/ValidateDbTree.py \
@@ -1019,18 +1150,19 @@ workflow {
         }
     }
     
-    if( params.update ){
-        def updateFile = file(params.update)
-        if( !updateFile.exists() ){
-            error("ERROR: params.update file not found: ${params.update}")
+    def UPDATE_MODE = params.update_db && params.update_db != 'null'
+    if( UPDATE_MODE ){
+        def updateDbFile = file(params.update_db)
+        if( !updateDbFile.exists() || !updateDbFile.isFile() ){
+            error("ERROR: params.update_db must be an existing SQLite DB file: ${params.update_db}")
         }
-        def headerLine = updateFile.text.readLines().find { it?.trim() }
-        if( !headerLine ){
-            error("ERROR: params.update file is empty: ${params.update}")
+        if( !updateDbFile.name.toLowerCase().endsWith('.db') ){
+            error("ERROR: params.update_db must point to a .db file: ${params.update_db}")
         }
-        def headerCols = headerLine.split('\t')
-        if( !headerCols.contains('primary_accession') ){
-            error("ERROR: params.update must be a TSV with header containing 'primary_accession'")
+
+        def outDbFile = file("${params.publish_dir}/${params.db_name}.db")
+        if( updateDbFile.toAbsolutePath().normalize().toString() == outDbFile.toAbsolutePath().normalize().toString() ){
+            error("ERROR: update DB path matches output DB path. Use a different --publish_dir or --db_name for update runs.")
         }
     }
     if( !params.gene_info ){
@@ -1042,6 +1174,13 @@ workflow {
     VALIDATE_REF_LIST(params.ref_list, params.is_segmented)
     def ref_list_file = file(params.ref_list)
     def genbank_xml_dir
+    def ref_backbone_dir = (params.ref_set_aligned ?: 'UNSET')
+
+    if( UPDATE_MODE ){
+        VALIDATE_REF_LIST_DB(ref_list_file, file(params.update_db))
+        EXPORT_UPDATE_ASSETS(file(params.update_db))
+        ref_backbone_dir = EXPORT_UPDATE_ASSETS.out.ref_backbones
+    }
     
     // Logic: If xml_dir is provided, use it. Otherwise fetch from GenBank.
     if( params.xml_dir ){
@@ -1111,7 +1250,7 @@ workflow {
     PAD_ALIGNMENT(NEXTALIGN_ALIGNMENT.out,
                   params.ref_list,
                   ref_list_file,
-                  (params.ref_set_aligned ?: 'UNSET'))
+                  ref_backbone_dir)
     
     // Collect sequences that were filtered during nextalign alignment
     COLLECT_FILTERED_SEQUENCES(NEXTALIGN_ALIGNMENT.out)
@@ -1130,44 +1269,66 @@ workflow {
         cluster_input_ch = TEST_SUBSAMPLE_CLUSTER_INPUT.out.dedup_for_cluster
     }
 
-    MMSEQS_CLUSTERING(cluster_input_ch)
-    IQ_TREE(MMSEQS_CLUSTERING.out.mmseq_clusters)
-    
-    // Join the channels by segment name for USHER_PLACEMENT
-    // Create tuples of (basename, file) for proper matching
-    mmseq_with_key = MMSEQS_CLUSTERING.out.mmseq_clusters
-        .map { dir ->
-            def key = dir.name
-                .replaceFirst(/^MMseqClusters_/, '')
-                .replaceFirst(/_dedup$/, '')
-                .tokenize('.')[0]
-            [key, dir]
-        }
-    iqtree_with_key = IQ_TREE.out.iqtree_out
-        .map { dir ->
-            def key = dir.name
-                .replaceFirst(/^IQTree_MMseqClusters_/, '')
-                .replaceFirst(/_dedup$/, '')
-                .tokenize('.')[0]
-            [key, dir]
-        }
-    dedup_with_key = cluster_input_ch
-        .map { fasta ->
-            def key = fasta.name
-                .replaceFirst(/_dedup\.fasta$/, '')
-                .tokenize('.')[0]
-            [key, fasta]
-        }
-    
-    // Join the three channels by their segment key
-    usher_input_ch = mmseq_with_key
-        .join(iqtree_with_key)
-        .join(dedup_with_key)
-        .map { key, mmseq_dir, iqtree_dir, dedup_fasta -> 
-            tuple(mmseq_dir, iqtree_dir, dedup_fasta)
-        }
-    
-    USHER_PLACEMENT(usher_input_ch)
+    def iqtree_collected
+    def mmseq_collected
+    def usher_collected
+
+    if( UPDATE_MODE ){
+        update_usher_input = cluster_input_ch
+            .combine(EXPORT_UPDATE_ASSETS.out.tree_manifest)
+            .combine(EXPORT_UPDATE_ASSETS.out.existing_ids)
+            .map { left, existing_ids_dir ->
+                def padded_aln = left[0]
+                def tree_manifest = left[1]
+                tuple(padded_aln, tree_manifest, existing_ids_dir)
+            }
+        USHER_UPDATE_PLACEMENT(update_usher_input)
+        usher_collected = USHER_UPDATE_PLACEMENT.out.usher_out.collect()
+        iqtree_collected = EXPORT_UPDATE_ASSETS.out.update_assets.collect()
+        mmseq_collected = EXPORT_UPDATE_ASSETS.out.update_assets.collect()
+    } else {
+        MMSEQS_CLUSTERING(cluster_input_ch)
+        IQ_TREE(MMSEQS_CLUSTERING.out.mmseq_clusters)
+        
+        // Join the channels by segment name for USHER_PLACEMENT
+        // Create tuples of (basename, file) for proper matching
+        mmseq_with_key = MMSEQS_CLUSTERING.out.mmseq_clusters
+            .map { dir ->
+                def key = dir.name
+                    .replaceFirst(/^MMseqClusters_/, '')
+                    .replaceFirst(/_dedup$/, '')
+                    .tokenize('.')[0]
+                [key, dir]
+            }
+        iqtree_with_key = IQ_TREE.out.iqtree_out
+            .map { dir ->
+                def key = dir.name
+                    .replaceFirst(/^IQTree_MMseqClusters_/, '')
+                    .replaceFirst(/_dedup$/, '')
+                    .tokenize('.')[0]
+                [key, dir]
+            }
+        dedup_with_key = cluster_input_ch
+            .map { fasta ->
+                def key = fasta.name
+                    .replaceFirst(/_dedup\.fasta$/, '')
+                    .tokenize('.')[0]
+                [key, fasta]
+            }
+        
+        // Join the three channels by their segment key
+        usher_input_ch = mmseq_with_key
+            .join(iqtree_with_key)
+            .join(dedup_with_key)
+            .map { key, mmseq_dir, iqtree_dir, dedup_fasta -> 
+                tuple(mmseq_dir, iqtree_dir, dedup_fasta)
+            }
+        
+        USHER_PLACEMENT(usher_input_ch)
+        iqtree_collected = IQ_TREE.out.iqtree_out.collect()
+        mmseq_collected = MMSEQS_CLUSTERING.out.mmseq_clusters.collect()
+        usher_collected = USHER_PLACEMENT.out.usher_out.collect()
+    }
     
     // VERY_FAST_TREE(PAD_ALIGNMENT.out.merged_msa)
     
@@ -1175,6 +1336,7 @@ workflow {
     CALC_ALIGNMENT_CORD(PAD_ALIGNMENT.out.merged_msa.collect(), 
                         DOWNLOAD_GFF.out, 
                         BLAST_ALIGNMENT.out.query_uniq_tophits,
+                        data,
                         params.ref_list,
                         ref_list_file)
                         
@@ -1185,12 +1347,6 @@ workflow {
                     PAD_ALIGNMENT.out.merged_msa.collect(), 
                     NEXTALIGN_ALIGNMENT.out)
 
-    // Collect all per-segment outputs for the database
-    // For non-segmented viruses, these will have single items
-    iqtree_collected = IQ_TREE.out.iqtree_out.collect()
-    mmseq_collected = MMSEQS_CLUSTERING.out.mmseq_clusters.collect()
-    usher_collected = USHER_PLACEMENT.out.usher_out.collect()
-                    
     CREATE_SQLITE_DB(data, 
                      CALC_ALIGNMENT_CORD.out.features, 
                      GENERATE_TABLES.out.sequence_alignment, 

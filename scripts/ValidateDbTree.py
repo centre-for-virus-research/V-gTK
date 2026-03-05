@@ -110,6 +110,11 @@ def main():
         action="store_true",
         help="In segmented test mode, require at least one USHER tree per segment in meta_data",
     )
+    parser.add_argument(
+        "--check-update-integrity",
+        action="store_true",
+        help="Validate update audit tables and update-mode integrity constraints",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -285,6 +290,42 @@ def main():
                     f"- {table_name}: columns={','.join(acc_cols)} values={len(values)} missing_from_table={len(missing_from_table)}\n"
                 )
 
+            if args.check_update_integrity:
+                report.write("\nUpdate integrity checks:\n")
+                if table_exists(conn, "update_batches") and table_exists(conn, "update_table_deltas"):
+                    cursor.execute("SELECT batch_id, mode, started_at, finished_at FROM update_batches ORDER BY rowid DESC LIMIT 1")
+                    last_batch = cursor.fetchone()
+                    if last_batch:
+                        batch_id, mode, started_at, finished_at = last_batch
+                        report.write(f"- last_batch_id: {batch_id}\n")
+                        report.write(f"- last_batch_mode: {mode}\n")
+                        report.write(f"- last_batch_started: {started_at}\n")
+                        report.write(f"- last_batch_finished: {finished_at}\n")
+                        cursor.execute(
+                            "SELECT table_name, before_count, after_count, delta FROM update_table_deltas WHERE batch_id=? ORDER BY table_name",
+                            (batch_id,),
+                        )
+                        rows = cursor.fetchall()
+                        for table_name, before_count, after_count, delta in rows:
+                            report.write(f"  - {table_name}: before={before_count} after={after_count} delta={delta}\n")
+                else:
+                    report.write("- update audit tables missing (update_batches/update_table_deltas)\n")
+
+                if table_exists(conn, "features") and table_exists(conn, "meta_data"):
+                    feature_cols = get_table_columns(conn, "features")
+                    meta_cols = get_table_columns(conn, "meta_data")
+                    if "segment" in feature_cols and "segment" in meta_cols and "accession" in feature_cols:
+                        cursor.execute(
+                            """
+                            SELECT COUNT(*)
+                            FROM features f
+                            JOIN meta_data m ON m.primary_accession = f.accession
+                            WHERE COALESCE(TRIM(f.segment), '') != COALESCE(TRIM(m.segment), '')
+                            """
+                        )
+                        seg_mismatch_count = cursor.fetchone()[0]
+                        report.write(f"- feature_segment_mismatch: {seg_mismatch_count}\n")
+
         # Write full lists for debugging
         if missing_in_tree:
             with open(missing_tree_path, "w", encoding="utf-8") as handle:
@@ -353,6 +394,31 @@ def main():
                     "Validation failed: segmented run expects at least one UShER tree per segment "
                     f"(segments={segment_count}, usher_trees={usher_tree_count})"
                 )
+
+        if args.check_update_integrity:
+            if not table_exists(conn, "update_batches") or not table_exists(conn, "update_table_deltas"):
+                raise SystemExit("Validation failed: update audit tables are missing")
+            cursor.execute("SELECT batch_id FROM update_batches ORDER BY rowid DESC LIMIT 1")
+            row = cursor.fetchone()
+            if row:
+                batch_id = row[0]
+                cursor.execute("SELECT COUNT(*) FROM update_table_deltas WHERE batch_id=?", (batch_id,))
+                if cursor.fetchone()[0] == 0:
+                    raise SystemExit("Validation failed: no update_table_deltas rows found for latest batch")
+            if table_exists(conn, "features") and table_exists(conn, "meta_data"):
+                feature_cols = get_table_columns(conn, "features")
+                meta_cols = get_table_columns(conn, "meta_data")
+                if "segment" in feature_cols and "segment" in meta_cols and "accession" in feature_cols:
+                    cursor.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM features f
+                        JOIN meta_data m ON m.primary_accession = f.accession
+                        WHERE COALESCE(TRIM(f.segment), '') != COALESCE(TRIM(m.segment), '')
+                        """
+                    )
+                    if cursor.fetchone()[0] > 0:
+                        raise SystemExit("Validation failed: segment contamination detected in features table")
 
         # Fail if any validation issues detected
         if tree_name == "usher":

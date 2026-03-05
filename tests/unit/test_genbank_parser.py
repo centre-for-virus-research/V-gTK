@@ -251,9 +251,43 @@ def test_process_update_mode_filters_by_existing_and_excluded_accessions(tmp_pat
     assert fasta_path.exists()
 
     df = pd.read_csv(matrix_path, sep="\t")
-    assert df["primary_accession"].tolist() == ["NEW1"]
+    assert df["primary_accession"].tolist() == ["REF1", "NEW1"]
 
     fasta_text = fasta_path.read_text(encoding="utf-8")
     assert ">NEW1" in fasta_text
     assert ">Q1" not in fasta_text
-    assert ">REF1" not in fasta_text
+    assert ">REF1" in fasta_text
+
+
+def test_process_update_mode_keeps_reference_rows(tmp_path: Path):
+    xml_dir = tmp_path / "GenBank-XML"
+    xml_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_xml(
+        xml_dir / "batch-1.xml",
+        [
+            _gbseq_xml("REF1", "ATGC"),
+            _gbseq_xml("Q1", "AATT"),
+            _gbseq_xml("NEW1", "ATAT"),
+        ],
+    )
+
+    update_db = tmp_path / "previous.db"
+    _write_update_db(update_db, existing_accessions=["REF1", "Q1"], excluded_accessions=[])
+
+    ref_file = tmp_path / "refs.tsv"
+    ref_file.write_text("REF1\tmaster\n", encoding="utf-8")
+
+    parser = GenBankParser(
+        input_dir=None,
+        base_dir=str(tmp_path),
+        output_dir="GenBank-matrix",
+        ref_list=str(ref_file),
+        exclusion_list=None,
+        is_segmented_virus="N",
+        update=str(update_db),
+    )
+    parser.process()
+
+    df = pd.read_csv(tmp_path / "GenBank-matrix" / "gB_matrix_raw.tsv", sep="\t")
+    assert set(df["primary_accession"].tolist()) == {"REF1", "NEW1"}
