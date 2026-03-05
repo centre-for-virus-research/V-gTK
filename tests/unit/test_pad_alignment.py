@@ -90,7 +90,7 @@ def test_process_all_masters_uses_precomputed_by_segment_then_falls_back(tmp_pat
 
     called_refs = []
 
-    def _capture_process(self, reference_alignment_file, input_dir, base_dir, output_dir, keep_intermediate_files=False):
+    def _capture_process(self, reference_alignment_file, input_dir, base_dir, output_dir, keep_intermediate_files=False, segment_value=None):
         called_refs.append(Path(reference_alignment_file).name)
 
     processor.process_master_alignment = types.MethodType(_capture_process, processor)
