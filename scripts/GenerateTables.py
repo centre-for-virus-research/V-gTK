@@ -12,6 +12,7 @@ from os.path import join
 from itertools import islice
 from argparse import ArgumentParser
 from collections import defaultdict
+from collections import Counter
 
 class GenerateTables:
 	def __init__(self, genbank_matrix, base_dir, output_dir, blast_hits, paded_aln, host_taxa_file, nextalign_dir, email):
@@ -73,9 +74,31 @@ class GenerateTables:
 
 		return host_tax_id_list
 
+	def _print_host_value_counts(self):
+		host_counts = Counter()
+		host_taxa_id_counts = Counter()
+		with open(self.genbank_matrix) as file:
+			csv_reader = csv.DictReader(file, delimiter='\t')
+			for row in csv_reader:
+				host_val = (row.get('host') or '').strip() or '<blank>'
+				host_taxa_id_val = (row.get('host_taxa_id') or '').strip() or '<blank>'
+				host_counts[host_val] += 1
+				host_taxa_id_counts[host_taxa_id_val] += 1
+
+		print("\n[debug] value_counts for column 'host' (top 20)")
+		print("count\thost")
+		for value, count in host_counts.most_common(20):
+			print(f"{count}\t{value}")
+
+		print("\n[debug] value_counts for column 'host_taxa_id' (top 20)")
+		print("count\thost_taxa_id")
+		for value, count in host_taxa_id_counts.most_common(20):
+			print(f"{count}\t{value}")
+
 	def host_table(self):
 		existing_host_taxa_id = self.host_taxa_file_check()
 		taxa_file = join(self.base_dir, self.output_dir, self.host_taxa_file)
+		self._print_host_value_counts()
 		file_exists = os.path.isfile(taxa_file)
 		write_file = open(taxa_file, 'a')
 		if not file_exists or os.path.getsize(taxa_file) == 0:
@@ -98,6 +121,14 @@ class GenerateTables:
 		for idx, each_host_taxaid in enumerate(host_taxa_list, start=1):
 			print(f" - Fetching taxa details for {each_host_taxaid} which is {idx} of {len(host_taxa_list)}")
 			host_taxa = self.fetch_taxonomy_details(each_host_taxaid)
+			if not isinstance(host_taxa, dict):
+				print(f"[warn] Taxonomy lookup for {each_host_taxaid} returned non-dict response: {host_taxa}")
+				host_taxa = {
+					"Taxonomy ID": each_host_taxaid,
+					"Scientific Name": "N/A",
+					"Rank": "N/A",
+					"Lineage": "N/A",
+				}
 			tax_id = host_taxa['Taxonomy ID'] if host_taxa['Taxonomy ID'] is not None else 'NA'
 			scientific_name = host_taxa['Scientific Name'] if host_taxa['Scientific Name'] is not None else 'NA'
 			rank = host_taxa['Rank']	if host_taxa['Rank'] is not None else 'NA'

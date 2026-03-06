@@ -489,7 +489,7 @@ def test_download_test_run_fallbacks_to_empty_ids_on_error(tmp_path: Path, monke
     assert captured["ids"] == []
 
 
-def test_update_adds_only_missing_refs_from_ref_list(tmp_path: Path, monkeypatch):
+def test_update_does_not_fetch_refs_from_ref_list_in_db_backed_mode(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "prev_refs.db"
     _write_db(
         db_path,
@@ -519,7 +519,7 @@ def test_update_adds_only_missing_refs_from_ref_list(tmp_path: Path, monkeypatch
 
     fetcher.update(str(db_path))
 
-    assert captured["ids"] == ["REF2"]
+    assert "ids" not in captured
 
 
 def test_update_ref_list_parser_ignores_malformed_and_excluded_refs(tmp_path: Path, monkeypatch, basic_update_db: Path):
@@ -550,8 +550,8 @@ def test_update_ref_list_parser_ignores_malformed_and_excluded_refs(tmp_path: Pa
 
     fetcher.update(str(basic_update_db))
 
-    # REF1 already in DB, Q_EXCL is excluded in DB, malformed line ignored -> only REF_NEW remains
-    assert captured["ids"] == ["REF_NEW"]
+    # Update mode is DB-backed for references: ref_list should not force fetching REF_NEW.
+    assert "ids" not in captured
 
 
 def test_update_test_run_samples_brand_new_accessions_first(tmp_path: Path, monkeypatch):

@@ -5,11 +5,12 @@ import tempfile
 from Bio import SeqIO
 from os.path import join
 from argparse import ArgumentParser
+from ExportRefListFromUpdateDb import load_reference_dict
 
 #genbank_divisions = ['VRL', 'PAT', 'SYN', 'ENV']
 
 class FilterAndExtractSequences:
-	def __init__(self, genbank_matrix, sequence_file, genbank_matrix_filtered, ref_file, base_dir, output_dir, total_length, real_length, prop_ambigious, segmented_virus, gb_division, valid_divisions, seq_type):
+	def __init__(self, genbank_matrix, sequence_file, genbank_matrix_filtered, ref_file, base_dir, output_dir, total_length, real_length, prop_ambigious, segmented_virus, gb_division, valid_divisions, seq_type, update_db=None):
 		self.genbank_matrix = genbank_matrix
 		self.sequence_file = sequence_file
 		self.genbank_matrix_filtered = genbank_matrix_filtered
@@ -23,6 +24,7 @@ class FilterAndExtractSequences:
 		self.gb_division = gb_division
 		self.valid_divisions = valid_divisions
 		self.seq_type = seq_type
+		self.update_db = update_db
 		os.makedirs(join(self.base_dir, self.output_dir), exist_ok=True)
 
 	def fasta_to_dict(self):
@@ -32,6 +34,10 @@ class FilterAndExtractSequences:
 		return seq_dict
 
 	def read_ref_list(self):
+		if self.update_db:
+			ref_dict = load_reference_dict(self.update_db)
+			if ref_dict:
+				return ref_dict
 		ref_list = {}
 		with open(self.ref_file) as f:
 			for each_ref in f:
@@ -44,6 +50,10 @@ class FilterAndExtractSequences:
 
 	def read_ref_list_segmented_virus(self):
 		"""Return a dict {accession: type} where type is master/reference/exclusion_list."""
+		if self.update_db:
+			ref_dict = load_reference_dict(self.update_db)
+			if ref_dict:
+				return ref_dict
 		ref_list = {}
 		with open(self.ref_file) as f:
 			for each_ref_line in f:
@@ -214,6 +224,7 @@ if __name__ == "__main__":
     )
 	parser.add_argument('-vd', '--valid_divisions', help="Valid GenBank divisions to be considered for the analysis", nargs='+', default=['VRL', 'ENV'], type=str)
 	parser.add_argument('-s', '--seq_type', help='Sequence type', default=None, type=str)
+	parser.add_argument('--update_db', help='Existing update DB; when set, derive reference accessions from DB instead of ref_file', default=None)
 	args = parser.parse_args()
 
 	processor = FilterAndExtractSequences(
@@ -229,6 +240,7 @@ if __name__ == "__main__":
 		segmented_virus=args.segmented_virus,
 		gb_division=args.genbank_division,
 		valid_divisions=args.valid_divisions,
-		seq_type=args.seq_type
+		seq_type=args.seq_type,
+		update_db=args.update_db
 	)
 	processor.process()

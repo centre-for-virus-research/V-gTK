@@ -435,17 +435,9 @@ class GenBankFetcher:
 
 		missing_ids, updated_versions, new_accessions = self._compute_missing_ids(ids, meta_accessions, excluded_primary)
 
-		# References are handled deterministically in update mode: only fetch when missing in DB context.
-		local_primary = set()
-		for acc_ver in meta_accessions:
-			base, _ = self._split_accession_version(acc_ver)
-			if base:
-				local_primary.add(base)
-		ref_candidates = [r for r in self._load_ref_accessions() if r not in local_primary and r not in excluded_primary]
-		if ref_candidates:
-			print(f"[update] Adding {len(ref_candidates)} missing reference/master accessions from ref_list")
-			missing_ids.extend(ref_candidates)
-			missing_ids = sorted(set(missing_ids))
+		# Update mode is DB-backed for references: do not pull reference/master accessions from GenBank.
+		if self.ref_list:
+			print("[update] Reference list supplied, but reference/master accessions are sourced from DB only in update mode")
 
 		if updated_versions:
 			print('Updated accessions found (old -> new):')

@@ -5,6 +5,7 @@ from os.path import join
 import xml.etree.ElementTree as ET
 from argparse import ArgumentParser
 from date_utils import split_date_components
+from ExportRefListFromUpdateDb import load_reference_dict
 
 # add source example NCBI or GISAID, or user define, add temp sequences 
 # temp sequences which should available for temp purpose 
@@ -51,6 +52,10 @@ class GenBankParser:
 		return nucl_dict['A'], nucl_dict['T'], nucl_dict['G'], nucl_dict['C'], nucl_dict['N']
 
 	def load_ref_list(self, acc_list_file):
+		if self.update_mode and self.update_db_path:
+			ref_dict = load_reference_dict(self.update_db_path)
+			if ref_dict:
+				return ref_dict
 		if acc_list_file is None:
 			return []
 		ref_dict = {}
@@ -352,6 +357,8 @@ class GenBankParser:
 				# Default to 'reference' if type not specified, so treat as critical
 				rtype = ref_seq_dict.get(m, 'reference').strip().lower()
 				if rtype != 'exclusion_list':
+					if self.update_mode and m in self._existing_accessions:
+						continue
 					critical_missing.append(m)
 			
 			if critical_missing:
@@ -383,7 +390,7 @@ class GenBankParser:
 				print(f"[update] {len(missing_in_db)} references from ref_list are not present in DB and will be parsed from XML if available")
 
 		xml_files = self.list_xml_files()
-		if self.require_refs and self.ref_list is None:
+		if self.require_refs and self.ref_list is None and not self.update_mode:
 			raise ValueError("Reference list is required when --require_refs is set")
 
 		# Pass full dict, not just keys, to support type checking
@@ -397,6 +404,8 @@ class GenBankParser:
 				for m in missing_refs:
 					rtype = ref_seq_dict.get(m, 'reference').strip().lower()
 					if rtype != 'exclusion_list':
+						if self.update_mode and m in self._existing_accessions:
+							continue
 						critical_missing.append(m)
 				
 				if critical_missing:

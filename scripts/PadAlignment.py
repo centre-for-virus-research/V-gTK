@@ -2,13 +2,15 @@ import os
 import shutil
 import argparse
 import re
+import sqlite3
 import pandas as pd
 from os.path import join
 from Bio import SeqIO
 from Bio.Seq import Seq
+from ExportRefListFromUpdateDb import load_master_accessions
 
 class PadAlignment:
-	def __init__(self, reference_alignment, input_dir, base_dir, output_dir, keep_intermediate_files, new_outputfile=False, segment_manifest_out=None, strict_segment_backbone=False):
+	def __init__(self, reference_alignment, input_dir, base_dir, output_dir, keep_intermediate_files, new_outputfile=False, segment_manifest_out=None, strict_segment_backbone=False, update_db=None):
 		self.reference_alignment = reference_alignment
 		self.input_dir = input_dir
 		self.base_dir = base_dir
@@ -17,9 +19,21 @@ class PadAlignment:
 		self.new_outputfile = new_outputfile
 		self.segment_manifest_out = segment_manifest_out
 		self.strict_segment_backbone = strict_segment_backbone
+		self.update_db = self._normalize_optional_path(update_db)
 		self.segment_manifest_rows = []
 
+	@staticmethod
+	def _normalize_optional_path(path_value):
+		if path_value is None:
+			return None
+		path_str = str(path_value).strip()
+		if not path_str or path_str.lower() == 'null' or path_str == 'UNSET':
+			return None
+		return path_str
+
 	def get_master_list(self, master_acc):
+		if self.update_db:
+			return load_master_accessions(self.update_db)
 		if os.path.isfile(master_acc):
 			try:
 				df = pd.read_csv(master_acc, sep='\t', header=None, dtype=str)
@@ -105,6 +119,89 @@ class PadAlignment:
 			return sorted(fallback_matches)[0]
 
 		return None
+
+	def export_update_backbones(self, output_dir):
+		if not self.update_db:
+			return None
+		if not os.path.isfile(self.update_db):
+			raise FileNotFoundError(f"Update DB not found: {self.update_db}")
+
+		os.makedirs(output_dir, exist_ok=True)
+		conn = sqlite3.connect(self.update_db)
+		try:
+			df_meta = pd.read_sql_query("SELECT primary_accession, accession_type, segment FROM meta_data", conn)
+			df_aln = pd.read_sql_query("SELECT * FROM sequence_alignment", conn)
+		finally:
+			conn.close()
+
+		if "primary_accession" not in df_aln.columns and "sequence_id" in df_aln.columns:
+			df_aln["primary_accession"] = df_aln["sequence_id"]
+
+		if "alignment" not in df_aln.columns:
+			for column in ["aligned_seq", "sequence", "aln", "alignment_seq"]:
+				if column in df_aln.columns:
+					df_aln["alignment"] = df_aln[column]
+					break
+
+		if "alignment" not in df_aln.columns:
+			raise ValueError("sequence_alignment must contain an alignment-like column")
+
+		if "alignment_name" not in df_aln.columns:
+			df_aln["alignment_name"] = "0"
+
+		df_meta["segment"] = df_meta["segment"].apply(self._normalize_segment).fillna("0")
+		df_meta["accession_type"] = df_meta["accession_type"].fillna("query").astype(str)
+
+		df_join = df_aln.merge(
+			df_meta[["primary_accession", "accession_type", "segment"]],
+			on="primary_accession",
+			how="left",
+		)
+
+		if "segment" not in df_join.columns:
+			if "segment_y" in df_join.columns:
+				df_join["segment"] = df_join["segment_y"]
+			elif "segment_x" in df_join.columns:
+				df_join["segment"] = df_join["segment_x"]
+			else:
+				df_join["segment"] = "0"
+
+		df_join["segment"] = df_join["segment"].apply(self._normalize_segment).fillna("0")
+		df_join = df_join[df_join["accession_type"].fillna("").str.lower().isin(["master", "reference"])]
+
+		written = 0
+		for segment, part in df_join.groupby("segment"):
+			rows = []
+			for _, row in part.drop_duplicates(subset=["primary_accession", "alignment_name"]).iterrows():
+				acc = str(row.get("primary_accession", "")).strip()
+				seq = str(row.get("alignment", "")).strip()
+				if acc and seq and seq.lower() != "nan":
+					rows.append((acc, seq))
+			if not rows:
+				continue
+			out_fa = os.path.join(output_dir, f"refset_{segment}_aln.fasta")
+			with open(out_fa, "w", encoding="utf-8") as handle:
+				for acc, seq in rows:
+					handle.write(f">{acc}\n{seq}\n")
+			written += 1
+
+		return output_dir if written else None
+
+	def resolve_precomputed_ref_dir(self, precomputed_ref_dir):
+		precomputed_ref_dir = self._normalize_optional_path(precomputed_ref_dir)
+		if precomputed_ref_dir:
+			if not os.path.isdir(precomputed_ref_dir):
+				raise FileNotFoundError(f"Precomputed reference alignment directory not found: {precomputed_ref_dir}")
+			return precomputed_ref_dir
+
+		if not self.update_db:
+			return None
+
+		db_ref_dir = os.path.join(self.base_dir, self.output_dir, "db_ref_backbones")
+		resolved = self.export_update_backbones(db_ref_dir)
+		if resolved:
+			print(f"Using DB-derived precomputed segment alignments from {resolved}")
+		return resolved
 
 	def process_all_masters(self, master_list, nextalign_dir, master_segment_map=None, precomputed_ref_dir=None):
 		for master in master_list:
@@ -305,19 +402,31 @@ if __name__ == "__main__":
 	parser.add_argument("--precomputed_ref_dir", default=None, help="Optional directory containing precomputed segment alignments (e.g. refset_<segment>_aln.fasta). If absent or unmatched, falls back to nextalign reference_aln outputs.")
 	parser.add_argument("--segment_manifest_out", default=None, help="Optional TSV path for accession-to-segment-to-output mapping")
 	parser.add_argument("--strict_segment_backbone", action="store_true", help="Fail if segment-specific precomputed backbone is missing")
+	parser.add_argument("--update_db", default=None, help="Existing update DB; when set, derive per-segment backbone alignments from sequence_alignment")
  
 	args = parser.parse_args()
 
-	processor = PadAlignment(args.reference_alignment, args.input_dir, args.base_dir, args.output_dir, args.keep_intermediate_files, args.new_outputfile, args.segment_manifest_out, args.strict_segment_backbone)
+	processor = PadAlignment(
+		args.reference_alignment,
+		args.input_dir,
+		args.base_dir,
+		args.output_dir,
+		args.keep_intermediate_files,
+		args.new_outputfile,
+		args.segment_manifest_out,
+		args.strict_segment_backbone or bool(PadAlignment._normalize_optional_path(args.update_db)),
+		args.update_db,
+	)
 
 	if args.master_acc and args.nextalign_dir:
 		masters = processor.get_master_list(args.master_acc)
 		master_segment_map = processor.get_master_segment_map(args.master_acc)
+		precomputed_ref_dir = processor.resolve_precomputed_ref_dir(args.precomputed_ref_dir)
 		processor.process_all_masters(
 			masters,
 			args.nextalign_dir,
 			master_segment_map=master_segment_map,
-			precomputed_ref_dir=args.precomputed_ref_dir,
+			precomputed_ref_dir=precomputed_ref_dir,
 		)
 	elif args.reference_alignment:
 		processor.process_master_alignment(

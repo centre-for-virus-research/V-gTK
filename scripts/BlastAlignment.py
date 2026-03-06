@@ -3,6 +3,7 @@
 import os
 import csv
 import sys
+import sqlite3
 import shutil
 import subprocess
 import numpy as np
@@ -11,9 +12,10 @@ from Bio import SeqIO
 from os.path import join
 from argparse import ArgumentParser
 import read_file
+from ExportRefListFromUpdateDb import load_reference_rows
 
 class BlastAlignment:
-	def __init__(self, query_fasta, db_fasta, base_dir, output_dir, output_file, is_segmented_virus, master_acc, is_update, keep_blast_tmp_dir, gb_matrix, segment_file=None):
+	def __init__(self, query_fasta, db_fasta, base_dir, output_dir, output_file, is_segmented_virus, master_acc, is_update, keep_blast_tmp_dir, gb_matrix, segment_file=None, update_db=None):
 		self.query_fasta = query_fasta
 		self.db_fasta = db_fasta
 		self.base_dir = base_dir
@@ -25,6 +27,7 @@ class BlastAlignment:
 		self.gb_matrix = gb_matrix
 		self.is_update = is_update
 		self.keep_blast_tmp_dir = keep_blast_tmp_dir
+		self.update_db = update_db
 		self.db_file_name = os.path.basename(db_fasta)
 
 	@staticmethod
@@ -46,6 +49,67 @@ class BlastAlignment:
 		missing = [c for c in required_columns if c not in fieldnames]
 		if missing:
 			raise ValueError(f"{label} is missing required columns: {', '.join(missing)}")
+
+	@staticmethod
+	def _fasta_ids(path):
+		return [record.id for record in SeqIO.parse(path, "fasta")]
+
+	@staticmethod
+	def _normalize_segment(value):
+		if value is None:
+			return "0"
+		segment = str(value).strip()
+		if not segment or segment.lower() == "nan":
+			return "0"
+		digits = ''.join(ch for ch in segment if ch.isdigit())
+		return digits if digits else segment
+
+	def hydrate_update_reference_assets(self):
+		if not self.update_db:
+			return
+		if not os.path.isfile(self.update_db):
+			raise FileNotFoundError(f"Update DB not found: {self.update_db}")
+
+		output_dir = join(self.base_dir, self.output_dir)
+		os.makedirs(output_dir, exist_ok=True)
+		ref_list_path = join(output_dir, "ref_list_from_update_db.tsv")
+		ref_fasta_path = join(output_dir, "ref_seq_from_update_db.fa")
+
+		refs = load_reference_rows(self.update_db)
+
+		conn = sqlite3.connect(self.update_db)
+		try:
+			df_seq = pd.read_sql_query("SELECT header, sequence FROM sequences", conn)
+		finally:
+			conn.close()
+		if refs.empty:
+			raise ValueError(f"Update DB does not contain any master/reference rows in meta_data: {self.update_db}")
+
+		df_seq["header"] = df_seq["header"].fillna("").astype(str).str.strip()
+		df_seq["sequence"] = df_seq["sequence"].fillna("").astype(str).str.strip()
+		ref_seq_df = refs.merge(df_seq, left_on="primary_accession", right_on="header", how="left")
+		missing_sequences = sorted(
+			ref_seq_df.loc[ref_seq_df["sequence"].eq("") | ref_seq_df["sequence"].isna(), "primary_accession"].dropna().unique().tolist()
+		)
+		if missing_sequences:
+			raise ValueError(
+				f"Update DB is missing sequences for reference accession(s): {missing_sequences}"
+			)
+
+		with open(ref_list_path, "w", encoding="utf-8") as ref_handle:
+			for _, row in refs.iterrows():
+				ref_handle.write(
+					f"{row['primary_accession']}\t{row['accession_type']}\t{row['segment']}\n"
+				)
+
+		with open(ref_fasta_path, "w", encoding="utf-8") as fasta_handle:
+			for _, row in ref_seq_df.drop_duplicates(subset=["primary_accession"]).iterrows():
+				fasta_handle.write(f">{row['primary_accession']}\n{row['sequence']}\n")
+
+		self.db_fasta = ref_fasta_path
+		self.db_file_name = os.path.basename(ref_fasta_path)
+		self.segment_file = ref_list_path
+		self.master_acc = ref_list_path
 	
 	def read_gb_matrix(self):
 		self._require_file(self.gb_matrix, "GenBank matrix")
@@ -150,7 +214,7 @@ class BlastAlignment:
 			subprocess.run(command, check=True)
 			print(f"makeblastdb ran successfully on {self.db_fasta}")
 		except subprocess.CalledProcessError as e:
-			print(f"Error running makeblastdb: {e}")
+			raise RuntimeError(f"makeblastdb failed for reference FASTA '{self.db_fasta}': {e}") from e
 
 	def run_blastn(self, output_dir, query_file):
 		command = [
@@ -167,7 +231,7 @@ class BlastAlignment:
 			subprocess.run(command, check=True)
 			print(f"blastn ran successfully. Results saved in {self.output_file}")
 		except subprocess.CalledProcessError as e:
-			print(f"Error running blastn: {e}")
+			raise RuntimeError(f"blastn failed for query '{query_file}' against db '{join(output_dir, 'DB', self.db_file_name)}': {e}") from e
 
 	def get_master_list(self):
 		if os.path.isfile(self.master_acc):
@@ -633,17 +697,34 @@ class BlastAlignment:
 
 	def process(self):
 		print(f'Using {self.gb_matrix} GenBank matrix file')
+		self.hydrate_update_reference_assets()
 		self._require_file(self.query_fasta, "Query FASTA")
 		self._require_file(self.db_fasta, "Reference FASTA")
 		self._require_file(self.gb_matrix, "GenBank matrix")
 		self._validate_tsv_columns(self.gb_matrix, ["gi_number"], "GenBank matrix")
+		query_ids = self._fasta_ids(self.query_fasta)
+		if not query_ids:
+			raise ValueError(f"Query FASTA has no sequences: {self.query_fasta}")
+		db_ids = self._fasta_ids(self.db_fasta)
+		if not db_ids:
+			raise ValueError(f"Reference FASTA has no sequences: {self.db_fasta}")
 		if self.is_segmented_virus == 'Y':
 			self._require_file(self.segment_file, "Segment annotation")
 		if os.path.isfile(self.master_acc):
 			self._require_file(self.master_acc, "Master accession list")
 
+		master_list = self.get_master_list()
+		if master_list:
+			missing_masters = [acc for acc in master_list if acc not in db_ids]
+			if missing_masters:
+				raise ValueError(
+					f"Master reference accession(s) not found in reference FASTA '{self.db_fasta}': {missing_masters}"
+				)
+
 		if not self.check_blast_exists("blastn"):
 			raise RuntimeError("blastn executable not available")
+		if not self.check_blast_exists("makeblastdb"):
+			raise RuntimeError("makeblastdb executable not available")
 		if self.is_segmented_virus == 'Y' and not self.segment_file:
 			raise ValueError("Missing segment file with accession and segment information")
 
@@ -690,11 +771,17 @@ if __name__ == "__main__":
 	parser.add_argument('-o', '--output_file', help='output file', default='query_tophits.tsv')
 	parser.add_argument('-s', '--is_segmented_virus', help='Type Y for segmented virus else N', default='N')
 	parser.add_argument('-f', '--segment_file', help='File containing information about the segments')
-	parser.add_argument('-m', '--master_acc', help='Master accession. Example Rabies Virus uses NC_001542 as master reference', required=True)
+	parser.add_argument('-m', '--master_acc', help='Master accession. Example Rabies Virus uses NC_001542 as master reference', default=None)
 	parser.add_argument('-u', '--is_update', help='If you have new downloaded sequence to blast then use this option, it will avoid performing blast on existing sequences', default='N')
 	parser.add_argument('-k', '--keep_blast_tmp_dir', help='Retains the blast temp directory for debug purpose', default='N')
 	parser.add_argument('-g', '--gb_matrix', help='GenBank matrix file', default='tmp/GenBank-matrix/gB_matrix_raw.tsv')
+	parser.add_argument('--update_db', help='Existing SQLite DB used as the source of truth for reference accessions and sequences in update mode', default=None)
 	args = parser.parse_args()
+
+	if not args.master_acc and not args.update_db:
+		parser.error('--master_acc is required unless --update_db is provided')
+	if args.is_segmented_virus == 'Y' and not args.segment_file and not args.update_db:
+		parser.error('--segment_file is required for segmented viruses unless --update_db is provided')
 
 	processor = BlastAlignment(
 		args.query_fa,
@@ -707,7 +794,8 @@ if __name__ == "__main__":
 		args.is_update,
 		args.keep_blast_tmp_dir,
 		args.gb_matrix,
-		args.segment_file
+		args.segment_file,
+		args.update_db
 		)
 	try:
 		processor.process()

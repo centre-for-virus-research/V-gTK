@@ -1,9 +1,24 @@
+import sqlite3
 import subprocess
 from pathlib import Path
 
 import pandas as pd
 
 from DownloadGFF import NCBI_GFF_Downloader
+
+
+def test_get_accession_list_uses_update_db_master_rows(tmp_path: Path):
+    update_db = tmp_path / "update.db"
+    with sqlite3.connect(str(update_db)) as conn:
+        conn.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT, segment TEXT)")
+        conn.executemany(
+            "INSERT INTO meta_data(primary_accession, accession_type, segment) VALUES (?, ?, ?)",
+            [("REF1", "master", "1"), ("REF2", "reference", "2"), ("Q1", "query", "1")],
+        )
+        conn.commit()
+
+    downloader = NCBI_GFF_Downloader("ignored.tsv", str(tmp_path), "Gff", update_db=str(update_db))
+    assert downloader.get_accession_list() == ["REF1"]
 
 
 def test_get_accession_list_from_master_marked_file(tmp_path: Path):

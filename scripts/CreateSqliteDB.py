@@ -297,6 +297,9 @@ class CreateSqliteDB:
 			df = df.drop(columns=extra_cols)
 
 		missing_cols = [c for c in existing_cols if c not in df.columns]
+		if self.update and table == "meta_data" and "cluster_98pct" in missing_cols:
+			df["cluster_98pct"] = "NA- see tree"
+			missing_cols = [c for c in existing_cols if c not in df.columns]
 		if missing_cols:
 			raise ValueError(
 				f"Incoming '{table}' dataframe is missing columns required by existing DB schema: {missing_cols}"

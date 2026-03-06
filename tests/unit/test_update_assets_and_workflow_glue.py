@@ -49,5 +49,12 @@ def test_workflow_update_glue_contains_skip_and_guard():
 
     assert "def UPDATE_MODE = params.update_db" in text
     assert "update DB path matches output DB path" in text
-    assert "if( UPDATE_MODE )" in text and "USHER_UPDATE_PLACEMENT" in text
+    assert "if( UPDATE_MODE )" in text and "USHER_PLACEMENT(usher_input_ch)" in text
     assert "MMSEQS_CLUSTERING(cluster_input_ch)" in text
+    assert "REF_FASTA_FROM_UPDATE_DB" not in text
+    assert "REF_LIST_FROM_UPDATE_DB" not in text
+    assert "blast_ref_fasta = REF_FASTA_FROM_UPDATE_DB.out.ref_fasta_from_db" not in text
+    assert "UPDATE_BLAST_ARGS=\"--update_db !{params.update_db}\"" in text
+    assert "UsherPlacement.py" in text
+    assert "process USHER_UPDATE_PLACEMENT" not in text
+    assert "db_ref_backbones" not in text

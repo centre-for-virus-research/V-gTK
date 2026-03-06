@@ -1,5 +1,6 @@
 import csv
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -158,3 +159,79 @@ def test_process_raises_when_gb_matrix_missing_gi_number(tmp_path: Path):
     processor = make_processor(tmp_path, gb_bad)
     with pytest.raises(ValueError, match="missing required columns: gi_number"):
         processor.process()
+
+
+def test_process_raises_when_reference_fasta_empty(tmp_path: Path):
+    gb_copy = tmp_path / "gb_matrix.tsv"
+    gb_copy.write_text((DATA_DIR / "gb_matrix.tsv").read_text(encoding="utf-8"), encoding="utf-8")
+
+    empty_ref = tmp_path / "empty_ref.fa"
+    empty_ref.write_text("", encoding="utf-8")
+
+    processor = make_processor(tmp_path, gb_copy)
+    processor.db_fasta = str(empty_ref)
+    processor.master_acc = ""
+
+    with pytest.raises(ValueError, match="Reference FASTA has no sequences"):
+        processor.process()
+
+
+def test_process_raises_when_master_missing_in_reference_fasta(tmp_path: Path):
+    gb_copy = tmp_path / "gb_matrix.tsv"
+    gb_copy.write_text((DATA_DIR / "gb_matrix.tsv").read_text(encoding="utf-8"), encoding="utf-8")
+
+    processor = make_processor(tmp_path, gb_copy)
+    processor.master_acc = "NC_001542"
+
+    with pytest.raises(ValueError, match="Master reference accession\(s\) not found"):
+        processor.process()
+
+
+def test_run_makeblastdb_raises_on_subprocess_failure(tmp_path: Path, monkeypatch):
+    processor = make_processor(tmp_path, DATA_DIR / "gb_matrix.tsv")
+
+    def fail_run(*args, **kwargs):
+        raise subprocess.CalledProcessError(returncode=1, cmd=args[0])
+
+    monkeypatch.setattr(subprocess, "run", fail_run)
+    with pytest.raises(RuntimeError, match="makeblastdb failed"):
+        processor.run_makeblastdb(str(tmp_path))
+
+
+def test_hydrate_update_reference_assets_uses_db_as_reference_source(tmp_path: Path, basic_update_db: Path):
+    query_fa = tmp_path / "query.fa"
+    query_fa.write_text(">Q_NEW\nATGC\n", encoding="utf-8")
+    gb_matrix = tmp_path / "gb_matrix.tsv"
+    gb_matrix.write_text(
+        "division\tgi_number\tsequence\nVRL\tQ_NEW\tATGC\n",
+        encoding="utf-8",
+    )
+
+    processor = BlastAlignment(
+        query_fasta=str(query_fa),
+        db_fasta=str(tmp_path / "unused.fa"),
+        base_dir=str(tmp_path),
+        output_dir="blast_out",
+        output_file="query_tophits.tsv",
+        is_segmented_virus="Y",
+        master_acc=None,
+        is_update="N",
+        keep_blast_tmp_dir="N",
+        gb_matrix=str(gb_matrix),
+        segment_file=None,
+        update_db=str(basic_update_db),
+    )
+
+    processor.hydrate_update_reference_assets()
+
+    ref_fasta = Path(processor.db_fasta)
+    assert ref_fasta.exists()
+    ref_text = ref_fasta.read_text(encoding="utf-8")
+    assert ">REF1" in ref_text
+    assert ">REF2" in ref_text
+    assert processor.segment_file is not None
+    assert Path(processor.segment_file).exists()
+    assert processor.master_acc == processor.segment_file
+    ref_list_text = Path(processor.segment_file).read_text(encoding="utf-8")
+    assert "REF1\tmaster\t1" in ref_list_text
+    assert "REF2\treference\t2" in ref_list_text

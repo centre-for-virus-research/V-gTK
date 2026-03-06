@@ -163,6 +163,28 @@ def test_select_xml_files_raises_on_missing_critical_refs(tmp_path: Path):
         parser.select_xml_files({"REF1": "master", "REF_MISSING": "reference"}, ["batch-1.xml"])
 
 
+def test_select_xml_files_update_mode_allows_missing_critical_refs_if_in_db(tmp_path: Path):
+    xml_file = tmp_path / "batch-1.xml"
+    _write_xml(xml_file, [_gbseq_xml("REF1", "ATGC")])
+
+    parser = GenBankParser(
+        input_dir=str(tmp_path),
+        base_dir=str(tmp_path),
+        output_dir="out",
+        ref_list=None,
+        exclusion_list=None,
+        is_segmented_virus="N",
+        test_run=True,
+        test_xml_limit=2,
+        require_refs=True,
+        update="dummy.db",
+    )
+    parser._existing_accessions = {"REF_MISSING"}
+
+    selected = parser.select_xml_files({"REF1": "master", "REF_MISSING": "reference"}, ["batch-1.xml"])
+    assert selected == ["batch-1.xml"]
+
+
 def test_process_writes_matrix_and_fasta(tmp_path: Path):
     in_dir = tmp_path / "xml"
     in_dir.mkdir(parents=True, exist_ok=True)
@@ -332,3 +354,36 @@ def test_process_update_mode_keeps_same_accession_across_segments(tmp_path: Path
     df = pd.read_csv(tmp_path / "GenBank-matrix" / "gB_matrix_raw.tsv", sep="\t")
     seg_rows = df[df["primary_accession"] == "SEG_ACC"]
     assert sorted(seg_rows["segment"].astype(str).tolist()) == ["1", "2"]
+
+
+def test_process_update_mode_require_refs_uses_db_for_missing_reference(tmp_path: Path):
+    xml_dir = tmp_path / "GenBank-XML"
+    xml_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_xml(
+        xml_dir / "batch-1.xml",
+        [
+            _gbseq_xml("NEW1", "ATAT"),
+        ],
+    )
+
+    update_db = tmp_path / "previous.db"
+    _write_update_db(update_db, existing_accessions=["REF1", "REF_MISSING"], excluded_accessions=[])
+
+    ref_file = tmp_path / "refs.tsv"
+    ref_file.write_text("REF1\tmaster\nREF_MISSING\treference\n", encoding="utf-8")
+
+    parser = GenBankParser(
+        input_dir=None,
+        base_dir=str(tmp_path),
+        output_dir="GenBank-matrix",
+        ref_list=str(ref_file),
+        exclusion_list=None,
+        is_segmented_virus="N",
+        require_refs=True,
+        update=str(update_db),
+    )
+    parser.process()
+
+    df = pd.read_csv(tmp_path / "GenBank-matrix" / "gB_matrix_raw.tsv", sep="\t")
+    assert df["primary_accession"].tolist() == ["NEW1"]

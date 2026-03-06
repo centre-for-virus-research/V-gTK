@@ -9,15 +9,17 @@ from os.path import join
 from argparse import ArgumentParser
 from TextFileHandler import TextFileLoader
 from FastaHandler import RemoveRedundantSequence
+from ExportRefListFromUpdateDb import load_master_accessions
 
 class NextalignAlignment:
-	def __init__(self, gb_matrix, query_dir, ref_dir, ref_fa_file, master_seq_dir, tmp_dir, master_ref, nextalign_dir, reference_alignment):
+	def __init__(self, gb_matrix, query_dir, ref_dir, ref_fa_file, master_seq_dir, tmp_dir, master_ref, nextalign_dir, reference_alignment, update_db=None):
 		self.gb_matrix = gb_matrix
 		self.query_dir = query_dir
 		self.ref_dir = ref_dir
 		self.ref_fa_file = ref_fa_file
 		self.master_seq_dir = master_seq_dir
 		self.master_ref = master_ref
+		self.update_db = update_db
 		self.tmp_dir = tmp_dir
 		self.min_seed = "44"
 		self.seed_spacing = "50"
@@ -31,6 +33,10 @@ class NextalignAlignment:
 		return path.split('.')[0]
 
 	def get_master_list(self):
+		if self.update_db:
+			masters = load_master_accessions(self.update_db)
+			if masters:
+				return masters
 		if os.path.isfile(self.master_ref):
 			try:
 				df = pd.read_csv(self.master_ref, sep='\t', header=None, dtype=str)
@@ -184,7 +190,8 @@ if __name__ == "__main__":
 	parser.add_argument('-m', '--master_ref', help='Master reference accession. Generally, the Ref Seq accession. In case of Rabies it is NC_001542', required=True)
 	parser.add_argument('-n', '--nextalign_dir', help='Nextalign output to be saved', default="Nextalign")
 	parser.add_argument('-ra', '--ref_alignment_file', help='Use your own reference alignment file instead of Nextalign perfoms the alignment of reference against the master reference sequence')
+	parser.add_argument('--update_db', help='Existing update DB; when set, derive master accession IDs from DB', default=None)
 	args = parser.parse_args()
 
-	processor = NextalignAlignment(args.gB_matrix, args.query_dir, args.ref_dir, args.ref_fa_file, args.master_seq_dir, args.tmp_dir, args.master_ref, args.nextalign_dir, args.ref_alignment_file)
+	processor = NextalignAlignment(args.gB_matrix, args.query_dir, args.ref_dir, args.ref_fa_file, args.master_seq_dir, args.tmp_dir, args.master_ref, args.nextalign_dir, args.ref_alignment_file, args.update_db)
 	processor.process()

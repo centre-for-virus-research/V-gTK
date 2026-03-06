@@ -213,3 +213,22 @@ def test_process_all_masters_ambiguous_db_segment_backbones_pick_deterministic_f
 
     assert chosen["segment"] == segment
     assert chosen["ref"] == "aaa_segment_" + segment + ".fasta"
+
+
+def test_export_update_backbones_writes_segment_fastas(tmp_path: Path, basic_update_db: Path):
+    processor = PadAlignment(
+        reference_alignment=str(DATA_DIR / "master_ref.aligned.fasta"),
+        input_dir=str(tmp_path / "query_aln"),
+        base_dir=str(tmp_path),
+        output_dir="pad_out",
+        keep_intermediate_files=True,
+        update_db=str(basic_update_db),
+    )
+
+    out_dir = tmp_path / "db_ref_backbones"
+    resolved = processor.export_update_backbones(str(out_dir))
+
+    assert resolved == str(out_dir)
+    assert (out_dir / "refset_1_aln.fasta").exists()
+    assert (out_dir / "refset_2_aln.fasta").exists()
+    assert ">REF1" in (out_dir / "refset_1_aln.fasta").read_text(encoding="utf-8")

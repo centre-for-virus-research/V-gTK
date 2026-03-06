@@ -1,4 +1,5 @@
 import csv
+import sqlite3
 from pathlib import Path
 
 from FilterAndExtractSequences import FilterAndExtractSequences
@@ -133,3 +134,49 @@ def test_existing_exclusion_status_is_preserved(tmp_path: Path):
     rows = _read_tsv(matrix)
     assert rows[0]["exclusion_status"] == "1"
     assert rows[0]["exclusion_criteria"] == "already excluded"
+
+
+def test_update_db_reference_source_overrides_ref_file(tmp_path: Path):
+    matrix = tmp_path / "gB_matrix_raw.tsv"
+    seqs = tmp_path / "sequences.fa"
+    refs = tmp_path / "refs.tsv"
+    update_db = tmp_path / "update.db"
+
+    with sqlite3.connect(str(update_db)) as conn:
+        conn.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT, segment TEXT)")
+        conn.executemany(
+            "INSERT INTO meta_data(primary_accession, accession_type, segment) VALUES (?, ?, ?)",
+            [("REF_DB", "master", "1"), ("Q1", "query", "1")],
+        )
+        conn.commit()
+
+    _write_tsv(
+        matrix,
+        [["VRL", "REF_DB", "4", "0", "0", ""], ["VRL", "Q1", "4", "0", "0", ""]],
+        ["division", "gi_number", "length", "n", "exclusion_status", "exclusion_criteria"],
+    )
+    seqs.write_text(">REF_DB\nATGC\n>Q1\nAATT\n", encoding="utf-8")
+    refs.write_text("REF_FILE\treference\n", encoding="utf-8")
+
+    processor = FilterAndExtractSequences(
+        genbank_matrix=str(matrix),
+        sequence_file=str(seqs),
+        genbank_matrix_filtered=str(tmp_path),
+        ref_file=str(refs),
+        base_dir=str(tmp_path),
+        output_dir="Sequences",
+        total_length=1,
+        real_length=1,
+        prop_ambigious=None,
+        segmented_virus="N",
+        gb_division=None,
+        valid_divisions=["VRL", "ENV"],
+        seq_type=None,
+        update_db=str(update_db),
+    )
+    processor.process()
+
+    ref_fa = (tmp_path / "Sequences" / "ref_seq.fa").read_text(encoding="utf-8")
+    query_fa = (tmp_path / "Sequences" / "query_seq.fa").read_text(encoding="utf-8")
+    assert ">REF_DB" in ref_fa
+    assert ">Q1" in query_fa

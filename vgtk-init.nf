@@ -303,24 +303,6 @@ process VALIDATE_REF_LIST_DB {
     '''
 }
 
-process EXPORT_UPDATE_ASSETS {
-    when:
-        params.update_db
-    input:
-        path update_db
-    output:
-        path "UpdateAssets", emit: update_assets
-        path "UpdateAssets/ref_list_from_db.tsv", emit: ref_list_from_db
-        path "UpdateAssets/ref_backbones", emit: ref_backbones
-        path "UpdateAssets/tree_manifest.tsv", emit: tree_manifest
-        path "UpdateAssets/existing_ids", emit: existing_ids
-    shell:
-    '''
-    mkdir -p UpdateAssets
-    python !{scripts_dir}/ExportUpdateAssets.py --db !{update_db} --output_dir UpdateAssets
-    '''
-}
-
 process FETCH_GENBANK{
     publishDir "${params.publish_dir}"
     input:
@@ -357,10 +339,14 @@ process DOWNLOAD_GFF{
     shell:
     '''
     MASTER_ARG="!{master_acc}"
+    EXTRA_ARGS=""
     if [ -f "!{master_file_opt}" ]; then
         MASTER_ARG="!{master_file_opt}"
     fi
-    python "!{scripts_dir}/DownloadGFF.py" --accession_ids "$MASTER_ARG" -o . -b .
+    if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
+        EXTRA_ARGS="--update_db !{params.update_db}"
+    fi
+    python "!{scripts_dir}/DownloadGFF.py" --accession_ids "$MASTER_ARG" -o . -b . ${EXTRA_ARGS}
 
     '''
 }
@@ -478,14 +464,19 @@ process FILTER_AND_EXTRACT{
     input:
         path table_in
         path seqs_in
+        path ref_list_path
     output:
         path "query_seq.fa", emit: query_seqs_out
         path "ref_seq.fa", emit: ref_seqs_out
     shell:
     '''
+        EXTRA_ARGS=""
+        if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
+            EXTRA_ARGS="--update_db !{params.update_db}"
+        fi
 
-        python !{scripts_dir}/FilterAndExtractSequences.py -b . -o . -r !{params.ref_list} \
-         -v !{params.is_segmented} -g !{table_in} -sf !{seqs_in}
+        python !{scripts_dir}/FilterAndExtractSequences.py -b . -o . -r !{ref_list_path} \
+         -v !{params.is_segmented} -g !{table_in} -sf !{seqs_in} ${EXTRA_ARGS}
     '''
 }
 
@@ -496,6 +487,7 @@ process BLAST_ALIGNMENT{
         path query_seqs
         path ref_seqs
         path gb_matrix
+        path ref_list_path
     output:
         path "query_tophits.tsv",type: "file", emit: query_tophits
         path "query_uniq_tophits.tsv", type: "file", emit: query_uniq_tophits
@@ -507,12 +499,17 @@ process BLAST_ALIGNMENT{
         
     shell:
     '''
+        UPDATE_BLAST_ARGS=""
+        if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
+            UPDATE_BLAST_ARGS="--update_db !{params.update_db}"
+        fi
+
         if [ "!{params.is_segmented}" = "Y" ]; then
-            python "!{scripts_dir}/BlastAlignment.py" -s Y -f "!{params.ref_list}" -q !{query_seqs} -r !{ref_seqs} \
-             -t . -b . -m !{params.ref_list}  -g !{gb_matrix}
+            python "!{scripts_dir}/BlastAlignment.py" -s Y -f "!{ref_list_path}" -q !{query_seqs} -r !{ref_seqs} \
+             -t . -b . -m !{ref_list_path}  -g !{gb_matrix} ${UPDATE_BLAST_ARGS}
         else
-            python "!{scripts_dir}/BlastAlignment.py" -f "!{params.ref_list}" -q !{query_seqs} -r !{ref_seqs} \
-             -b . -t . -m !{params.ref_list} -g !{gb_matrix}
+            python "!{scripts_dir}/BlastAlignment.py" -f "!{ref_list_path}" -q !{query_seqs} -r !{ref_seqs} \
+             -b . -t . -m !{ref_list_path} -g !{gb_matrix} ${UPDATE_BLAST_ARGS}
         fi
     '''
 }
@@ -536,13 +533,18 @@ process NEXTALIGN_ALIGNMENT{
     shell:
     '''
         TARGET_M="!{master_acc_str}"
+        EXTRA_ARGS=""
         if [ -f "!{master_file_opt}" ]; then
              TARGET_M="!{master_file_opt}"
         fi
 
+        if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
+            EXTRA_ARGS="--update_db !{params.update_db}"
+        fi
+
         python !{scripts_dir}/NextalignAlignment.py  -r !{ref_seqs}  \
          -q !{grouped_fasta_dir} -g !{genbank_matrix} -t . \
-         -f !{ref_seqs_fasta} -m "$TARGET_M" -ms !{master_seq_dir} 
+         -f !{ref_seqs_fasta} -m "$TARGET_M" -ms !{master_seq_dir} ${EXTRA_ARGS}
     '''
 }
 
@@ -559,30 +561,11 @@ process PAD_ALIGNMENT{
         path "*_merged_MSA.fasta", emit: merged_msa
     shell:
     '''
-        TARGET_M="!{master_acc_str}"
-        if [ -f "!{master_file_opt}" ]; then
-             TARGET_M="!{master_file_opt}"
-        fi
-
-        if [ "!{ref_set_aligned_dir}" != "UNSET" ] && [ "!{ref_set_aligned_dir}" != "null" ] && [ -n "!{ref_set_aligned_dir}" ] && [ ! -d "!{ref_set_aligned_dir}" ]; then
-            echo "[error] params.ref_set_aligned points to a non-existent directory: !{ref_set_aligned_dir}" >&2
-            exit 1
-        fi
-
-        PRECOMP_ARGS=""
-        UPDATE_PAD_ARGS=""
-        if [ -n "!{ref_set_aligned_dir}" ] && [ "!{ref_set_aligned_dir}" != "null" ] && [ "!{ref_set_aligned_dir}" != "UNSET" ] && [ -d "!{ref_set_aligned_dir}" ]; then
-            PRECOMP_ARGS="--precomputed_ref_dir !{ref_set_aligned_dir}"
-            echo "Using precomputed segment alignments from !{ref_set_aligned_dir}"
-        fi
-
-        if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
-            UPDATE_PAD_ARGS="--strict_segment_backbone --segment_manifest_out pad_alignment_manifest.tsv"
-        fi
-
         python !{scripts_dir}/PadAlignment.py -nd !{nextalign_dir} \
-        -m "$TARGET_M" \
-        -o . -d . -i !{nextalign_dir}/query_aln --keep_intermediate_files ${PRECOMP_ARGS} ${UPDATE_PAD_ARGS}
+        -m !{master_file_opt} \
+        -o . -d . -i !{nextalign_dir}/query_aln --keep_intermediate_files \
+        --precomputed_ref_dir "!{ref_set_aligned_dir}" --update_db "!{params.update_db}" \
+        --segment_manifest_out pad_alignment_manifest.tsv
     '''
 }
 
@@ -741,138 +724,15 @@ process USHER_PLACEMENT{
     cpus { params.is_segmented == 'Y' ? SEGMENT_PARALLEL_THREADS : MAX_THREADS }
     maxForks HEAVY_TASK_MAX_FORKS
     input:
-        tuple path(mmseq_cluster_dir), path(iqtree_dir), path(padded_aln)
+        tuple val(mmseq_cluster_dir), val(iqtree_dir), path(padded_aln), val(usher_output_dir)
     output:
-        path "Usher_${mmseq_cluster_dir.baseName}", emit: usher_out
+        path "${usher_output_dir}", emit: usher_out
     shell:
     '''
-        CLUSTER_REP=$(find -L !{mmseq_cluster_dir} -name "*_cluster_rep.fasta" -print -quit)
-        TREE_FILE=$(find -L !{iqtree_dir} -name "*.treefile" -print -quit)
-
-        if [ -z "$CLUSTER_REP" ] || [ -z "$TREE_FILE" ]; then
-            echo "[error] Missing MMseqs centroid FASTA or IQ-TREE treefile." >&2
-            echo "[error] centroid: $CLUSTER_REP" >&2
-            echo "[error] tree:     $TREE_FILE" >&2
-            exit 1
-        fi
-
-        REF_ID=$(seqkit seq -n "$CLUSTER_REP" | head -n 1)
-        if [ -z "$REF_ID" ]; then
-            echo "[error] Could not determine reference ID from centroid FASTA." >&2
-            exit 1
-        fi
-
-        # faToVcf may fail if the chosen reference ID is not present in the input MSA
-        if ! seqkit seq -n "!{padded_aln}" | grep -Fxq "$REF_ID"; then
-            echo "[warn] Reference ID '$REF_ID' is not present in !{padded_aln}; using first MSA ID instead." >&2
-            REF_ID=$(seqkit seq -n "!{padded_aln}" | head -n 1)
-            if [ -z "$REF_ID" ]; then
-                echo "[error] Could not determine fallback reference ID from !{padded_aln}." >&2
-                exit 1
-            fi
-        fi
-
-        mkdir -p Usher_!{mmseq_cluster_dir.baseName}
-        export OMP_NUM_THREADS=!{task.cpus}
-        export OPENBLAS_NUM_THREADS=!{task.cpus}
-        export MKL_NUM_THREADS=!{task.cpus}
-        export NUMEXPR_NUM_THREADS=!{task.cpus}
-        seqkit seq -n "$CLUSTER_REP" > Usher_!{mmseq_cluster_dir.baseName}/centroid_ids.txt
-        seqkit seq -n "!{padded_aln}" > Usher_!{mmseq_cluster_dir.baseName}/aln_ids.txt
-        awk -v ref="$REF_ID" '$0 != ref' Usher_!{mmseq_cluster_dir.baseName}/centroid_ids.txt > Usher_!{mmseq_cluster_dir.baseName}/exclude_ids.txt
-
-        # If exclude list removes all non-reference sequences, faToVcf can crash.
-        ALN_COUNT=$(wc -l < Usher_!{mmseq_cluster_dir.baseName}/aln_ids.txt)
-        EXCLUDE_COUNT=$(wc -l < Usher_!{mmseq_cluster_dir.baseName}/exclude_ids.txt)
-
-        if [ "$ALN_COUNT" -le 1 ]; then
-            echo "[error] Need at least 2 sequences in !{padded_aln}, found ${ALN_COUNT}." >&2
-            exit 1
-        elif [ "$EXCLUDE_COUNT" -ge $((ALN_COUNT - 1)) ]; then
-            if [ "!{params.test}" = "1" ]; then
-                echo "[warn] Exclude list would remove all non-reference sequences (${EXCLUDE_COUNT}/${ALN_COUNT}) in test mode; likely no query sequences to place for this segment. Running faToVcf without -excludeFile." >&2
-            else
-                echo "[warn] Exclude list would remove all non-reference sequences (${EXCLUDE_COUNT}/${ALN_COUNT}); likely no query sequences to place for this segment. Running faToVcf without -excludeFile." >&2
-            fi
-            faToVcf -ref="$REF_ID" "!{padded_aln}" Usher_!{mmseq_cluster_dir.baseName}/all_samples.vcf
-        elif ! faToVcf -ref="$REF_ID" -excludeFile=Usher_!{mmseq_cluster_dir.baseName}/exclude_ids.txt \
-            "!{padded_aln}" Usher_!{mmseq_cluster_dir.baseName}/all_samples.vcf; then
-            echo "[warn] faToVcf failed with -excludeFile; retrying without exclude filter." >&2
-            faToVcf -ref="$REF_ID" "!{padded_aln}" Usher_!{mmseq_cluster_dir.baseName}/all_samples.vcf
-        fi
-
-        if usher --help 2>&1 | grep -q -- ' -T '; then
-            usher \
-                -v Usher_!{mmseq_cluster_dir.baseName}/all_samples.vcf \
-                -t "$TREE_FILE" \
-                -d Usher_!{mmseq_cluster_dir.baseName} \
-                -o Usher_!{mmseq_cluster_dir.baseName}/usher.pb \
-                -C -u -T !{task.cpus}
-        else
-            usher \
-                -v Usher_!{mmseq_cluster_dir.baseName}/all_samples.vcf \
-                -t "$TREE_FILE" \
-                -d Usher_!{mmseq_cluster_dir.baseName} \
-                -o Usher_!{mmseq_cluster_dir.baseName}/usher.pb \
-                -C -u
-        fi
-    '''
-}
-
-process USHER_UPDATE_PLACEMENT {
-    publishDir "${params.publish_dir}"
-    cpus { params.is_segmented == 'Y' ? SEGMENT_PARALLEL_THREADS : MAX_THREADS }
-    maxForks HEAVY_TASK_MAX_FORKS
-    input:
-        tuple path(padded_aln), path(tree_manifest), path(existing_ids_dir)
-    output:
-        path "UsherUpdate_${padded_aln.baseName}", emit: usher_out
-    shell:
-    '''
-        SEG_NUM=$(basename "!{padded_aln}" | sed -E "s/_dedup\\.fasta$//" | grep -oE "[0-9]+" | head -n 1)
-        if [ -z "$SEG_NUM" ]; then
-            SEG_NUM="0"
-        fi
-
-        TREE_FILE=$(awk -F "\t" -v seg="$SEG_NUM" "NR>1 && \$1==seg {print \$3; exit}" !{tree_manifest})
-        if [ -z "$TREE_FILE" ] || [ ! -f "$TREE_FILE" ]; then
-            echo "[error] Missing tree for segment ${SEG_NUM} in !{tree_manifest}" >&2
-            exit 1
-        fi
-
-        EXISTING_IDS_FILE="!{existing_ids_dir}/segment_${SEG_NUM}_ids.txt"
-        if [ ! -f "$EXISTING_IDS_FILE" ]; then
-            EXISTING_IDS_FILE=""
-        fi
-
-        REF_ID=$(seqkit seq -n "!{padded_aln}" | head -n 1)
-        if [ -z "$REF_ID" ]; then
-            echo "[error] Could not resolve reference ID from !{padded_aln}" >&2
-            exit 1
-        fi
-
-        mkdir -p UsherUpdate_!{padded_aln.baseName}
-        if [ -n "$EXISTING_IDS_FILE" ]; then
-            faToVcf -ref="$REF_ID" -excludeFile="$EXISTING_IDS_FILE" "!{padded_aln}" UsherUpdate_!{padded_aln.baseName}/all_samples.vcf
-        else
-            faToVcf -ref="$REF_ID" "!{padded_aln}" UsherUpdate_!{padded_aln.baseName}/all_samples.vcf
-        fi
-
-        if usher --help 2>&1 | grep -q -- " -T "; then
-            usher \
-                -v UsherUpdate_!{padded_aln.baseName}/all_samples.vcf \
-                -t "$TREE_FILE" \
-                -d UsherUpdate_!{padded_aln.baseName} \
-                -o UsherUpdate_!{padded_aln.baseName}/usher.pb \
-                -C -u -T !{task.cpus}
-        else
-            usher \
-                -v UsherUpdate_!{padded_aln.baseName}/all_samples.vcf \
-                -t "$TREE_FILE" \
-                -d UsherUpdate_!{padded_aln.baseName} \
-                -o UsherUpdate_!{padded_aln.baseName}/usher.pb \
-                -C -u
-        fi
+        python !{scripts_dir}/UsherPlacement.py --padded_aln !{padded_aln} \
+        --mmseq_cluster_dir "!{mmseq_cluster_dir}" --iqtree_dir "!{iqtree_dir}" \
+        --output_dir "!{usher_output_dir}" --update_db "!{params.update_db}" \
+        --threads !{task.cpus} --test_mode !{params.test}
     '''
 }
 
@@ -965,9 +825,9 @@ process CREATE_SQLITE_DB {
         path host_taxa
         path software_info
         path fasta_sequences
-        path iqtree_dirs          // Can be multiple directories for segmented viruses
-        path mmseq_cluster_dirs   // Can be multiple directories for segmented viruses
-        path usher_dirs           // Can be multiple directories for segmented viruses
+        path iqtree_dirs, stageAs: 'iqtree_inputs/*'          // Can be multiple directories for segmented viruses
+        path mmseq_cluster_dirs, stageAs: 'mmseq_inputs/*'   // Can be multiple directories for segmented viruses
+        path usher_dirs, stageAs: 'usher_inputs/*'           // Can be multiple directories for segmented viruses
         path filtered_tsv
         path filtered_ids
     output:
@@ -984,10 +844,6 @@ process CREATE_SQLITE_DB {
 
     TREE_MANIFEST="tree_manifest.tsv"
     printf "source\tname\tsegment_key\tpath\n" > "$TREE_MANIFEST"
-
-    if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ] && [ -f "UpdateAssets/tree_manifest.tsv" ]; then
-        awk -F '\t' 'NR>1 {printf "%s\t%s_%s\t%s\t%s\n", $2, $2, $1, $1, $3}' UpdateAssets/tree_manifest.tsv >> "$TREE_MANIFEST"
-    fi
 
     for d in IQTree_MMseqClusters_*; do
         [ -d "$d" ] || continue
@@ -1049,7 +905,7 @@ process CREATE_SQLITE_DB {
 
     UPDATE_ARGS=""
     if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
-        UPDATE_ARGS="--update --update_db !{params.update_db} --batch_id nf_${workflow.runName}"
+        UPDATE_ARGS="--update --update_db !{params.update_db} --batch_id nf_!{workflow.runName}"
     fi
 
     python !{scripts_dir}/CreateSqliteDB.py -m !{meta_data} \
@@ -1246,24 +1102,23 @@ workflow {
     def ref_list_file = file(params.ref_list)
     def genbank_xml_dir
     def ref_backbone_dir = (params.ref_set_aligned ?: 'UNSET')
+    def effective_ref_list = ref_list_file
 
     if( UPDATE_MODE ){
         VALIDATE_REF_LIST_DB(ref_list_file, file(params.update_db))
-        EXPORT_UPDATE_ASSETS(file(params.update_db))
-        ref_backbone_dir = EXPORT_UPDATE_ASSETS.out.ref_backbones
     }
     
     // Logic: If xml_dir is provided, use it. Otherwise fetch from GenBank.
     if( params.xml_dir ){
         genbank_xml_dir = file(params.xml_dir)
     } else {
-        FETCH_GENBANK(params.tax_id, ref_list_file)
+        FETCH_GENBANK(params.tax_id, effective_ref_list)
         genbank_xml_dir = FETCH_GENBANK.out.gen_bank_XML
     }
 
-    DOWNLOAD_GFF(params.ref_list, ref_list_file)
+    DOWNLOAD_GFF(params.ref_list, effective_ref_list)
 
-    GENBANK_PARSER(params.ref_list, genbank_xml_dir)
+    GENBANK_PARSER(effective_ref_list, genbank_xml_dir)
 
     def gb_matrix_ch = GENBANK_PARSER.out.gb_matrix
     def gb_seqs_ch = GENBANK_PARSER.out.sequences_out
@@ -1289,11 +1144,13 @@ workflow {
     }
 
     FILTER_AND_EXTRACT(data, 
-                        gb_seqs_ch)
+                        gb_seqs_ch,
+                        effective_ref_list)
 
     BLAST_ALIGNMENT(FILTER_AND_EXTRACT.out.query_seqs_out,
                     FILTER_AND_EXTRACT.out.ref_seqs_out,
-                    data)
+                    data,
+                    effective_ref_list)
 
     // Add VALIDATE_SEGMENT here
     if (params.is_segmented == 'Y') {
@@ -1316,11 +1173,11 @@ workflow {
                         BLAST_ALIGNMENT.out.ref_seqs_dir,
                         BLAST_ALIGNMENT.out.ref_seqs_fasta,
                         BLAST_ALIGNMENT.out.master_seq_dir,
-                        params.ref_list,
-                        ref_list_file)
+                    params.ref_list,
+                    effective_ref_list)
     PAD_ALIGNMENT(NEXTALIGN_ALIGNMENT.out,
                   params.ref_list,
-                  ref_list_file,
+                effective_ref_list,
                   ref_backbone_dir)
     
     // Collect sequences that were filtered during nextalign alignment
@@ -1344,19 +1201,13 @@ workflow {
     def mmseq_collected
     def usher_collected
 
+    def usher_input_ch
+
     if( UPDATE_MODE ){
-        update_usher_input = cluster_input_ch
-            .combine(EXPORT_UPDATE_ASSETS.out.tree_manifest)
-            .combine(EXPORT_UPDATE_ASSETS.out.existing_ids)
-            .map { left, existing_ids_dir ->
-                def padded_aln = left[0]
-                def tree_manifest = left[1]
-                tuple(padded_aln, tree_manifest, existing_ids_dir)
+        usher_input_ch = cluster_input_ch
+            .map { fasta ->
+                tuple('UNSET', 'UNSET', fasta, "UsherUpdate_${fasta.baseName}")
             }
-        USHER_UPDATE_PLACEMENT(update_usher_input)
-        usher_collected = USHER_UPDATE_PLACEMENT.out.usher_out.collect()
-        iqtree_collected = EXPORT_UPDATE_ASSETS.out.update_assets.collect()
-        mmseq_collected = EXPORT_UPDATE_ASSETS.out.update_assets.collect()
     } else {
         MMSEQS_CLUSTERING(cluster_input_ch)
         IQ_TREE(MMSEQS_CLUSTERING.out.mmseq_clusters)
@@ -1392,13 +1243,18 @@ workflow {
             .join(iqtree_with_key)
             .join(dedup_with_key)
             .map { key, mmseq_dir, iqtree_dir, dedup_fasta -> 
-                tuple(mmseq_dir, iqtree_dir, dedup_fasta)
+                tuple(mmseq_dir.toString(), iqtree_dir.toString(), dedup_fasta, "Usher_${mmseq_dir.name}")
             }
-        
-        USHER_PLACEMENT(usher_input_ch)
+
         iqtree_collected = IQ_TREE.out.iqtree_out.collect()
         mmseq_collected = MMSEQS_CLUSTERING.out.mmseq_clusters.collect()
-        usher_collected = USHER_PLACEMENT.out.usher_out.collect()
+    }
+
+    USHER_PLACEMENT(usher_input_ch)
+    usher_collected = USHER_PLACEMENT.out.usher_out.collect()
+    if( UPDATE_MODE ){
+        iqtree_collected = usher_collected
+        mmseq_collected = usher_collected
     }
     
     // VERY_FAST_TREE(PAD_ALIGNMENT.out.merged_msa)
@@ -1409,7 +1265,7 @@ workflow {
                         BLAST_ALIGNMENT.out.query_uniq_tophits,
                         data,
                         params.ref_list,
-                        ref_list_file)
+                        effective_ref_list)
                         
     SOFTWARE_VERSION()
     
