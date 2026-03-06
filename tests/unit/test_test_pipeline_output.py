@@ -111,3 +111,47 @@ def test_non_segmented_bad_blast_format_fails_cleanly(tmp_path: Path):
     assert result.returncode == 1
     assert "BLAST file has 1 columns, expected 4" in result.stdout
     assert "traceback" not in result.stderr.lower()
+
+
+def test_non_segmented_empty_blast_file_warns_but_does_not_fail(tmp_path: Path):
+    db = tmp_path / "ok.db"
+    con = sqlite3.connect(db)
+    cur = con.cursor()
+    cur.execute("CREATE TABLE meta_data (primary_accession TEXT, segment TEXT)")
+    cur.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, alignment_name TEXT)")
+    cur.execute("CREATE TABLE excluded_accessions (primary_accession TEXT, reason TEXT)")
+    cur.execute("INSERT INTO meta_data VALUES ('A1', '1')")
+    cur.execute("INSERT INTO meta_data VALUES ('REF1', '1')")
+    cur.execute("INSERT INTO sequence_alignment VALUES ('A1', 'REF1')")
+    cur.execute("INSERT INTO sequence_alignment VALUES ('REF1', 'REF1')")
+    con.commit()
+    con.close()
+
+    gb_matrix = tmp_path / "gb.tsv"
+    _write_tsv(gb_matrix, "primary_accession\thost\texclusion_status", ["A1\thuman\t1"])
+
+    output = tmp_path / "out.txt"
+    blast_hits = tmp_path / "blast.tsv"
+    blast_hits.write_text("", encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--mode",
+            "non_segmented",
+            "--blast_hits",
+            str(blast_hits),
+            "--gb_matrix",
+            str(gb_matrix),
+            "--sqlite_db",
+            str(db),
+            "--output",
+            str(output),
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0
+    assert "all matrix records are excluded" in result.stdout
+    assert "traceback" not in result.stderr.lower()

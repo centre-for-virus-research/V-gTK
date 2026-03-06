@@ -318,17 +318,42 @@ def run_segmented(args) -> Tuple[List[str], bool]:
 def run_non_segmented(args) -> Tuple[List[str], bool]:
     out: List[str] = ["=== Testing Non-Segmented Virus Pipeline Output ===", ""]
 
+    gb_header = read_tsv_header(args.gb_matrix)
+
     out.append("Test 1: Checking BLAST file structure...")
     cols = count_columns_tsv(args.blast_hits)
     if cols == 4:
         out.append("✓ PASS: BLAST file has 4 columns (query, reference, score, strand)")
+    elif cols == 0:
+        total_matrix_rows = 0
+        excluded_rows = 0
+        exclusion_idx = gb_header.index("exclusion_status") if "exclusion_status" in gb_header else None
+        for row in iter_tsv_rows(args.gb_matrix):
+            total_matrix_rows += 1
+            if exclusion_idx is not None and exclusion_idx < len(row):
+                val = (row[exclusion_idx] or "").strip()
+                if val in {"1", "true", "True", "TRUE"}:
+                    excluded_rows += 1
+
+        if total_matrix_rows == 0:
+            out.append("⚠ WARNING: BLAST hits file is empty and matrix has no rows")
+        elif exclusion_idx is not None and excluded_rows == total_matrix_rows:
+            out.append(
+                "⚠ WARNING: BLAST hits file is empty (0 columns); all matrix records are excluded "
+                f"({excluded_rows}/{total_matrix_rows})"
+            )
+        else:
+            out.append(
+                "✗ FAIL: BLAST hits file is empty but matrix contains non-excluded records; "
+                "this suggests an upstream BLAST/alignment failure"
+            )
+            return out, False
     else:
         out.append(f"✗ FAIL: BLAST file has {cols} columns, expected 4")
         return out, False
     out.append("")
 
     out.append("Test 2: Verifying no segment column for non-segmented virus...")
-    gb_header = read_tsv_header(args.gb_matrix)
     if "segment_validated" in gb_header:
         out.append("⚠ WARNING: segment_validated column found (unexpected for non-segmented virus)")
     else:

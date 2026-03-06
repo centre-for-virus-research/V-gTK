@@ -19,10 +19,79 @@ def parsePositiveInt = { value, paramName ->
     }
 }
 
-def maxThreadsRaw = params.max_threads ?: Math.min(8, Runtime.getRuntime().availableProcessors())
-def MAX_THREADS = parsePositiveInt(maxThreadsRaw, 'max_threads')
+def parseCpuSetCount = { String raw ->
+    if( !raw ) return null
+    int total = 0
+    raw.split(',').each { token ->
+        def t = token.trim()
+        if( !t ) return
+        if( t.contains('-') ){
+            def parts = t.split('-')
+            if( parts.size() == 2 ){
+                def start = parts[0] as Integer
+                def end = parts[1] as Integer
+                if( end >= start ) total += (end - start + 1)
+            }
+        } else {
+            total += 1
+        }
+    }
+    return total > 0 ? total : null
+}
+
+def detectEffectiveCpuLimit = {
+    def candidates = []
+
+    def runtimeCpus = Runtime.getRuntime().availableProcessors()
+    if( runtimeCpus > 0 ) candidates << runtimeCpus
+
+    def cgroupV2 = new File('/sys/fs/cgroup/cpu.max')
+    if( cgroupV2.exists() ){
+        def txt = cgroupV2.text.trim()
+        def parts = txt.split(/\s+/)
+        if( parts.size() >= 2 && parts[0] != 'max' ){
+            def quota = parts[0] as Long
+            def period = parts[1] as Long
+            if( quota > 0 && period > 0 ){
+                candidates << Math.max(1, (int)Math.floor((double)quota / (double)period))
+            }
+        }
+    }
+
+    def cgroupV1Quota = new File('/sys/fs/cgroup/cpu/cpu.cfs_quota_us')
+    def cgroupV1Period = new File('/sys/fs/cgroup/cpu/cpu.cfs_period_us')
+    if( cgroupV1Quota.exists() && cgroupV1Period.exists() ){
+        def quota = cgroupV1Quota.text.trim() as Long
+        def period = cgroupV1Period.text.trim() as Long
+        if( quota > 0 && period > 0 ){
+            candidates << Math.max(1, (int)Math.floor((double)quota / (double)period))
+        }
+    }
+
+    def cpusetCandidates = ['/sys/fs/cgroup/cpuset.cpus.effective', '/sys/fs/cgroup/cpuset/cpuset.cpus']
+    cpusetCandidates.each { p ->
+        def f = new File(p)
+        if( f.exists() ){
+            def count = parseCpuSetCount(f.text.trim())
+            if( count != null && count > 0 ) candidates << count
+        }
+    }
+
+    return candidates ? candidates.min() : 1
+}
+
+def EFFECTIVE_CPU_LIMIT = detectEffectiveCpuLimit()
+def maxThreadsRequestedRaw = params.max_threads ?: EFFECTIVE_CPU_LIMIT
+def maxThreadsRequested = parsePositiveInt(maxThreadsRequestedRaw, 'max_threads')
+def MAX_THREADS = Math.min(maxThreadsRequested, EFFECTIVE_CPU_LIMIT)
+if( maxThreadsRequested > EFFECTIVE_CPU_LIMIT ){
+    log.warn("params.max_threads=${maxThreadsRequested} exceeds available CPUs (${EFFECTIVE_CPU_LIMIT}); clamping to ${MAX_THREADS}")
+}
+params.max_threads = MAX_THREADS
 
 def SEGMENT_PARALLEL_THREADS = Math.max(1, (int)Math.floor(MAX_THREADS / 8))
+def HEAVY_TASK_CPUS = params.is_segmented == 'Y' ? SEGMENT_PARALLEL_THREADS : MAX_THREADS
+def HEAVY_TASK_MAX_FORKS = Math.max(1, (int)Math.floor((double)MAX_THREADS / (double)Math.max(1, HEAVY_TASK_CPUS)))
 // 1. List your script's explicitly defined parameters (keep this in sync!)
 def scriptDefinedParams = [
     'tax_id', 'db_name', 'is_segmented', 'extra_info_fill', 'test',
@@ -575,6 +644,7 @@ process TEST_SUBSAMPLE_CLUSTER_INPUT {
 process MMSEQS_CLUSTERING{
     publishDir "${params.publish_dir}"
     cpus { params.is_segmented == 'Y' ? SEGMENT_PARALLEL_THREADS : MAX_THREADS }
+    maxForks HEAVY_TASK_MAX_FORKS
     input:
         path padded_aln
     output:
@@ -595,6 +665,7 @@ process MMSEQS_CLUSTERING{
 process IQ_TREE{
     publishDir "${params.publish_dir}"
     cpus { params.is_segmented == 'Y' ? SEGMENT_PARALLEL_THREADS : MAX_THREADS }
+    maxForks HEAVY_TASK_MAX_FORKS
     input:
         path mmseq_cluster_dir
     output:
@@ -668,6 +739,7 @@ process IQ_TREE{
 process USHER_PLACEMENT{
     publishDir "${params.publish_dir}"
     cpus { params.is_segmented == 'Y' ? SEGMENT_PARALLEL_THREADS : MAX_THREADS }
+    maxForks HEAVY_TASK_MAX_FORKS
     input:
         tuple path(mmseq_cluster_dir), path(iqtree_dir), path(padded_aln)
     output:
@@ -750,6 +822,7 @@ process USHER_PLACEMENT{
 process USHER_UPDATE_PLACEMENT {
     publishDir "${params.publish_dir}"
     cpus { params.is_segmented == 'Y' ? SEGMENT_PARALLEL_THREADS : MAX_THREADS }
+    maxForks HEAVY_TASK_MAX_FORKS
     input:
         tuple path(padded_aln), path(tree_manifest), path(existing_ids_dir)
     output:
@@ -848,6 +921,7 @@ process SOFTWARE_VERSION {
 process VERY_FAST_TREE{
     publishDir "${params.publish_dir}"
     cpus { params.is_segmented == 'Y' ? SEGMENT_PARALLEL_THREADS : MAX_THREADS }
+    maxForks HEAVY_TASK_MAX_FORKS
     when: 
         params.update == null
     input:
