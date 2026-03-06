@@ -1,9 +1,24 @@
 import sqlite3
+import shutil
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from CreateSqliteDB import CreateSqliteDB
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+REAL_UPDATE_DB = REPO_ROOT / "test_data" / "RABV_test" / "rabv-jul0425.db"
+
+
+@pytest.fixture()
+def real_update_db_copy(tmp_path: Path) -> Path:
+    if not REAL_UPDATE_DB.exists():
+        pytest.skip(f"Real update DB not found at {REAL_UPDATE_DB}")
+    dst = tmp_path / "rabv-jul0425.copy.db"
+    shutil.copyfile(REAL_UPDATE_DB, dst)
+    return dst
 
 
 def _write_tsv(path: Path, rows, columns):
@@ -83,6 +98,79 @@ def _build_db(tmp_path: Path, inp: dict, update=False, update_db=None, filtered_
     db.create_db()
 
 
+def _write_realdb_compatible_lookup_tables(inp: dict):
+    pd.DataFrame(
+        [["id1", "001", "World", "World Full", "0", "0", "0", "dev", "r1", "sr1", "ir1"]],
+        columns=[
+            "id",
+            "m49_code",
+            "display_name",
+            "full_name",
+            "is_ldc",
+            "is_lldc",
+            "is_sids",
+            "development_status",
+            "m49_region_id",
+            "m49_sub_region_id",
+            "m49_intermediate_region_id",
+        ],
+    ).to_csv(inp["m49_country"], index=False)
+
+    pd.DataFrame(
+        [["ir1", "100", "Inter", "sr1"]],
+        columns=["id", "m49_code", "display_name", "m49_sub_region_id"],
+    ).to_csv(inp["m49_inter"], index=False)
+
+    pd.DataFrame(
+        [["r1", "10", "Region"]],
+        columns=["id", "m49_code", "display_name"],
+    ).to_csv(inp["m49_region"], index=False)
+
+    pd.DataFrame(
+        [["sr1", "11", "SubRegion", "r1"]],
+        columns=["id", "m49_code", "display_name", "m49_region_id"],
+    ).to_csv(inp["m49_sub"], index=False)
+
+
+def _write_realdb_compatible_meta(inp: dict, db_path: Path, rows: list[dict]):
+    conn = sqlite3.connect(str(db_path))
+    try:
+        base = pd.read_sql_query("SELECT * FROM meta_data LIMIT 1", conn)
+    finally:
+        conn.close()
+
+    if base.empty:
+        pytest.skip("Real update DB has empty meta_data table")
+
+    base_row = base.iloc[0].to_dict()
+    out_rows = []
+    for override in rows:
+        row = dict(base_row)
+        row.update(override)
+        out_rows.append(row)
+
+    pd.DataFrame(out_rows, columns=base.columns).to_csv(inp["meta"], sep="\t", index=False)
+
+
+def _write_realdb_compatible_genes(inp: dict, db_path: Path):
+    conn = sqlite3.connect(str(db_path))
+    try:
+        base = pd.read_sql_query("SELECT * FROM genes LIMIT 1", conn)
+    finally:
+        conn.close()
+
+    if base.empty:
+        # fallback to current minimal schema if real DB has no rows
+        pd.DataFrame([["geneA", "Gene A", "Gene A", "Genome"]], columns=["name", "description", "display_name", "parent_name"]).to_csv(
+            inp["gene"], sep="\t", index=False
+        )
+        return
+
+    row = base.iloc[0].to_dict()
+    row.update({"name": "geneA", "description": "Gene A", "display_name": "Gene A", "parent_name": "Genome"})
+    pd.DataFrame([row], columns=base.columns).to_csv(inp["gene"], sep="\t", index=False)
+
+
 def test_create_sqlite_db_update_mode_upserts_without_growth(tmp_path: Path):
     initial = _inputs(tmp_path, "initial", aln_a="ATGC")
     _build_db(tmp_path, initial, update=False)
@@ -145,3 +233,197 @@ def test_create_sqlite_db_filtered_ids_do_not_exclude_reference_rows(tmp_path: P
         assert excluded == [("Q1", "alignment_filtering")]
     finally:
         conn.close()
+
+
+def test_update_mode_logs_duplicate_non_upsert_keys_against_real_db(tmp_path: Path, real_update_db_copy: Path):
+    inp = _inputs(tmp_path, "real_dup_keys", aln_a="ATGC")
+
+    conn = sqlite3.connect(str(real_update_db_copy))
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT m49_code FROM m49_country WHERE m49_code IS NOT NULL AND TRIM(m49_code) != '' LIMIT 1")
+        row = cur.fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        pytest.skip("No m49_code values found in real update DB")
+    existing_code = str(row[0]).strip()
+
+    _write_realdb_compatible_meta(
+        inp,
+        real_update_db_copy,
+        [
+            {"primary_accession": "A", "segment": "1", "accession_type": "query", "exclusion_status": ""},
+            {"primary_accession": "B", "segment": "1", "accession_type": "query", "exclusion_status": ""},
+        ],
+    )
+
+    # Intentionally collide with existing m49_country code and add one synthetic new code.
+    pd.DataFrame(
+        [
+            ["id_dup", existing_code, "World_duplicate", "World_duplicate_full", "0", "0", "0", "dev", "r1", "sr1", "ir1"],
+            ["id_new", "ZZZ", "Synthetic Test Region", "Synthetic Full", "0", "0", "0", "dev", "r1", "sr1", "ir1"],
+        ],
+        columns=[
+            "id",
+            "m49_code",
+            "display_name",
+            "full_name",
+            "is_ldc",
+            "is_lldc",
+            "is_sids",
+            "development_status",
+            "m49_region_id",
+            "m49_sub_region_id",
+            "m49_intermediate_region_id",
+        ],
+    ).to_csv(inp["m49_country"], index=False)
+
+    _write_realdb_compatible_lookup_tables(inp)
+    # overwrite country again with our duplicate/new rows after compatibility helper
+    pd.DataFrame(
+        [
+            ["id_dup", existing_code, "World_duplicate", "World_duplicate_full", "0", "0", "0", "dev", "r1", "sr1", "ir1"],
+            ["id_new", "ZZZ", "Synthetic Test Region", "Synthetic Full", "0", "0", "0", "dev", "r1", "sr1", "ir1"],
+        ],
+        columns=[
+            "id",
+            "m49_code",
+            "display_name",
+            "full_name",
+            "is_ldc",
+            "is_lldc",
+            "is_sids",
+            "development_status",
+            "m49_region_id",
+            "m49_sub_region_id",
+            "m49_intermediate_region_id",
+        ],
+    ).to_csv(inp["m49_country"], index=False)
+
+    pd.DataFrame(
+        [["1001", "Host A", "species", "root;A"], ["1002", "Host B", "species", "root;B"]],
+        columns=["taxonomy_id", "scientific_name", "rank", "lineage"],
+    ).to_csv(inp["host_taxa"], sep="\t", index=False)
+    _write_realdb_compatible_genes(inp, real_update_db_copy)
+
+    _build_db(tmp_path, inp, update=True, update_db=real_update_db_copy)
+
+    conn = sqlite3.connect(str(real_update_db_copy))
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT reason FROM update_exclusions WHERE table_name='m49_country' ORDER BY rowid DESC LIMIT 5"
+        )
+        reasons = [r[0] for r in cur.fetchall()]
+        assert "duplicate_key_in_db" in reasons
+
+        cur.execute("SELECT COUNT(*) FROM m49_country WHERE m49_code='ZZZ'")
+        assert cur.fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_update_mode_filtered_ids_keeps_real_master_even_when_listed(tmp_path: Path, real_update_db_copy: Path):
+    conn = sqlite3.connect(str(real_update_db_copy))
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT primary_accession, segment FROM meta_data "
+            "WHERE lower(coalesce(accession_type,''))='master' LIMIT 1"
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        pytest.skip("No master accession found in real update DB")
+
+    master_acc, master_segment = row[0], str(row[1]) if row[1] is not None else "1"
+
+    inp = _inputs(tmp_path, "real_master_filtered", aln_a="ATGC")
+
+    _write_realdb_compatible_meta(
+        inp,
+        real_update_db_copy,
+        [
+            {"primary_accession": master_acc, "segment": master_segment, "accession_type": "master", "exclusion_status": ""},
+            {"primary_accession": "Q_REAL_FILTER", "segment": master_segment, "accession_type": "query", "exclusion_status": ""},
+        ],
+    )
+
+    pd.DataFrame(
+        [
+            [master_acc, master_acc, "ATGC", master_segment],
+            ["Q_REAL_FILTER", master_acc, "AT--", master_segment],
+        ],
+        columns=["primary_accession", "alignment_name", "alignment", "segment"],
+    ).to_csv(inp["aln"], sep="\t", index=False)
+
+    pd.DataFrame(
+        [
+            [master_acc, master_acc, master_acc, "1", "4", "1", "4", "P", master_segment],
+            ["Q_REAL_FILTER", master_acc, master_acc, "1", "4", "1", "4", "P", master_segment],
+        ],
+        columns=[
+            "accession",
+            "master_ref_accession",
+            "reference_accession",
+            "aln_start",
+            "aln_end",
+            "cds_start",
+            "cds_end",
+            "product",
+            "segment",
+        ],
+    ).to_csv(inp["features"], sep="\t", index=False)
+
+    pd.DataFrame(
+        [[master_acc, master_acc, "ins:2:A", master_segment], ["Q_REAL_FILTER", master_acc, "ins:3:T", master_segment]],
+        columns=["primary_accession", "reference", "insertion", "segment"],
+    ).to_csv(inp["insertions"], sep="\t", index=False)
+
+    pd.DataFrame(
+        [["2001", "Host Master", "species", "root;master"], ["2002", "Host Query", "species", "root;query"]],
+        columns=["taxonomy_id", "scientific_name", "rank", "lineage"],
+    ).to_csv(inp["host_taxa"], sep="\t", index=False)
+    _write_realdb_compatible_genes(inp, real_update_db_copy)
+
+    _write_realdb_compatible_lookup_tables(inp)
+
+    inp["fasta"].write_text(f">{master_acc}\nATGC\n>Q_REAL_FILTER\nATTT\n", encoding="utf-8")
+
+    filtered_ids = tmp_path / "filtered_real_ids.txt"
+    filtered_ids.write_text(f"{master_acc}\nQ_REAL_FILTER\n", encoding="utf-8")
+
+    _build_db(tmp_path, inp, update=True, update_db=real_update_db_copy, filtered_ids_file=filtered_ids)
+
+    conn = sqlite3.connect(str(real_update_db_copy))
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM meta_data WHERE primary_accession=?", (master_acc,))
+        assert cur.fetchone()[0] >= 1
+
+        cur.execute("SELECT reason FROM excluded_accessions WHERE primary_accession='Q_REAL_FILTER' ORDER BY rowid DESC LIMIT 1")
+        q_row = cur.fetchone()
+        assert q_row is not None
+        assert q_row[0] == "alignment_filtering"
+
+        cur.execute("SELECT COUNT(*) FROM excluded_accessions WHERE primary_accession=?", (master_acc,))
+        assert cur.fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_update_mode_fails_on_missing_existing_table_columns(tmp_path: Path, real_update_db_copy: Path):
+    inp = _inputs(tmp_path, "missing_cols_realdb", aln_a="ATGC")
+
+    # Deliberately incomplete for existing real DB m49_country schema.
+    pd.DataFrame(
+        [["001", "World"]],
+        columns=["m49_code", "display_name"],
+    ).to_csv(inp["m49_country"], index=False)
+
+    with pytest.raises(ValueError, match="missing columns required by existing DB schema"):
+        _build_db(tmp_path, inp, update=True, update_db=real_update_db_copy)

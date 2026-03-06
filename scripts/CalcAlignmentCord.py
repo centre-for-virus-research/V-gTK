@@ -32,9 +32,10 @@ class CalculateAlignmentCoordinates:
 			row = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='features'").fetchone()
 			if row is None:
 				return set()
+			cols = [r[1] for r in conn.execute("PRAGMA table_info(features)").fetchall()]
+			if "accession" not in cols:
+				raise ValueError("Update DB features table is missing required column: accession")
 			df = pd.read_sql_query("SELECT accession FROM features WHERE accession IS NOT NULL", conn)
-			if "accession" not in df.columns:
-				return set()
 			return set(df["accession"].astype(str).str.strip().tolist())
 		finally:
 			conn.close()
@@ -44,7 +45,7 @@ class CalculateAlignmentCoordinates:
 			return set()
 		df = pd.read_csv(self.update_scope_tsv, sep='\t', dtype=str)
 		if 'primary_accession' not in df.columns:
-			return set()
+			raise ValueError(f"Update scope TSV is missing required column: primary_accession ({self.update_scope_tsv})")
 		return set(df['primary_accession'].fillna('').astype(str).str.strip().tolist())
 
 	def load_segment_map(self):
@@ -52,7 +53,7 @@ class CalculateAlignmentCoordinates:
 			return {}
 		df = pd.read_csv(self.segment_map_tsv, sep='\t', dtype=str)
 		if 'primary_accession' not in df.columns or 'segment' not in df.columns:
-			return {}
+			raise ValueError(f"Segment map TSV is missing required columns: primary_accession, segment ({self.segment_map_tsv})")
 		df['primary_accession'] = df['primary_accession'].fillna('').astype(str).str.strip()
 		df['segment'] = df['segment'].fillna('').astype(str).str.strip()
 		return dict(zip(df['primary_accession'], df['segment']))

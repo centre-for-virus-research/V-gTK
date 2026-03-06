@@ -248,6 +248,13 @@ class CreateSqliteDB:
 		return row is not None
 
 	@staticmethod
+	def _table_columns(conn, table):
+		if not CreateSqliteDB._table_exists(conn, table):
+			return []
+		rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+		return [r[1] for r in rows]
+
+	@staticmethod
 	def _normalize_key_series(s):
 		return s.fillna("").astype(str).str.strip()
 
@@ -268,6 +275,66 @@ class CreateSqliteDB:
 		before = len(df)
 		df2 = df.drop_duplicates(subset=key_cols, keep="first")
 		return df2, (before - len(df2))
+
+	def _align_df_to_existing_schema(self, conn, table, df):
+		"""Align incoming dataframe to an existing SQLite table schema.
+
+		- Drops incoming columns absent from existing table (warn)
+		- Fails if any existing table columns are missing in incoming dataframe
+		- Reorders to existing table column order
+		"""
+		existing_cols = self._table_columns(conn, table)
+		if not existing_cols:
+			return df
+
+		incoming_cols = list(df.columns)
+		extra_cols = [c for c in incoming_cols if c not in existing_cols]
+		if extra_cols:
+			print(
+				f"[CreateSqliteDB][warn] Incoming '{table}' has columns not present in existing DB schema; "
+				f"dropping: {extra_cols}"
+			)
+			df = df.drop(columns=extra_cols)
+
+		missing_cols = [c for c in existing_cols if c not in df.columns]
+		if missing_cols:
+			raise ValueError(
+				f"Incoming '{table}' dataframe is missing columns required by existing DB schema: {missing_cols}"
+			)
+
+		return df[existing_cols]
+
+	def _resolve_key_cols_for_existing_schema(self, conn, table, key_cols, incoming_cols):
+		existing_cols = set(self._table_columns(conn, table))
+		if not existing_cols:
+			return key_cols
+
+		resolved = [c for c in key_cols if c in existing_cols and c in incoming_cols]
+		if resolved != key_cols:
+			print(
+				f"[CreateSqliteDB][warn] Adjusted key columns for '{table}' to match existing DB schema: "
+				f"requested={key_cols}, resolved={resolved}"
+			)
+
+		if resolved:
+			return resolved
+
+		fallback_candidates = [
+			"primary_accession", "accession", "header", "name", "m49_code", "id"
+		]
+		for c in fallback_candidates:
+			if c in existing_cols and c in incoming_cols:
+				print(
+					f"[CreateSqliteDB][warn] Falling back to key column '{c}' for table '{table}' "
+					"due to schema mismatch."
+				)
+				return [c]
+
+		raise ValueError(
+			f"Cannot resolve compatible key columns for table '{table}'. "
+			f"Requested keys={key_cols}; existing columns={sorted(existing_cols)}; "
+			f"incoming columns={sorted(list(incoming_cols))}"
+		)
 
 	def _infer_key_cols(self, table, df):
 		cols = list(df.columns)
@@ -328,6 +395,11 @@ class CreateSqliteDB:
 			else:
 				df.to_sql(table, conn, if_exists="append" if self._table_exists(conn, table) else "replace", index=False)
 			return len(df)
+
+		if self.update and self._table_exists(conn, table):
+			df = self._align_df_to_existing_schema(conn, table, df)
+			key_cols = self._resolve_key_cols_for_existing_schema(conn, table, key_cols, set(df.columns))
+
 		for c in key_cols:
 			if c not in df.columns:
 				raise ValueError(f"Incoming '{table}' dataframe missing key column '{c}'")

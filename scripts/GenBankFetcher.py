@@ -185,7 +185,7 @@ class GenBankFetcher:
 	def fetch_genbank_data(self, ids):
 		# Use a separate internal batch size just for efetch
 		batch_n = self.efetch_batch_size
-		if self.test_run:
+		if self.test_run and not self.update_file:
 			ids = random.sample(ids, k=min(50, len(ids)))
 			batch_n=10
 
@@ -455,6 +455,17 @@ class GenBankFetcher:
 				print(f"  ... ({len(updated_versions)-50} more)")
 
 		print(f"Found {len(missing_ids)} missing/new IDs total (updates={len(updated_versions)}, brand-new={len(new_accessions)})")
+
+		if self.test_run and missing_ids:
+			if new_accessions:
+				test_pool = sorted(set(new_accessions))
+				missing_ids = random.sample(test_pool, k=min(50, len(test_pool)))
+				print(f"[update][test_run] sampled {len(missing_ids)} brand-new accessions not present in DB")
+			else:
+				test_pool = sorted(set(missing_ids))
+				missing_ids = random.sample(test_pool, k=min(50, len(test_pool)))
+				print(f"[update][test_run] no brand-new accessions found; sampled {len(missing_ids)} update candidates")
+
 		self._write_update_log(updated_versions, new_accessions)
 		if missing_ids:
 			self.fetch_genbank_data(missing_ids)

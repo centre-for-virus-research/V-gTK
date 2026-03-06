@@ -1,4 +1,6 @@
 import csv
+import shutil
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -11,6 +13,7 @@ from CalcAlignmentCord import CalculateAlignmentCoordinates
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO_ROOT / "test_data" / "unit" / "calc_alignment_cord"
 SCRIPT_PATH = REPO_ROOT / "scripts" / "CalcAlignmentCord.py"
+REAL_UPDATE_DB = REPO_ROOT / "test_data" / "RABV_test" / "rabv-jul0425.db"
 
 
 def read_tsv_as_dicts(path: Path):
@@ -28,6 +31,15 @@ def make_processor(tmp_path: Path):
         master_accession=str(DATA_DIR / "master_list.tsv"),
         blast_uniq_hits=str(DATA_DIR / "query_uniq_tophits.tsv"),
     )
+
+
+@pytest.fixture()
+def real_update_db_copy(tmp_path: Path) -> Path:
+    if not REAL_UPDATE_DB.exists():
+        pytest.skip(f"Real update DB not found at {REAL_UPDATE_DB}")
+    dst = tmp_path / "rabv-jul0425.copy.db"
+    shutil.copyfile(REAL_UPDATE_DB, dst)
+    return dst
 
 
 def test_get_master_list_and_gff_resolution(tmp_path: Path):
@@ -208,3 +220,104 @@ def test_find_gaps_in_fasta_raises_on_segment_mismatch(tmp_path: Path):
 
     with pytest.raises(ValueError, match="Segment mismatch"):
         processor.find_gaps_in_fasta()
+
+
+def test_find_gaps_in_fasta_raises_when_update_scope_missing_primary_accession(tmp_path: Path):
+    bad_scope = tmp_path / "bad_scope.tsv"
+    bad_scope.write_text("wrong_col\nQ_A\n", encoding="utf-8")
+
+    processor = CalculateAlignmentCoordinates(
+        paded_alignment=str(DATA_DIR / "padded_alignment"),
+        master_gff=[str(DATA_DIR / "MASTER1.gff3")],
+        tmp_dir=str(tmp_path),
+        output_dir="Tables",
+        output_file="features.tsv",
+        master_accession=str(DATA_DIR / "master_list.tsv"),
+        blast_uniq_hits=str(DATA_DIR / "query_uniq_tophits.tsv"),
+        update_scope_tsv=str(bad_scope),
+    )
+
+    with pytest.raises(ValueError, match="Update scope TSV is missing required column"):
+        processor.find_gaps_in_fasta()
+
+
+def test_find_gaps_in_fasta_raises_when_segment_map_missing_columns(tmp_path: Path):
+    bad_segment_map = tmp_path / "bad_segment_map.tsv"
+    bad_segment_map.write_text("primary_accession\nQ_A\n", encoding="utf-8")
+
+    processor = CalculateAlignmentCoordinates(
+        paded_alignment=str(DATA_DIR / "padded_alignment"),
+        master_gff=[str(DATA_DIR / "MASTER1.gff3")],
+        tmp_dir=str(tmp_path),
+        output_dir="Tables",
+        output_file="features.tsv",
+        master_accession=str(DATA_DIR / "master_list.tsv"),
+        blast_uniq_hits=str(DATA_DIR / "query_uniq_tophits.tsv"),
+        segment_map_tsv=str(bad_segment_map),
+    )
+
+    with pytest.raises(ValueError, match="Segment map TSV is missing required columns"):
+        processor.find_gaps_in_fasta()
+
+
+def test_find_gaps_in_fasta_raises_when_update_db_features_missing_accession(tmp_path: Path):
+    bad_db = tmp_path / "bad_update.db"
+    conn = sqlite3.connect(str(bad_db))
+    try:
+        conn.execute("CREATE TABLE features (foo TEXT)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    processor = CalculateAlignmentCoordinates(
+        paded_alignment=str(DATA_DIR / "padded_alignment"),
+        master_gff=[str(DATA_DIR / "MASTER1.gff3")],
+        tmp_dir=str(tmp_path),
+        output_dir="Tables",
+        output_file="features.tsv",
+        master_accession=str(DATA_DIR / "master_list.tsv"),
+        blast_uniq_hits=str(DATA_DIR / "query_uniq_tophits.tsv"),
+        update_db=str(bad_db),
+    )
+
+    with pytest.raises(ValueError, match="features table is missing required column: accession"):
+        processor.find_gaps_in_fasta()
+
+
+def test_find_gaps_in_fasta_update_mode_real_db_skips_existing_scoped_accession(tmp_path: Path, real_update_db_copy: Path):
+    conn = sqlite3.connect(str(real_update_db_copy))
+    try:
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(features)").fetchall()]
+        if "accession" not in cols:
+            pytest.skip("Real DB features table lacks accession column")
+
+        values = {c: None for c in cols}
+        values["accession"] = "Q_A"
+        insert_cols = list(values.keys())
+        placeholders = ",".join(["?"] * len(insert_cols))
+        conn.execute(
+            f"INSERT INTO features ({','.join(insert_cols)}) VALUES ({placeholders})",
+            [values[c] for c in insert_cols],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    scope = tmp_path / "scope.tsv"
+    scope.write_text("primary_accession\nQ_A\n", encoding="utf-8")
+
+    processor = CalculateAlignmentCoordinates(
+        paded_alignment=str(DATA_DIR / "padded_alignment"),
+        master_gff=[str(DATA_DIR / "MASTER1.gff3")],
+        tmp_dir=str(tmp_path),
+        output_dir="Tables",
+        output_file="features.tsv",
+        master_accession=str(DATA_DIR / "master_list.tsv"),
+        blast_uniq_hits=str(DATA_DIR / "query_uniq_tophits.tsv"),
+        update_db=str(real_update_db_copy),
+        update_scope_tsv=str(scope),
+    )
+
+    processor.find_gaps_in_fasta()
+    rows = read_tsv_as_dicts(tmp_path / "Tables" / "features.tsv")
+    assert rows == []

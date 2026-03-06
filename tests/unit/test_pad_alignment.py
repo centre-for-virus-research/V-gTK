@@ -1,6 +1,9 @@
 import shutil
 from pathlib import Path
 import types
+import sqlite3
+
+import pytest
 
 from Bio import SeqIO
 from Bio.Seq import Seq
@@ -11,6 +14,30 @@ from PadAlignment import PadAlignment
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO_ROOT / "test_data" / "unit" / "pad_alignment"
+REAL_UPDATE_DB = REPO_ROOT / "test_data" / "RABV_test" / "rabv-jul0425.db"
+
+
+def _pick_master_and_segment_from_real_db():
+    if not REAL_UPDATE_DB.exists():
+        pytest.skip(f"Real update DB not found at {REAL_UPDATE_DB}")
+
+    conn = sqlite3.connect(str(REAL_UPDATE_DB))
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT primary_accession, segment FROM meta_data "
+            "WHERE lower(coalesce(accession_type,''))='master' "
+            "AND trim(coalesce(segment,'')) != '' LIMIT 1"
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        pytest.skip("No master accession found in real update DB")
+    master = str(row[0]).strip()
+    segment = str(row[1]).strip() if row[1] is not None else "1"
+    return master, segment
 
 
 def _copy_fixture_tree(tmp_path: Path):
@@ -116,3 +143,73 @@ def test_insert_gaps_pads_when_sequence_shorter_than_reference(tmp_path: Path):
     assert len(updated) == 1
     assert str(updated[0].seq) == "ACGT--AC--"
     assert len(str(updated[0].seq)) == len(reference_aligned)
+
+
+def test_process_all_masters_strict_mode_fails_when_db_segment_backbone_missing(tmp_path: Path):
+    master, segment = _pick_master_and_segment_from_real_db()
+
+    processor = PadAlignment(
+        reference_alignment=str(DATA_DIR / "master_ref.aligned.fasta"),
+        input_dir=str(tmp_path / "query_aln"),
+        base_dir=str(tmp_path),
+        output_dir="pad_out",
+        keep_intermediate_files=True,
+        strict_segment_backbone=True,
+    )
+
+    precomputed_dir = tmp_path / "ref_backbones"
+    precomputed_dir.mkdir(parents=True, exist_ok=True)
+
+    wrong_segment = "999" if segment != "999" else "998"
+    (precomputed_dir / f"refset_{wrong_segment}_aln.fasta").write_text(">DUMMY\nATGC\n", encoding="utf-8")
+
+    nextalign_dir = tmp_path / "Nextalign"
+    nextalign_dir.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(ValueError, match="Missing DB/precomputed backbone"):
+        processor.process_all_masters(
+            master_list=[master],
+            nextalign_dir=str(nextalign_dir),
+            master_segment_map={master: segment},
+            precomputed_ref_dir=str(precomputed_dir),
+        )
+
+
+def test_process_all_masters_ambiguous_db_segment_backbones_pick_deterministic_file(tmp_path: Path):
+    master, segment = _pick_master_and_segment_from_real_db()
+
+    processor = PadAlignment(
+        reference_alignment=str(DATA_DIR / "master_ref.aligned.fasta"),
+        input_dir=str(tmp_path / "query_aln"),
+        base_dir=str(tmp_path),
+        output_dir="pad_out",
+        keep_intermediate_files=True,
+        strict_segment_backbone=False,
+    )
+
+    precomputed_dir = tmp_path / "ref_backbones"
+    precomputed_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create ambiguous numeric matches for the same segment.
+    file_b = precomputed_dir / f"zzz_segment_{segment}.fasta"
+    file_a = precomputed_dir / f"aaa_segment_{segment}.fasta"
+    file_b.write_text(">REF_B\nATGC\n", encoding="utf-8")
+    file_a.write_text(">REF_A\nATGC\n", encoding="utf-8")
+
+    chosen = {}
+
+    def _capture_process(self, reference_alignment_file, input_dir, base_dir, output_dir, keep_intermediate_files=False, segment_value=None):
+        chosen["ref"] = Path(reference_alignment_file).name
+        chosen["segment"] = str(segment_value)
+
+    processor.process_master_alignment = types.MethodType(_capture_process, processor)
+
+    processor.process_all_masters(
+        master_list=[master],
+        nextalign_dir=str(tmp_path / "Nextalign"),
+        master_segment_map={master: segment},
+        precomputed_ref_dir=str(precomputed_dir),
+    )
+
+    assert chosen["segment"] == segment
+    assert chosen["ref"] == "aaa_segment_" + segment + ".fasta"

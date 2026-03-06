@@ -552,3 +552,76 @@ def test_update_ref_list_parser_ignores_malformed_and_excluded_refs(tmp_path: Pa
 
     # REF1 already in DB, Q_EXCL is excluded in DB, malformed line ignored -> only REF_NEW remains
     assert captured["ids"] == ["REF_NEW"]
+
+
+def test_update_test_run_samples_brand_new_accessions_first(tmp_path: Path, monkeypatch):
+    db_path = tmp_path / "prev_test_update.db"
+    _write_db(
+        db_path,
+        meta_col="accession_version",
+        meta_values=["A.1", "B.1"],
+        excluded_values=[],
+    )
+
+    fetcher = GenBankFetcher(
+        taxid="11292",
+        base_url="https://example/",
+        email="x@y.com",
+        output_dir=str(tmp_path),
+        batch_size=100,
+        sleep_time=0,
+        base_dir="GenBank-XML",
+        update_file=str(db_path),
+        test_run=True,
+    )
+
+    monkeypatch.setattr(fetcher, "fetch_accs", lambda: ["A.2", "NEW1.1", "NEW2.1", "NEW3.1"])
+
+    sampled_inputs = []
+
+    def fake_sample(population, k):
+        sampled_inputs.append(list(population))
+        return list(population)[:k]
+
+    monkeypatch.setattr(gb_module.random, "sample", fake_sample)
+
+    captured = {}
+    monkeypatch.setattr(fetcher, "fetch_genbank_data", lambda ids: captured.setdefault("ids", ids))
+
+    fetcher.update(str(db_path))
+
+    # Should sample only from brand-new primary accessions, excluding A.2 update candidate
+    assert set(sampled_inputs[0]) == {"NEW1.1", "NEW2.1", "NEW3.1"}
+    assert set(captured["ids"]) == {"NEW1.1", "NEW2.1", "NEW3.1"}
+
+
+def test_fetch_genbank_data_does_not_test_sample_when_update_mode(tmp_path: Path, monkeypatch):
+    fetcher = GenBankFetcher(
+        taxid="11292",
+        base_url="https://example/",
+        email="x@y.com",
+        output_dir=str(tmp_path),
+        batch_size=100,
+        sleep_time=0,
+        base_dir="GenBank-XML",
+        update_file=str(tmp_path / "dummy.db"),
+        test_run=True,
+    )
+    fetcher.efetch_batch_size = 100
+
+    sample_called = {"called": False}
+
+    def fake_sample(_population, _k):
+        sample_called["called"] = True
+        return []
+
+    monkeypatch.setattr(gb_module.random, "sample", fake_sample)
+    monkeypatch.setattr("GenBankFetcher.requests.get", lambda _url: _FakeResponse(json_data={}, text_data="<GBSet></GBSet>"))
+
+    seen = []
+    monkeypatch.setattr(fetcher, "save_data", lambda data, marker: seen.append((data, marker)))
+
+    fetcher.fetch_genbank_data(["X1.1", "X2.1"])
+
+    assert sample_called["called"] is False
+    assert len(seen) == 1

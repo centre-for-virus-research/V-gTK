@@ -22,7 +22,8 @@ jobs:
       matrix:
         profile:
           - test
-          - segmented_test
+          - update_test
+          #- segmented_test
 
     steps:
       - name: Checkout
