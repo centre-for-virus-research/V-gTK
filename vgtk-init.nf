@@ -941,6 +941,7 @@ process TEST_DB_VALIDATION {
         EXTRA_ARGS="${EXTRA_ARGS} --check-update-integrity"
     fi
 
+    # Merged DB validation: table consistency + tree/update integrity checks
     python !{scripts_dir}/ValidateDbTree.py \
         --db !{sqlite_db} \
         --outdir . \

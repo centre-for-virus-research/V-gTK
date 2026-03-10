@@ -28,6 +28,10 @@ CLUSTER_PLACEHOLDER_VALUES = {
     "na - see tree",
 }
 
+NA_SET = {"", "NA", "Na", "N/A", "na", "n/a", "-", None}
+HOST_TAXA_META_COLUMNS = ["host_taxa_id", "taxonomy_id", "host_tax_id"]
+HOST_TAXA_TABLE_COLUMNS = ["taxa_id", "taxonomy_id", "host_taxa_id", "tax_id", "id"]
+
 
 def get_table_columns(conn, table_name):
     cursor = conn.cursor()
@@ -111,8 +115,186 @@ def table_exists(conn, table_name):
     return cursor.fetchone() is not None
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Validate SQLite DB contents against tree and plot the tree")
+def fetch_distinct_values(conn, table, column, where_sql=None, params=()):
+    cursor = conn.cursor()
+    sql = f"SELECT DISTINCT {column} AS v FROM {table}"
+    if where_sql:
+        sql += f" WHERE {where_sql}"
+    cursor.execute(sql, params)
+    out = set()
+    for row in cursor.fetchall():
+        value = row[0]
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            out.add(text)
+    return out
+
+
+def fetch_count(conn, table, where_sql=None, params=()):
+    cursor = conn.cursor()
+    sql = f"SELECT COUNT(*) FROM {table}"
+    if where_sql:
+        sql += f" WHERE {where_sql}"
+    cursor.execute(sql, params)
+    row = cursor.fetchone()
+    return int(row[0]) if row else 0
+
+
+def compare_sets(expected, observed):
+    missing = sorted(expected - observed)
+    extra = sorted(observed - expected)
+    return {
+        "ok": len(missing) == 0 and len(extra) == 0,
+        "expected_count": len(expected),
+        "observed_count": len(observed),
+        "missing": missing,
+        "extra": extra,
+    }
+
+
+def find_first_present(columns, candidates):
+    return next((col for col in candidates if col in columns), None)
+
+
+def get_meta_nonexcluded_filter(meta_cols, exclusion_column, exclude_value):
+    if exclusion_column not in meta_cols:
+        return None, ()
+    where_sql = f"({exclusion_column} IS NULL OR CAST({exclusion_column} AS TEXT) != ?)"
+    return where_sql, (str(exclude_value),)
+
+
+def get_expected_accessions(conn, accession_column="primary_accession", exclusion_column="exclusion_status", exclude_value="1"):
+    if not table_exists(conn, "meta_data"):
+        raise RuntimeError("Table 'meta_data' not found in DB.")
+
+    meta_cols = get_table_columns(conn, "meta_data")
+    if accession_column not in meta_cols:
+        raise RuntimeError(
+            f"meta_data does not contain accession column '{accession_column}'. Available columns: {meta_cols}"
+        )
+
+    where_sql, params = get_meta_nonexcluded_filter(meta_cols, exclusion_column, exclude_value)
+    raw_expected = fetch_distinct_values(conn, "meta_data", accession_column, where_sql=where_sql, params=params)
+    excluded_accessions = set()
+    if table_exists(conn, "excluded_accessions"):
+        excluded_cols = get_table_columns(conn, "excluded_accessions")
+        excluded_col = find_first_present(excluded_cols, [accession_column, "primary_accession", "accession"])
+        if excluded_col:
+            excluded_accessions = fetch_distinct_values(conn, "excluded_accessions", excluded_col)
+
+    expected = raw_expected - excluded_accessions
+    total_rows = fetch_count(conn, "meta_data")
+    nonexcluded_rows = fetch_count(conn, "meta_data", where_sql=where_sql, params=params) if where_sql else total_rows
+
+    return {
+        "expected_accessions": expected,
+        "meta_total_rows": total_rows,
+        "meta_nonexcluded_rows": nonexcluded_rows,
+        "meta_has_exclusion": exclusion_column in meta_cols,
+        "excluded_accessions": excluded_accessions,
+        "meta_columns": meta_cols,
+    }
+
+
+def validate_accession_table(conn, expected_accessions, table_name, candidate_columns, label):
+    if not table_exists(conn, table_name):
+        return {"ok": False, "error": f"Table '{table_name}' not found.", "table": table_name, "label": label}
+
+    cols = get_table_columns(conn, table_name)
+    col = find_first_present(cols, candidate_columns)
+    if col is None:
+        return {
+            "ok": False,
+            "error": f"Table '{table_name}' missing any of columns {candidate_columns}. Columns present: {cols}",
+            "table": table_name,
+            "label": label,
+        }
+
+    observed = fetch_distinct_values(conn, table_name, col)
+    result = compare_sets(expected_accessions, observed)
+    result.update({"table": table_name, "column": col, "label": label})
+    return result
+
+
+def validate_host_taxa(conn, meta_cols, where_sql=None, params=()):
+    if not table_exists(conn, "host_taxa"):
+        return {"ok": False, "error": "Table 'host_taxa' not found.", "table": "host_taxa"}
+
+    meta_host_col = find_first_present(meta_cols, HOST_TAXA_META_COLUMNS)
+    host_cols = get_table_columns(conn, "host_taxa")
+    host_col = find_first_present(host_cols, HOST_TAXA_TABLE_COLUMNS)
+
+    if meta_host_col is None and host_col is None:
+        return {
+            "ok": True,
+            "skipped": True,
+            "table": "host_taxa",
+            "column": None,
+            "reason": "No host taxonomy ID columns were present in either meta_data or host_taxa.",
+        }
+
+    if meta_host_col is None:
+        return {"ok": False, "error": f"meta_data missing any host taxonomy column {HOST_TAXA_META_COLUMNS}.", "table": "host_taxa"}
+    if host_col is None:
+        return {
+            "ok": False,
+            "error": f"host_taxa missing any taxonomy identifier column {HOST_TAXA_TABLE_COLUMNS}. Columns present: {host_cols}",
+            "table": "host_taxa",
+        }
+
+    expected = fetch_distinct_values(conn, "meta_data", meta_host_col, where_sql=where_sql, params=params)
+    expected = {value for value in expected if value not in NA_SET}
+    observed = fetch_distinct_values(conn, "host_taxa", host_col)
+
+    result = compare_sets(expected, observed)
+    result.update(
+        {
+            "table": "host_taxa",
+            "column": host_col,
+            "label": f"host_taxa vs meta_data.{meta_host_col}",
+            "meta_column": meta_host_col,
+        }
+    )
+    return result
+
+
+def format_consistency_result(title, result, show_n=25):
+    lines = [f"[{title}]"]
+    if result.get("skipped"):
+        lines.append("  OK: True (skipped)")
+        lines.append(f"  Reason: {result.get('reason', 'not provided')}")
+        return "\n".join(lines)
+    if "error" in result:
+        lines.append("  OK: False")
+        lines.append(f"  ERROR: {result['error']}")
+        return "\n".join(lines)
+
+    lines.append(f"  OK: {result.get('ok')}")
+    lines.append(f"  Table: {result.get('table')}  Column: {result.get('column')}")
+    lines.append(f"  Expected: {result.get('expected_count')}  Observed: {result.get('observed_count')}")
+    missing = result.get("missing", [])
+    extra = result.get("extra", [])
+    lines.append(f"  Missing: {len(missing)}  Extra: {len(extra)}")
+
+    if missing:
+        lines.append(f"  Missing examples (up to {show_n}):")
+        for value in missing[:show_n]:
+            lines.append(f"    - {value}")
+    if extra:
+        lines.append(f"  Extra examples (up to {show_n}):")
+        for value in extra[:show_n]:
+            lines.append(f"    - {value}")
+    return "\n".join(lines)
+
+
+def result_failed(result):
+    return not result.get("ok", False) and not result.get("skipped", False)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Validate SQLite DB contents against tree coverage and table consistency")
     parser.add_argument("--db", required=True, help="Path to SQLite DB")
     parser.add_argument("--outdir", required=True, help="Output directory for report and plot")
     parser.add_argument(
@@ -130,12 +312,37 @@ def main():
         action="store_true",
         help="Validate update audit tables and update-mode integrity constraints",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--accession-column",
+        default="primary_accession",
+        help="Accession column in meta_data used as the expected accession set",
+    )
+    parser.add_argument(
+        "--exclusion-column",
+        default="exclusion_status",
+        help="Exclusion column in meta_data used to filter the expected accession set",
+    )
+    parser.add_argument(
+        "--exclude-value",
+        default="1",
+        help="Value in the exclusion column that marks a row as excluded",
+    )
+    args = parser.parse_args(argv)
 
     os.makedirs(args.outdir, exist_ok=True)
 
     conn = sqlite3.connect(args.db)
     try:
+        meta_info = get_expected_accessions(
+            conn,
+            accession_column=args.accession_column,
+            exclusion_column=args.exclusion_column,
+            exclude_value=args.exclude_value,
+        )
+        expected_accessions = meta_info["expected_accessions"]
+        meta_columns = meta_info["meta_columns"]
+        where_sql, where_params = get_meta_nonexcluded_filter(meta_columns, args.exclusion_column, args.exclude_value)
+
         tree_name, newick = fetch_tree_newick(conn)
         if not newick:
             raise SystemExit("No tree found in DB (trees table is empty)")
@@ -143,29 +350,23 @@ def main():
         tree = Phylo.read(StringIO(newick), "newick")
         tree_terminals = {t.name for t in tree.get_terminals() if t.name}
 
-        meta_accessions = [x for x in fetch_table_column(conn, "meta_data", "primary_accession") if x]
+        meta_accessions = [x for x in fetch_table_column(conn, "meta_data", args.accession_column) if x]
         seq_headers = [x for x in fetch_table_column(conn, "sequences", "header") if x]
 
-        meta_set = set(meta_accessions)
-        seq_set = set(seq_headers)
-        excluded_accessions = set()
-        if table_exists(conn, "excluded_accessions"):
-            excluded_accessions = set(
-                x for x in fetch_table_column(conn, "excluded_accessions", "primary_accession") if x
-            )
-        expected_meta_set = meta_set - excluded_accessions
+        meta_set = {str(x).strip() for x in meta_accessions if str(x).strip()}
+        seq_set = {str(x).strip() for x in seq_headers if str(x).strip()}
+        excluded_accessions = set(meta_info["excluded_accessions"])
+        expected_meta_set = set(expected_accessions)
         missing_in_sequences = sorted(expected_meta_set - seq_set)
         missing_in_meta = sorted(tree_terminals - meta_set)
 
-        meta_columns = get_table_columns(conn, "meta_data")
         cluster_col = find_cluster_column(meta_columns)
         centroid_set = set()
         missing_centroids_in_tree = []
         extra_in_tree = []
-        meta_expected_in_tree = set(expected_meta_set)
         if cluster_col:
             cursor = conn.cursor()
-            cursor.execute(f"SELECT primary_accession, {cluster_col} FROM meta_data")
+            cursor.execute(f"SELECT {args.accession_column}, {cluster_col} FROM meta_data")
             cluster_rows = cursor.fetchall()
             centroid_set = {
                 str(cluster_val).strip()
@@ -175,9 +376,31 @@ def main():
             missing_centroids_in_tree = sorted(centroid_set - tree_terminals)
             extra_in_tree = sorted(tree_terminals - centroid_set)
 
-        missing_in_tree = sorted(meta_expected_in_tree - tree_terminals)
+        missing_in_tree = sorted(expected_meta_set - tree_terminals)
 
-        # Basic completeness checks
+        consistency_results = {
+            "sequence_alignment vs meta_data": validate_accession_table(
+                conn,
+                expected_meta_set,
+                "sequence_alignment",
+                ["primary_accession", "accession", "sequence_id"],
+                "sequence_alignment vs meta_data",
+            ),
+            "features vs meta_data": validate_accession_table(
+                conn,
+                expected_meta_set,
+                "features",
+                ["accession", "primary_accession"],
+                "features vs meta_data",
+            ),
+            "host_taxa vs meta_data": validate_host_taxa(
+                conn,
+                meta_columns,
+                where_sql=where_sql,
+                params=where_params,
+            ),
+        }
+
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM meta_data")
         meta_count = cursor.fetchone()[0]
@@ -187,8 +410,7 @@ def main():
         usher_tree_count = cursor.fetchone()[0]
 
         segment_count = None
-        meta_columns_for_seg = get_table_columns(conn, "meta_data")
-        if "segment" in meta_columns_for_seg:
+        if "segment" in meta_columns:
             segment_values = [
                 x for x in fetch_table_column(conn, "meta_data", "segment")
                 if x is not None and str(x).strip() != ""
@@ -199,13 +421,7 @@ def main():
         if args.expect_segment_trees and segment_count is not None and segment_count > 1:
             usher_trees = fetch_trees(conn, source="usher")
 
-            excluded_accessions = set()
-            if table_exists(conn, "excluded_accessions"):
-                excluded_accessions = set(
-                    x for x in fetch_table_column(conn, "excluded_accessions", "primary_accession") if x
-                )
-
-            cursor.execute("SELECT primary_accession, segment FROM meta_data")
+            cursor.execute(f"SELECT {args.accession_column}, segment FROM meta_data")
             meta_rows = cursor.fetchall()
 
             accession_to_segment = {}
@@ -239,11 +455,11 @@ def main():
             missing_segment_trees = sorted(s for s in segments_in_meta if s not in trees_by_segment)
             per_segment_missing = {}
             for seg in sorted(segments_in_meta):
-                expected_accessions = accessions_by_segment.get(seg, set())
+                expected_segment_accessions = accessions_by_segment.get(seg, set())
                 tree_terms = trees_by_segment.get(seg, set())
-                m = sorted(expected_accessions - tree_terms)
-                if m:
-                    per_segment_missing[seg] = m
+                missing_segment_accessions = sorted(expected_segment_accessions - tree_terms)
+                if missing_segment_accessions:
+                    per_segment_missing[seg] = missing_segment_accessions
 
             print(f"[info] Segmented validation: meta segments={len(segments_in_meta)} tree segments={len(trees_by_segment)}")
             if missing_segment_trees:
@@ -270,6 +486,25 @@ def main():
         extra_in_tree_path = os.path.join(args.outdir, "extra_in_tree.txt")
 
         with open(report_path, "w", encoding="utf-8") as report:
+            report.write("=== ValidateDB Summary ===\n")
+            report.write(f"DB: {args.db}\n")
+            report.write(f"meta_data total rows: {meta_info['meta_total_rows']}\n")
+            if meta_info["meta_has_exclusion"]:
+                report.write(
+                    f"meta_data non-excluded rows: {meta_info['meta_nonexcluded_rows']} "
+                    f"(excluding {args.exclusion_column} == {args.exclude_value})\n"
+                )
+            else:
+                report.write("meta_data exclusion column not found; using all rows.\n")
+            report.write(f"Excluded accessions table rows considered: {len(excluded_accessions)}\n")
+            report.write(f"Expected distinct accessions (from meta_data.{args.accession_column}): {len(expected_meta_set)}\n")
+            report.write("\n")
+
+            for title, result in consistency_results.items():
+                report.write(format_consistency_result(title, result))
+                report.write("\n\n")
+
+            report.write("=== Tree Validation Summary ===\n")
             report.write(f"Tree source: {tree_name}\n")
             report.write(f"Meta rows: {meta_count}\n")
             report.write(f"Sequence rows: {seq_count}\n")
@@ -303,9 +538,11 @@ def main():
                 report.write("\nExtra nodes in tree (first 50):\n")
                 report.write("\n".join(extra_in_tree[:50]) + "\n")
 
-            # Table-level coverage summary
             report.write("\nTable-level accession coverage:\n")
             for table_name in ["meta_data", "sequences", "sequence_alignment", "features", "insertions", "host_taxa"]:
+                if not table_exists(conn, table_name):
+                    report.write(f"- {table_name}: table missing\n")
+                    continue
                 cols = get_table_columns(conn, table_name)
                 acc_cols = [c for c in cols if c in ACCESSION_COLUMNS]
                 if not acc_cols:
@@ -340,8 +577,7 @@ def main():
 
                 if table_exists(conn, "features") and table_exists(conn, "meta_data"):
                     feature_cols = get_table_columns(conn, "features")
-                    meta_cols = get_table_columns(conn, "meta_data")
-                    if "segment" in feature_cols and "segment" in meta_cols and "accession" in feature_cols:
+                    if "segment" in feature_cols and "segment" in meta_columns and "accession" in feature_cols:
                         cursor.execute(
                             """
                             SELECT COUNT(*)
@@ -353,7 +589,6 @@ def main():
                         seg_mismatch_count = cursor.fetchone()[0]
                         report.write(f"- feature_segment_mismatch: {seg_mismatch_count}\n")
 
-        # Write full lists for debugging
         if missing_in_tree:
             with open(missing_tree_path, "w", encoding="utf-8") as handle:
                 handle.write("\n".join(missing_in_tree) + "\n")
@@ -371,12 +606,20 @@ def main():
             with open(extra_in_tree_path, "w", encoding="utf-8") as handle:
                 handle.write("\n".join(extra_in_tree) + "\n")
 
-        # Print summary to stdout for quick visibility in logs
         print(f"[info] Tree source: {tree_name}")
         print(f"[info] Meta rows: {meta_count}, Sequence rows: {seq_count}, Tree terminals: {len(tree_terminals)}")
         print(f"[info] UShER tree rows: {usher_tree_count}")
         if segment_count is not None:
             print(f"[info] Segment count in meta_data: {segment_count}")
+        for title, result in consistency_results.items():
+            if result.get("skipped"):
+                print(f"[info] {title}: skipped ({result.get('reason')})")
+            elif "error" in result:
+                print(f"[info] {title}: ERROR: {result['error']}")
+            else:
+                print(
+                    f"[info] {title}: ok={result['ok']} missing={len(result.get('missing', []))} extra={len(result.get('extra', []))}"
+                )
         if cluster_col:
             print(f"[info] Cluster column: {cluster_col}, Centroid count: {len(centroid_set)}")
             print(f"[info] Missing centroids in tree: {len(missing_centroids_in_tree)}")
@@ -395,7 +638,6 @@ def main():
         if cluster_col and extra_in_tree:
             print(f"[info] Extra nodes in tree (first 10): {', '.join(extra_in_tree[:10])}")
 
-        # Plot tree
         fig = plt.figure(figsize=(12, 18))
         ax = fig.add_subplot(1, 1, 1)
         Phylo.draw(tree, do_show=False, axes=ax)
@@ -406,8 +648,6 @@ def main():
         overlap_count = len(meta_set & tree_terminals)
         disjoint_sets = overlap_count == 0 and len(meta_set) > 0 and len(tree_terminals) > 0
 
-        # Test-mode exception: disjoint USHER tree/meta can happen when no query sequences were placeable
-        # and the resulting tree contains only reference nodes.
         if args.test_mode and tree_name == "usher" and disjoint_sets:
             print(
                 "[warn] Test mode: tree terminals and meta_data are disjoint; "
@@ -434,8 +674,7 @@ def main():
                     raise SystemExit("Validation failed: no update_table_deltas rows found for latest batch")
             if table_exists(conn, "features") and table_exists(conn, "meta_data"):
                 feature_cols = get_table_columns(conn, "features")
-                meta_cols = get_table_columns(conn, "meta_data")
-                if "segment" in feature_cols and "segment" in meta_cols and "accession" in feature_cols:
+                if "segment" in feature_cols and "segment" in meta_columns and "accession" in feature_cols:
                     cursor.execute(
                         """
                         SELECT COUNT(*)
@@ -447,7 +686,12 @@ def main():
                     if cursor.fetchone()[0] > 0:
                         raise SystemExit("Validation failed: segment contamination detected in features table")
 
-        # Fail if any validation issues detected
+        failed_consistency_checks = [title for title, result in consistency_results.items() if result_failed(result)]
+        if failed_consistency_checks:
+            raise SystemExit(
+                "Validation failed: DB consistency checks failed for " + ", ".join(failed_consistency_checks)
+            )
+
         if tree_name == "usher":
             if segmented_validation_ok:
                 return

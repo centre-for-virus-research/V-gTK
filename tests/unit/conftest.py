@@ -10,13 +10,13 @@ def basic_update_db(tmp_path: Path) -> Path:
     conn = sqlite3.connect(str(db_path))
     try:
         cur = conn.cursor()
-        cur.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT, segment TEXT)")
+        cur.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT, segment TEXT, host_taxa_id TEXT)")
         cur.executemany(
-            "INSERT INTO meta_data(primary_accession, accession_type, segment) VALUES (?, ?, ?)",
+            "INSERT INTO meta_data(primary_accession, accession_type, segment, host_taxa_id) VALUES (?, ?, ?, ?)",
             [
-                ("REF1", "master", "1"),
-                ("REF2", "reference", "2"),
-                ("Q_OLD", "query", "1"),
+                ("REF1", "master", "1", "111"),
+                ("REF2", "reference", "2", "222"),
+                ("Q_OLD", "query", "1", "111"),
             ],
         )
 
@@ -41,6 +41,8 @@ def basic_update_db(tmp_path: Path) -> Path:
         cur.executemany(
             "INSERT INTO features(accession, master_ref_accession, reference_accession, aln_start, aln_end, cds_start, cds_end, product, segment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
+                ("REF1", "REF1", "REF1", "1", "4", "1", "4", "P", "1"),
+                ("REF2", "REF2", "REF2", "1", "4", "1", "4", "P", "2"),
                 ("Q_OLD", "REF1", "REF1", "1", "4", "1", "4", "P", "1"),
             ],
         )

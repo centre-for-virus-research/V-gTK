@@ -15,9 +15,10 @@ def _add_required_alignment_tables(db_path: Path):
     try:
         cur = conn.cursor()
         cur.execute("CREATE TABLE IF NOT EXISTS insertions (primary_accession TEXT)")
-        cur.execute("CREATE TABLE IF NOT EXISTS host_taxa (primary_accession TEXT)")
+        cur.execute("CREATE TABLE IF NOT EXISTS host_taxa (taxonomy_id TEXT)")
         cur.execute("INSERT INTO insertions(primary_accession) VALUES ('REF1')")
-        cur.execute("INSERT INTO host_taxa(primary_accession) VALUES ('REF1')")
+        cur.execute("INSERT INTO host_taxa(taxonomy_id) VALUES ('111')")
+        cur.execute("INSERT INTO host_taxa(taxonomy_id) VALUES ('222')")
         conn.commit()
     finally:
         conn.close()
@@ -45,8 +46,40 @@ def test_validate_db_tree_update_integrity_passes_on_seed_db(tmp_path: Path, bas
 
     assert result.returncode == 0
     report = (outdir / "db_tree_validation.txt").read_text(encoding="utf-8")
+    assert "[sequence_alignment vs meta_data]" in report
+    assert "[features vs meta_data]" in report
+    assert "[host_taxa vs meta_data]" in report
     assert "Update integrity checks:" in report
     assert "last_batch_id:" in report
+
+
+def test_validate_db_tree_fails_when_features_do_not_match_expected_accessions(tmp_path: Path, basic_update_db: Path):
+    _add_required_alignment_tables(basic_update_db)
+    conn = sqlite3.connect(str(basic_update_db))
+    try:
+        conn.execute("DELETE FROM features WHERE accession='REF2'")
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--db",
+            str(basic_update_db),
+            "--outdir",
+            str(tmp_path / "out"),
+            "--check-update-integrity",
+            "--expect-segment-trees",
+            "--test-mode",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "DB consistency checks failed for features vs meta_data" in result.stderr
 
 
 def test_validate_db_tree_update_integrity_fails_without_audit_tables(tmp_path: Path, basic_update_db: Path):
