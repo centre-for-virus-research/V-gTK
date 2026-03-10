@@ -3,9 +3,13 @@ This is a repo for managing viral datasets. It pulls from genbank with IDs, and 
 
 It is designed to be flexible on viruses, allowing segemented and not, the main viruses for now are RABV, flu, and HCV
 
-For all new code, add tests to /home3/oml4h/RABV-gTK/tests/unit
-## data info
+For all new code, add tests to /home3/oml4h/RABV-gTK/tests and /home3/oml4h/RABV-gTK/tests/unit for python
+
+## environment info
 It needs running in the conda env vgtk, which can be set up with the environment.yml file in the repo.
+
+Don't run or test things outwith this env. run "conda activate vgtk" before testing any code
+
 
 
 ## behaviour preferences

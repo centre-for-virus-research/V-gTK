@@ -7,7 +7,7 @@ import pandas as pd
 from os.path import join
 from Bio import SeqIO
 from Bio.Seq import Seq
-from ExportRefListFromUpdateDb import load_master_accessions
+from ExportRefListFromUpdateDb import load_master_accessions, load_reference_rows
 
 class PadAlignment:
 	def __init__(self, reference_alignment, input_dir, base_dir, output_dir, keep_intermediate_files, new_outputfile=False, segment_manifest_out=None, strict_segment_backbone=False, update_db=None):
@@ -53,6 +53,19 @@ class PadAlignment:
 			return [x.strip() for x in master_acc.split(',') if x.strip()]
 
 	def get_master_segment_map(self, master_acc):
+		if self.update_db:
+			master_segment = {}
+			refs = load_reference_rows(self.update_db)
+			masters = refs[refs["accession_type"].fillna("").astype(str).str.lower() == "master"]
+			if masters.empty:
+				masters = refs
+			for _, row in masters.iterrows():
+				acc = str(row["primary_accession"]).strip()
+				segment = self._normalize_segment(row.get("segment")) or "0"
+				if acc:
+					master_segment[acc] = segment
+			return master_segment
+
 		master_segment = {}
 		if not os.path.isfile(master_acc):
 			return master_segment
@@ -81,7 +94,9 @@ class PadAlignment:
 		if not segment_str:
 			return None
 		match = re.search(r"(\d+)", segment_str)
-		return match.group(1) if match else None
+		if not match:
+			return None
+		return str(int(match.group(1)))
 
 	def find_precomputed_reference_alignment(self, precomputed_ref_dir, segment_value):
 		"""
@@ -94,6 +109,18 @@ class PadAlignment:
 
 		segment = self._normalize_segment(segment_value)
 		if not segment:
+			fasta_files = sorted(
+				[
+					os.path.join(precomputed_ref_dir, fname)
+					for fname in os.listdir(precomputed_ref_dir)
+					if fname.lower().endswith((".fasta", ".fa"))
+				]
+			)
+			if len(fasta_files) == 1:
+				print(
+					f"[warn] No segment value supplied; using sole precomputed alignment {os.path.basename(fasta_files[0])}."
+				)
+				return fasta_files[0]
 			return None
 
 		preferred = os.path.join(precomputed_ref_dir, f"refset_{segment}_aln.fasta")
@@ -171,8 +198,18 @@ class PadAlignment:
 
 		written = 0
 		for segment, part in df_join.groupby("segment"):
+			part = part.copy()
+			part["_alignment_name"] = part["alignment_name"].fillna("").astype(str).str.strip()
+			part["_primary_accession"] = part["primary_accession"].fillna("").astype(str).str.strip()
+			part["_preferred_backbone"] = (
+				part["_alignment_name"].str.lower() == part["_primary_accession"].str.lower()
+			).astype(int)
+			part = part.sort_values(
+				by=["_primary_accession", "_preferred_backbone", "_alignment_name"],
+				ascending=[True, False, True],
+			)
 			rows = []
-			for _, row in part.drop_duplicates(subset=["primary_accession", "alignment_name"]).iterrows():
+			for _, row in part.drop_duplicates(subset=["primary_accession"]).iterrows():
 				acc = str(row.get("primary_accession", "")).strip()
 				seq = str(row.get("alignment", "")).strip()
 				if acc and seq and seq.lower() != "nan":

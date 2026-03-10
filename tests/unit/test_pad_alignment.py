@@ -54,6 +54,36 @@ def _copy_fixture_tree(tmp_path: Path):
     return input_dir
 
 
+def _write_fasta(path: Path, records):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for header, seq in records:
+            handle.write(f">{header}\n{seq}\n")
+
+
+def _write_update_alignment_db(path: Path, meta_rows, alignment_rows):
+    conn = sqlite3.connect(str(path))
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT, segment TEXT)"
+        )
+        cur.execute(
+            "CREATE TABLE sequence_alignment (primary_accession TEXT, alignment_name TEXT, alignment TEXT, segment TEXT)"
+        )
+        cur.executemany(
+            "INSERT INTO meta_data(primary_accession, accession_type, segment) VALUES (?, ?, ?)",
+            meta_rows,
+        )
+        cur.executemany(
+            "INSERT INTO sequence_alignment(primary_accession, alignment_name, alignment, segment) VALUES (?, ?, ?, ?)",
+            alignment_rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _make_processor(tmp_path: Path):
     return PadAlignment(
         reference_alignment=str(DATA_DIR / "master_ref.aligned.fasta"),
@@ -232,3 +262,271 @@ def test_export_update_backbones_writes_segment_fastas(tmp_path: Path, basic_upd
     assert (out_dir / "refset_1_aln.fasta").exists()
     assert (out_dir / "refset_2_aln.fasta").exists()
     assert ">REF1" in (out_dir / "refset_1_aln.fasta").read_text(encoding="utf-8")
+
+
+def test_get_master_segment_map_uses_update_db_and_normalizes_blank_segment(tmp_path: Path):
+    update_db = tmp_path / "update.db"
+    conn = sqlite3.connect(str(update_db))
+    try:
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT, segment TEXT)")
+        cur.executemany(
+            "INSERT INTO meta_data(primary_accession, accession_type, segment) VALUES (?, ?, ?)",
+            [("NC_001542", "master", ""), ("REF2", "reference", "")],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    processor = PadAlignment(
+        reference_alignment=str(DATA_DIR / "master_ref.aligned.fasta"),
+        input_dir=str(tmp_path / "query_aln"),
+        base_dir=str(tmp_path),
+        output_dir="pad_out",
+        keep_intermediate_files=True,
+        update_db=str(update_db),
+    )
+
+    assert processor.get_master_segment_map("ignored.tsv") == {"NC_001542": "0"}
+
+
+def test_process_all_masters_update_db_blank_segment_uses_refset_zero(tmp_path: Path):
+    update_db = tmp_path / "update.db"
+    conn = sqlite3.connect(str(update_db))
+    try:
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT, segment TEXT)")
+        cur.executemany(
+            "INSERT INTO meta_data(primary_accession, accession_type, segment) VALUES (?, ?, ?)",
+            [("NC_001542", "master", ""), ("REF2", "reference", "")],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    processor = PadAlignment(
+        reference_alignment=str(DATA_DIR / "master_ref.aligned.fasta"),
+        input_dir=str(tmp_path / "query_aln"),
+        base_dir=str(tmp_path),
+        output_dir="pad_out",
+        keep_intermediate_files=True,
+        strict_segment_backbone=True,
+        update_db=str(update_db),
+    )
+
+    precomputed_dir = tmp_path / "ref_backbones"
+    precomputed_dir.mkdir(parents=True, exist_ok=True)
+    (precomputed_dir / "refset_0_aln.fasta").write_text(">NC_001542\nATGC\n", encoding="utf-8")
+
+    chosen = {}
+
+    def _capture_process(self, reference_alignment_file, input_dir, base_dir, output_dir, keep_intermediate_files=False, segment_value=None):
+        chosen["ref"] = Path(reference_alignment_file).name
+        chosen["segment"] = str(segment_value)
+
+    processor.process_master_alignment = types.MethodType(_capture_process, processor)
+    processor.process_all_masters(
+        master_list=processor.get_master_list("ignored.tsv"),
+        nextalign_dir=str(tmp_path / "Nextalign"),
+        master_segment_map=processor.get_master_segment_map("ignored.tsv"),
+        precomputed_ref_dir=str(precomputed_dir),
+    )
+
+    assert chosen["ref"] == "refset_0_aln.fasta"
+    assert chosen["segment"] == "0"
+
+
+def test_export_update_backbones_deduplicates_same_accession(tmp_path: Path):
+    update_db = tmp_path / "update.db"
+    conn = sqlite3.connect(str(update_db))
+    try:
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT, segment TEXT)")
+        cur.execute(
+            "CREATE TABLE sequence_alignment (primary_accession TEXT, alignment_name TEXT, alignment TEXT)"
+        )
+        cur.execute(
+            "INSERT INTO meta_data(primary_accession, accession_type, segment) VALUES (?, ?, ?)",
+            ("REF1", "master", ""),
+        )
+        cur.executemany(
+            "INSERT INTO sequence_alignment(primary_accession, alignment_name, alignment) VALUES (?, ?, ?)",
+            [
+                ("REF1", "OTHER_BACKBONE", "AAAA"),
+                ("REF1", "REF1", "TTTT"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    processor = PadAlignment(
+        reference_alignment=str(DATA_DIR / "master_ref.aligned.fasta"),
+        input_dir=str(tmp_path / "query_aln"),
+        base_dir=str(tmp_path),
+        output_dir="pad_out",
+        keep_intermediate_files=True,
+        update_db=str(update_db),
+    )
+
+    out_dir = tmp_path / "db_ref_backbones"
+    processor.export_update_backbones(str(out_dir))
+    content = (out_dir / "refset_0_aln.fasta").read_text(encoding="utf-8")
+    assert content.count(">REF1") == 1
+    assert "TTTT" in content
+
+
+def test_export_update_backbones_normalizes_text_segment_labels(tmp_path: Path):
+    update_db = tmp_path / "update.db"
+    _write_update_alignment_db(
+        update_db,
+        meta_rows=[
+            ("MASTER2", "master", "segment 02"),
+            ("REF2A", "reference", "segment-02"),
+        ],
+        alignment_rows=[
+            ("MASTER2", "MASTER2", "A-CGT", "segment 02"),
+            ("REF2A", "REF2A", "ATCGT", "segment-02"),
+        ],
+    )
+
+    processor = PadAlignment(
+        reference_alignment=str(DATA_DIR / "master_ref.aligned.fasta"),
+        input_dir=str(tmp_path / "query_aln"),
+        base_dir=str(tmp_path),
+        output_dir="pad_out",
+        keep_intermediate_files=True,
+        update_db=str(update_db),
+    )
+
+    out_dir = tmp_path / "db_ref_backbones"
+    processor.export_update_backbones(str(out_dir))
+
+    assert processor.get_master_segment_map("ignored.tsv") == {"MASTER2": "2"}
+    assert (out_dir / "refset_2_aln.fasta").exists()
+    content = (out_dir / "refset_2_aln.fasta").read_text(encoding="utf-8")
+    assert ">MASTER2" in content
+    assert ">REF2A" in content
+
+
+def test_resolve_precomputed_ref_dir_prefers_explicit_dir_over_db_export(tmp_path: Path):
+    update_db = tmp_path / "update.db"
+    _write_update_alignment_db(
+        update_db,
+        meta_rows=[("MASTER0", "master", "")],
+        alignment_rows=[("MASTER0", "MASTER0", "ATGC", "")],
+    )
+
+    explicit_dir = tmp_path / "explicit_backbones"
+    explicit_dir.mkdir(parents=True, exist_ok=True)
+    (explicit_dir / "refset_0_aln.fasta").write_text(">MASTER0\nTTTT\n", encoding="utf-8")
+
+    processor = PadAlignment(
+        reference_alignment=str(DATA_DIR / "master_ref.aligned.fasta"),
+        input_dir=str(tmp_path / "query_aln"),
+        base_dir=str(tmp_path),
+        output_dir="pad_out",
+        keep_intermediate_files=True,
+        update_db=str(update_db),
+    )
+
+    resolved = processor.resolve_precomputed_ref_dir(str(explicit_dir))
+
+    assert resolved == str(explicit_dir)
+    assert not (tmp_path / "pad_out" / "db_ref_backbones").exists()
+
+
+def test_process_all_masters_update_mode_end_to_end_handles_orphans_and_reference_only_segments(tmp_path: Path, capsys):
+    update_db = tmp_path / "update.db"
+    _write_update_alignment_db(
+        update_db,
+        meta_rows=[
+            ("MASTER0", "master", ""),
+            ("REF_A", "reference", ""),
+            ("REF_B", "reference", ""),
+            ("REF_C", "reference", ""),
+        ],
+        alignment_rows=[
+            ("MASTER0", "MASTER0", "A-CGT", ""),
+            ("REF_A", "REF_A", "ATCGT", ""),
+            ("REF_B", "REF_B", "A-GGT", ""),
+            ("REF_C", "REF_C", "AC-GT", ""),
+            ("REF_A", "LEGACY_CLUSTER", "TTTTT", ""),
+        ],
+    )
+
+    query_dir = tmp_path / "query_aln"
+    _write_fasta(query_dir / "REF_A" / "REF_A.aligned.fasta", [("Q_A_1", "ATGGT")])
+    _write_fasta(query_dir / "REF_C" / "REF_C.aligned.fasta", [("Q_C_1", "ACAGT")])
+    _write_fasta(query_dir / "ORPHAN_REF" / "ORPHAN_REF.aligned.fasta", [("Q_ORPHAN", "TTTT")])
+
+    processor = PadAlignment(
+        reference_alignment=None,
+        input_dir=str(query_dir),
+        base_dir=str(tmp_path),
+        output_dir="pad_out",
+        keep_intermediate_files=True,
+        segment_manifest_out=str(tmp_path / "pad_manifest.tsv"),
+        strict_segment_backbone=True,
+        update_db=str(update_db),
+    )
+
+    resolved = processor.resolve_precomputed_ref_dir(None)
+    processor.process_all_masters(
+        master_list=processor.get_master_list("ignored.tsv"),
+        nextalign_dir=str(tmp_path / "Nextalign"),
+        master_segment_map=processor.get_master_segment_map("ignored.tsv"),
+        precomputed_ref_dir=resolved,
+    )
+
+    out = capsys.readouterr().out
+    assert "Using DB-derived precomputed segment alignments" in out
+    assert "ORPHAN_REF" in out
+
+    merged = tmp_path / "pad_out" / "refset_0_aln_merged_MSA.fasta"
+    assert merged.exists()
+    merged_records = list(SeqIO.parse(str(merged), "fasta"))
+    merged_ids = [record.id for record in merged_records]
+    assert merged_ids.count("REF_A") == 1
+    assert "MASTER0" in merged_ids
+    assert "REF_B" in merged_ids
+    assert "Q_A_1" in merged_ids
+    assert "Q_C_1" in merged_ids
+    assert "Q_ORPHAN" not in merged_ids
+
+    by_id = {record.id: str(record.seq) for record in merged_records}
+    assert by_id["Q_A_1"] == "ATGGT"
+    assert by_id["Q_C_1"] == "AC-AG"
+    assert all(row["segment"] == "0" for row in processor.segment_manifest_rows)
+
+
+def test_process_all_masters_uses_only_backbone_file_when_segment_unknown_and_single_candidate_exists(tmp_path: Path):
+    processor = PadAlignment(
+        reference_alignment=str(DATA_DIR / "master_ref.aligned.fasta"),
+        input_dir=str(tmp_path / "query_aln"),
+        base_dir=str(tmp_path),
+        output_dir="pad_out",
+        keep_intermediate_files=True,
+        strict_segment_backbone=True,
+    )
+
+    precomputed_dir = tmp_path / "ref_backbones"
+    precomputed_dir.mkdir(parents=True, exist_ok=True)
+    (precomputed_dir / "sole_backbone.fasta").write_text(">MASTERX\nATGC\n", encoding="utf-8")
+
+    chosen = {}
+
+    def _capture_process(self, reference_alignment_file, input_dir, base_dir, output_dir, keep_intermediate_files=False, segment_value=None):
+        chosen["ref"] = Path(reference_alignment_file).name
+        chosen["segment"] = segment_value
+
+    processor.process_master_alignment = types.MethodType(_capture_process, processor)
+    processor.process_all_masters(
+        master_list=["MASTERX"],
+        nextalign_dir=str(tmp_path / "Nextalign"),
+        master_segment_map={"MASTERX": None},
+        precomputed_ref_dir=str(precomputed_dir),
+    )
+
+    assert chosen["ref"] == "sole_backbone.fasta"
+    assert chosen["segment"] is None
