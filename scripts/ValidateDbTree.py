@@ -22,6 +22,12 @@ ACCESSION_COLUMNS = {
     "header",
 }
 
+CLUSTER_PLACEHOLDER_VALUES = {
+    "na-see-tree",
+    "na- see tree",
+    "na - see tree",
+}
+
 
 def get_table_columns(conn, table_name):
     cursor = conn.cursor()
@@ -43,6 +49,15 @@ def find_cluster_column(columns):
         if col == "cluster" or col.startswith("cluster_"):
             return col
     return None
+
+
+def is_cluster_placeholder(value):
+    if value is None:
+        return True
+    norm = str(value).strip().lower()
+    if not norm:
+        return True
+    return norm in CLUSTER_PLACEHOLDER_VALUES
 
 
 def fetch_tree_newick(conn):
@@ -133,9 +148,13 @@ def main():
 
         meta_set = set(meta_accessions)
         seq_set = set(seq_headers)
-
-        missing_in_tree = sorted(meta_set - tree_terminals)
-        missing_in_sequences = sorted(meta_set - seq_set)
+        excluded_accessions = set()
+        if table_exists(conn, "excluded_accessions"):
+            excluded_accessions = set(
+                x for x in fetch_table_column(conn, "excluded_accessions", "primary_accession") if x
+            )
+        expected_meta_set = meta_set - excluded_accessions
+        missing_in_sequences = sorted(expected_meta_set - seq_set)
         missing_in_meta = sorted(tree_terminals - meta_set)
 
         meta_columns = get_table_columns(conn, "meta_data")
@@ -143,12 +162,20 @@ def main():
         centroid_set = set()
         missing_centroids_in_tree = []
         extra_in_tree = []
+        meta_expected_in_tree = set(expected_meta_set)
         if cluster_col:
-            centroid_set = set(
-                x for x in fetch_table_column(conn, "meta_data", cluster_col) if x
-            )
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT primary_accession, {cluster_col} FROM meta_data")
+            cluster_rows = cursor.fetchall()
+            centroid_set = {
+                str(cluster_val).strip()
+                for _, cluster_val in cluster_rows
+                if not is_cluster_placeholder(cluster_val)
+            }
             missing_centroids_in_tree = sorted(centroid_set - tree_terminals)
             extra_in_tree = sorted(tree_terminals - centroid_set)
+
+        missing_in_tree = sorted(meta_expected_in_tree - tree_terminals)
 
         # Basic completeness checks
         cursor = conn.cursor()
@@ -424,27 +451,13 @@ def main():
         if tree_name == "usher":
             if segmented_validation_ok:
                 return
-            # If cluster information is present, validate that centroids are represented in
-            # the USHER tree. Unlike IQ-TREE centroid trees, USHER output commonly contains
-            # additional placed non-centroid samples, so exact equality with centroid_set is
-            # not required.
-            if cluster_col and len(centroid_set) > 0:
-                if missing_centroids_in_tree:
-                    raise SystemExit("Validation failed: UShER tree is missing centroid nodes")
-
-                # For non-segmented runs, enforce accession consistency with meta/sequences.
-                # For segmented multi-tree runs, this is handled by per-segment validation above.
-                if missing_in_tree or missing_in_sequences or missing_in_meta:
-                    raise SystemExit("Validation failed: UShER tree does not match accessions")
-
-                if extra_in_tree:
-                    print(
-                        "[info] UShER tree contains non-centroid terminals "
-                        f"({len(extra_in_tree)} extra vs centroid set); centroid coverage passed."
-                    )
-            else:
-                if missing_in_tree or missing_in_sequences or missing_in_meta:
-                    raise SystemExit("Validation failed: UShER tree does not match accessions")
+            if missing_in_tree or missing_in_sequences or missing_in_meta:
+                raise SystemExit("Validation failed: UShER tree does not match accessions")
+            if cluster_col and extra_in_tree:
+                print(
+                    "[info] UShER tree contains non-centroid terminals "
+                    f"({len(extra_in_tree)} extra vs centroid context); full accession coverage passed."
+                )
         elif cluster_col:
             if missing_centroids_in_tree or extra_in_tree:
                 raise SystemExit("Validation failed: IQ-TREE does not match centroid set")

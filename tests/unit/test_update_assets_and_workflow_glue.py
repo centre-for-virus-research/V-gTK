@@ -58,3 +58,4 @@ def test_workflow_update_glue_contains_skip_and_guard():
     assert "UsherPlacement.py" in text
     assert "process USHER_UPDATE_PLACEMENT" not in text
     assert "db_ref_backbones" not in text
+    assert "if (params.test == \"1\" && !UPDATE_MODE)" in text

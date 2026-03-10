@@ -2,6 +2,7 @@
 import os
 import re
 import csv
+import shutil
 import sqlite3
 import sys
 import pandas as pd
@@ -236,11 +237,27 @@ class CreateSqliteDB:
 		return db_status
 
 	def _db_path(self):
-		if self.update:
-			if not self.update_db:
-				raise ValueError("--update requires --update_db path")
-			return self.update_db
+		if self.update and not self.update_db:
+			raise ValueError("--update requires --update_db path")
 		return join(self.base_dir, self.output_dir, self.db_name + ".db")
+
+	@staticmethod
+	def _paths_equivalent(path_a, path_b):
+		if not path_a or not path_b:
+			return False
+		return os.path.realpath(os.path.abspath(path_a)) == os.path.realpath(os.path.abspath(path_b))
+
+	def _prepare_update_target_db(self, db_path):
+		if not self.update:
+			return
+		if not self.update_db:
+			raise ValueError("--update requires --update_db path")
+		if not os.path.isfile(self.update_db):
+			raise FileNotFoundError(f"update_db file not found: {self.update_db}")
+		if self._paths_equivalent(db_path, self.update_db):
+			return
+		os.makedirs(os.path.dirname(db_path), exist_ok=True)
+		shutil.copyfile(self.update_db, db_path)
 
 	@staticmethod
 	def _table_exists(conn, table):
@@ -510,20 +527,33 @@ class CreateSqliteDB:
 					if str(r.get("primary_accession", "")).strip() not in ref_or_master_ids
 				]
 		is_ref_or_master = is_ref_or_master.reindex(df_meta_data.index, fill_value=False)
-		if "exclusion" in df_meta_data.columns:
-			exclusion_mask = df_meta_data["exclusion"].notna() & (df_meta_data["exclusion"] != "")
-			excluded_rows = df_meta_data[exclusion_mask]
-			if not excluded_rows.empty:
-				print(f"[CreateSqliteDB] Found {len(excluded_rows)} rows with exclusions in meta_data")
-				for _, row in excluded_rows.iterrows():
-					acc = row.get("primary_accession", "")
-					if acc:
-						excluded_records.append({"primary_accession": acc, "reason": row["exclusion"]})
-				remove_mask = exclusion_mask & (~is_ref_or_master)
-				df_meta_data = df_meta_data[~remove_mask]
-				retained_refs = (exclusion_mask & is_ref_or_master).sum()
-				if retained_refs:
-					print(f"[CreateSqliteDB] Retained {retained_refs} reference/master rows despite exclusion flags")
+		exclusion_reason = pd.Series("", index=df_meta_data.index, dtype=str)
+		for col in ["exclusion", "exclusion_criteria"]:
+			if col in df_meta_data.columns:
+				col_values = df_meta_data[col].fillna("").astype(str).str.strip()
+				exclusion_reason = exclusion_reason.where(exclusion_reason != "", col_values)
+
+		status_mask = pd.Series(False, index=df_meta_data.index)
+		if "exclusion_status" in df_meta_data.columns:
+			status_values = df_meta_data["exclusion_status"].fillna("").astype(str).str.strip()
+			status_mask = ~status_values.str.lower().isin(["", "0", "false", "no", "na", "none", "nan"])
+			fallback_reason = "metadata_exclusion"
+			exclusion_reason = exclusion_reason.mask((exclusion_reason == "") & status_mask, fallback_reason)
+
+		exclusion_mask = exclusion_reason.astype(str).str.strip() != ""
+		excluded_rows = df_meta_data[exclusion_mask]
+		if not excluded_rows.empty:
+			print(f"[CreateSqliteDB] Found {len(excluded_rows)} rows with exclusions in meta_data")
+			for idx, row in excluded_rows.iterrows():
+				acc = str(row.get("primary_accession", "")).strip()
+				reason = str(exclusion_reason.loc[idx]).strip()
+				if acc:
+					excluded_records.append({"primary_accession": acc, "reason": reason})
+			remove_mask = exclusion_mask & (~is_ref_or_master)
+			df_meta_data = df_meta_data[~remove_mask]
+			retained_refs = (exclusion_mask & is_ref_or_master).sum()
+			if retained_refs:
+				print(f"[CreateSqliteDB] Retained {retained_refs} reference/master rows despite exclusion flags")
 
 		df_meta_data = self._add_cluster_column(df_meta_data)
 		df_features = self._read_tsv_required(self.features, [], "features")
@@ -542,6 +572,7 @@ class CreateSqliteDB:
 
 		db_path = self._db_path()
 		os.makedirs(os.path.dirname(db_path), exist_ok=True)
+		self._prepare_update_target_db(db_path)
 		conn = sqlite3.connect(db_path)
 		cursor = conn.cursor()
 		cursor.execute("PRAGMA foreign_keys = ON;")
@@ -553,7 +584,7 @@ class CreateSqliteDB:
 		cursor.execute("CREATE TABLE IF NOT EXISTS update_table_deltas (batch_id TEXT, table_name TEXT, before_count INTEGER, after_count INTEGER, delta INTEGER);")
 
 		now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-		cursor.execute("INSERT OR REPLACE INTO update_batches (batch_id, started_at, finished_at, update_db, mode) VALUES (?, ?, ?, ?, ?)", (self.batch_id, now_str, None, db_path if self.update else None, "update" if self.update else "create"))
+		cursor.execute("INSERT OR REPLACE INTO update_batches (batch_id, started_at, finished_at, update_db, mode) VALUES (?, ?, ?, ?, ?)", (self.batch_id, now_str, None, self.update_db if self.update else None, "update" if self.update else "create"))
 
 		tables_for_delta = ["meta_data", "features", "sequence_alignment", "genes", "sequences", "insertions", "host_taxa"]
 		before_counts = {t: self._table_row_count(conn, t) for t in tables_for_delta}
@@ -614,18 +645,18 @@ class CreateSqliteDB:
 			if not self.update:
 				df_tree.to_sql("trees", conn, if_exists="replace", index=False)
 			else:
-				existing = set()
 				if self._table_exists(conn, "trees"):
-					for s, n, sk, sg in conn.execute("SELECT source, name, segment_key, segment FROM trees"):
-						existing.add((str(s or "").strip(), str(n or "").strip(), str(sk or "").strip(), str(sg or "").strip()))
-				append_rows = []
-				for _, tr in df_tree.iterrows():
-					k = (str(tr.get("source") or "").strip(), str(tr.get("name") or "").strip(), str(tr.get("segment_key") or "").strip(), str(tr.get("segment") or "").strip())
-					if k in existing:
-						continue
-					append_rows.append(tr)
-				if append_rows:
-					pd.DataFrame(append_rows).to_sql("trees", conn, if_exists="append", index=False)
+					for _, tr in df_tree.iterrows():
+						conn.execute(
+							"DELETE FROM trees WHERE COALESCE(source, '')=? AND COALESCE(name, '')=? AND COALESCE(segment_key, '')=? AND COALESCE(segment, '')=?",
+							(
+								str(tr.get("source") or "").strip(),
+								str(tr.get("name") or "").strip(),
+								str(tr.get("segment_key") or "").strip(),
+								str(tr.get("segment") or "").strip(),
+							),
+						)
+				df_tree.to_sql("trees", conn, if_exists="append", index=False)
 
 		creation_type = self._normalize_db_status(self.db_status if self.db_status else ("last updated" if self.update else "new db"))
 		pd.DataFrame([{"creation_type": creation_type, "date": now_str}]).to_sql("info", conn, if_exists="append", index=False)

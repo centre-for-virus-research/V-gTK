@@ -1192,7 +1192,7 @@ workflow {
 
     // Keep clustered input small in test mode to speed up CI and avoid long MMseqs runs
     cluster_input_ch = DEDUP_ALIGNMENT.out.dedup_msa
-    if (params.test == "1") {
+    if (params.test == "1" && !UPDATE_MODE) {
         TEST_SUBSAMPLE_CLUSTER_INPUT(cluster_input_ch)
         cluster_input_ch = TEST_SUBSAMPLE_CLUSTER_INPUT.out.dedup_for_cluster
     }

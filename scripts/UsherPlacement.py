@@ -4,6 +4,10 @@ import os
 import re
 import sqlite3
 import subprocess
+from io import StringIO
+
+import pandas as pd
+from Bio import Phylo
 
 
 class UsherPlacement:
@@ -54,6 +58,15 @@ class UsherPlacement:
 					ids.append(line[1:].strip().split()[0])
 		return ids
 
+	@staticmethod
+	def _read_tree_terminals(tree_path):
+		with open(tree_path, "r", encoding="utf-8") as handle:
+			newick = handle.read().strip()
+		if not newick:
+			return set()
+		tree = Phylo.read(StringIO(newick), "newick")
+		return {term.name for term in tree.get_terminals() if term.name}
+
 	def _segment_from_padded_alignment(self):
 		name = os.path.basename(self.padded_aln)
 		name = re.sub(r"_dedup\.fasta$", "", name)
@@ -99,29 +112,102 @@ class UsherPlacement:
 			if not tree_written:
 				raise ValueError(f"Missing tree for segment {segment} in update DB")
 
+		finally:
+			conn.close()
+
+		tree_ids = sorted(self._read_tree_terminals(tree_out))
+
+		with open(ids_out, "w", encoding="utf-8") as handle:
+			for acc in tree_ids:
+				handle.write(acc + "\n")
+
+		return tree_out, ids_out
+
+	def _load_update_missing_alignment_rows(self, segment, tree_ids, current_ids):
+		conn = sqlite3.connect(self.update_db)
+		try:
+			df_meta = pd.read_sql_query("SELECT primary_accession, accession_type, segment FROM meta_data", conn)
+			df_aln = pd.read_sql_query("SELECT * FROM sequence_alignment", conn)
 			excluded = set()
+			cur = conn.cursor()
 			if cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='excluded_accessions'").fetchone():
 				for (acc,) in cur.execute("SELECT primary_accession FROM excluded_accessions"):
 					if acc:
 						excluded.add(str(acc).strip())
-
-			ids = []
-			for acc, segv in cur.execute("SELECT primary_accession, COALESCE(segment, '0') FROM meta_data"):
-				if not acc:
-					continue
-				acc = str(acc).strip()
-				if not acc or acc in excluded:
-					continue
-				if self._normalize_segment(segv) == segment:
-					ids.append(acc)
 		finally:
 			conn.close()
 
-		with open(ids_out, "w", encoding="utf-8") as handle:
-			for acc in sorted(set(ids)):
-				handle.write(acc + "\n")
+		if "primary_accession" not in df_aln.columns and "sequence_id" in df_aln.columns:
+			df_aln["primary_accession"] = df_aln["sequence_id"]
 
-		return tree_out, ids_out
+		if "alignment" not in df_aln.columns:
+			for column in ["aligned_seq", "sequence", "aln", "alignment_seq"]:
+				if column in df_aln.columns:
+					df_aln["alignment"] = df_aln[column]
+					break
+
+		if "alignment" not in df_aln.columns or "primary_accession" not in df_aln.columns:
+			return []
+
+		if "alignment_name" not in df_aln.columns:
+			df_aln["alignment_name"] = ""
+
+		df_meta["segment"] = df_meta["segment"].apply(self._normalize_segment).fillna("0")
+		target_meta = df_meta[df_meta["segment"] == segment].copy()
+		if target_meta.empty:
+			return []
+
+		target_meta["primary_accession"] = target_meta["primary_accession"].fillna("").astype(str).str.strip()
+		needed_ids = {
+			acc for acc in target_meta["primary_accession"].tolist()
+			if acc and acc not in excluded and acc not in tree_ids and acc not in current_ids
+		}
+		if not needed_ids:
+			return []
+
+		part = df_aln[df_aln["primary_accession"].fillna("").astype(str).str.strip().isin(needed_ids)].copy()
+		if part.empty:
+			return []
+
+		part["primary_accession"] = part["primary_accession"].fillna("").astype(str).str.strip()
+		part["alignment_name"] = part["alignment_name"].fillna("").astype(str).str.strip()
+		part["alignment"] = part["alignment"].fillna("").astype(str).str.strip()
+		part["_preferred_backbone"] = (
+			part["alignment_name"].str.lower() == part["primary_accession"].str.lower()
+		).astype(int)
+		part = part.sort_values(
+			by=["primary_accession", "_preferred_backbone", "alignment_name"],
+			ascending=[True, False, True],
+		)
+
+		rows = []
+		for _, row in part.drop_duplicates(subset=["primary_accession"]).iterrows():
+			acc = str(row.get("primary_accession", "")).strip()
+			seq = str(row.get("alignment", "")).strip()
+			if acc and seq and seq.lower() != "nan":
+				rows.append((acc, seq))
+		return rows
+
+	def build_update_alignment_input(self, tree_file):
+		segment = self._segment_from_padded_alignment()
+		tree_ids = self._read_tree_terminals(tree_file)
+		current_ids = set(self._read_ids_from_fasta(self.padded_aln))
+		missing_rows = self._load_update_missing_alignment_rows(segment, tree_ids, current_ids)
+		if not missing_rows:
+			return self.padded_aln
+
+		merged_fasta = os.path.join(self.output_dir, "update_all_samples.fasta")
+		with open(merged_fasta, "w", encoding="utf-8") as out_handle:
+			with open(self.padded_aln, "r", encoding="utf-8") as in_handle:
+				out_handle.write(in_handle.read())
+			for acc, seq in missing_rows:
+				out_handle.write(f">{acc}\n{seq}\n")
+
+		print(
+			f"[info] Added {len(missing_rows)} historical DB alignment(s) missing from the starter tree "
+			f"for update placement on segment {segment}."
+		)
+		return merged_fasta
 
 	def resolve_non_update_assets(self):
 		if not self.mmseq_cluster_dir or not os.path.isdir(self.mmseq_cluster_dir):
@@ -143,18 +229,20 @@ class UsherPlacement:
 
 		return cluster_rep, tree_file
 
-	def resolve_reference_id(self, cluster_rep=None):
+	def resolve_reference_id(self, cluster_rep=None, alignment_fasta=None):
 		if cluster_rep:
 			cluster_ids = self._read_ids_from_fasta(cluster_rep)
 			if cluster_ids:
 				ref_id = cluster_ids[0]
-				if ref_id in set(self._read_ids_from_fasta(self.padded_aln)):
+				target_fasta = alignment_fasta or self.padded_aln
+				if ref_id in set(self._read_ids_from_fasta(target_fasta)):
 					return ref_id
-				print(f"[warn] Reference ID '{ref_id}' is not present in {self.padded_aln}; using first MSA ID instead.")
+				print(f"[warn] Reference ID '{ref_id}' is not present in {target_fasta}; using first MSA ID instead.")
 
-		aln_ids = self._read_ids_from_fasta(self.padded_aln)
+		target_fasta = alignment_fasta or self.padded_aln
+		aln_ids = self._read_ids_from_fasta(target_fasta)
 		if not aln_ids:
-			raise ValueError(f"Could not resolve reference ID from {self.padded_aln}")
+			raise ValueError(f"Could not resolve reference ID from {target_fasta}")
 		return aln_ids[0]
 
 	def write_ids_file(self, rel_name, ids):
@@ -173,14 +261,15 @@ class UsherPlacement:
 				print(retry_message)
 			return False
 
-	def build_vcf(self, ref_id, exclude_ids_file=None):
+	def build_vcf(self, ref_id, exclude_ids_file=None, alignment_fasta=None):
+		alignment_fasta = alignment_fasta or self.padded_aln
 		vcf_path = os.path.join(self.output_dir, "all_samples.vcf")
 		base_cmd = ["faToVcf", f"-ref={ref_id}"]
 		if exclude_ids_file:
-			cmd = base_cmd + [f"-excludeFile={exclude_ids_file}", self.padded_aln, vcf_path]
+			cmd = base_cmd + [f"-excludeFile={exclude_ids_file}", alignment_fasta, vcf_path]
 			if self.run_command(cmd, "[warn] faToVcf failed with -excludeFile; retrying without exclude filter."):
 				return vcf_path
-		cmd = base_cmd + [self.padded_aln, vcf_path]
+		cmd = base_cmd + [alignment_fasta, vcf_path]
 		subprocess.run(cmd, check=True)
 		return vcf_path
 
@@ -188,8 +277,10 @@ class UsherPlacement:
 		os.makedirs(self.output_dir, exist_ok=True)
 
 		cluster_rep = None
+		alignment_fasta = self.padded_aln
 		if self.update_db:
 			tree_file, existing_ids_file = self.prepare_update_assets()
+			alignment_fasta = self.build_update_alignment_input(tree_file)
 		else:
 			cluster_rep, tree_file = self.resolve_non_update_assets()
 			centroid_ids = self._read_ids_from_fasta(cluster_rep)
@@ -197,16 +288,20 @@ class UsherPlacement:
 			self.write_ids_file("aln_ids.txt", self._read_ids_from_fasta(self.padded_aln))
 			existing_ids_file = self.write_ids_file("exclude_ids.txt", centroid_ids[1:])
 
-		ref_id = self.resolve_reference_id(cluster_rep=cluster_rep)
-		aln_ids = self._read_ids_from_fasta(self.padded_aln)
+		ref_id = self.resolve_reference_id(cluster_rep=cluster_rep, alignment_fasta=alignment_fasta)
+		aln_ids = self._read_ids_from_fasta(alignment_fasta)
 		if len(aln_ids) <= 1:
-			raise ValueError(f"Need at least 2 sequences in {self.padded_aln}, found {len(aln_ids)}")
+			raise ValueError(f"Need at least 2 sequences in {alignment_fasta}, found {len(aln_ids)}")
 
 		exclude_ids_file = None
 		if self.update_db:
 			if os.path.isfile(existing_ids_file):
 				existing_ids = [x for x in self._read_text_lines(existing_ids_file) if x != ref_id]
-				exclude_ids_file = self.write_ids_file("exclude_ids.txt", existing_ids)
+				exclude_count = len(existing_ids)
+				if exclude_count < (len(aln_ids) - 1):
+					exclude_ids_file = self.write_ids_file("exclude_ids.txt", existing_ids)
+				else:
+					print("[info] No sequences require UShER placement after comparing alignment input to current tree; reusing tree without exclusion filter.")
 		else:
 			if os.path.isfile(existing_ids_file):
 				exclude_ids = self._read_text_lines(existing_ids_file)
@@ -217,7 +312,7 @@ class UsherPlacement:
 					mode = " in test mode" if self.test_mode else ""
 					print(f"[warn] Exclude list would remove all non-reference sequences ({exclude_count}/{len(aln_ids)}){mode}; running faToVcf without -excludeFile.")
 
-		vcf_path = self.build_vcf(ref_id, exclude_ids_file=exclude_ids_file)
+		vcf_path = self.build_vcf(ref_id, exclude_ids_file=exclude_ids_file, alignment_fasta=alignment_fasta)
 
 		usher_help = subprocess.run(["usher", "--help"], capture_output=True, text=True, check=False)
 		usher_cmd = [

@@ -72,7 +72,7 @@ def _inputs(tmp_path: Path, suffix: str, aln_a: str = "ATGC"):
     }
 
 
-def _build_db(tmp_path: Path, inp: dict, update=False, update_db=None, filtered_ids_file=None):
+def _build_db(tmp_path: Path, inp: dict, update=False, update_db=None, filtered_ids_file=None, iqtree_file=None, usher_tree=None):
     db = CreateSqliteDB(
         meta_data=str(inp["meta"]),
         features=str(inp["features"]),
@@ -90,12 +90,15 @@ def _build_db(tmp_path: Path, inp: dict, update=False, update_db=None, filtered_
         output_dir="SqliteDB",
         db_name="upd_db",
         db_status="last updated" if update else "new db",
+        iqtree_file=str(iqtree_file) if iqtree_file else None,
+        usher_tree=str(usher_tree) if usher_tree else None,
         update=update,
         update_db=str(update_db) if update_db else None,
         batch_id="batch_test",
         filtered_ids_file=str(filtered_ids_file) if filtered_ids_file else None,
     )
     db.create_db()
+    return tmp_path / "SqliteDB" / "upd_db.db"
 
 
 def _write_realdb_compatible_lookup_tables(inp: dict):
@@ -241,6 +244,8 @@ def test_update_mode_logs_duplicate_non_upsert_keys_against_real_db(tmp_path: Pa
     conn = sqlite3.connect(str(real_update_db_copy))
     try:
         cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM update_exclusions")
+        seed_update_exclusions = cur.fetchone()[0]
         cur.execute("SELECT m49_code FROM m49_country WHERE m49_code IS NOT NULL AND TRIM(m49_code) != '' LIMIT 1")
         row = cur.fetchone()
     finally:
@@ -308,9 +313,9 @@ def test_update_mode_logs_duplicate_non_upsert_keys_against_real_db(tmp_path: Pa
     ).to_csv(inp["host_taxa"], sep="\t", index=False)
     _write_realdb_compatible_genes(inp, real_update_db_copy)
 
-    _build_db(tmp_path, inp, update=True, update_db=real_update_db_copy)
+    out_db = _build_db(tmp_path, inp, update=True, update_db=real_update_db_copy)
 
-    conn = sqlite3.connect(str(real_update_db_copy))
+    conn = sqlite3.connect(str(out_db))
     try:
         cur = conn.cursor()
         cur.execute(
@@ -321,6 +326,14 @@ def test_update_mode_logs_duplicate_non_upsert_keys_against_real_db(tmp_path: Pa
 
         cur.execute("SELECT COUNT(*) FROM m49_country WHERE m49_code='ZZZ'")
         assert cur.fetchone()[0] == 1
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(str(real_update_db_copy))
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM update_exclusions")
+        assert cur.fetchone()[0] == seed_update_exclusions
     finally:
         conn.close()
 
@@ -397,9 +410,9 @@ def test_update_mode_filtered_ids_keeps_real_master_even_when_listed(tmp_path: P
     filtered_ids = tmp_path / "filtered_real_ids.txt"
     filtered_ids.write_text(f"{master_acc}\nQ_REAL_FILTER\n", encoding="utf-8")
 
-    _build_db(tmp_path, inp, update=True, update_db=real_update_db_copy, filtered_ids_file=filtered_ids)
+    out_db = _build_db(tmp_path, inp, update=True, update_db=real_update_db_copy, filtered_ids_file=filtered_ids)
 
-    conn = sqlite3.connect(str(real_update_db_copy))
+    conn = sqlite3.connect(str(out_db))
     try:
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM meta_data WHERE primary_accession=?", (master_acc,))
@@ -462,9 +475,9 @@ def test_update_mode_autofills_missing_cluster_98pct_with_placeholder(tmp_path: 
         columns=["taxonomy_id", "scientific_name", "rank", "lineage"],
     ).to_csv(inp["host_taxa"], sep="\t", index=False)
 
-    _build_db(tmp_path, inp, update=True, update_db=real_update_db_copy)
+    out_db = _build_db(tmp_path, inp, update=True, update_db=real_update_db_copy)
 
-    conn = sqlite3.connect(str(real_update_db_copy))
+    conn = sqlite3.connect(str(out_db))
     try:
         row = conn.execute(
             "SELECT cluster_98pct FROM meta_data WHERE primary_accession=? ORDER BY rowid DESC LIMIT 1",
@@ -472,5 +485,122 @@ def test_update_mode_autofills_missing_cluster_98pct_with_placeholder(tmp_path: 
         ).fetchone()
         assert row is not None
         assert row[0] == "NA- see tree"
+    finally:
+        conn.close()
+
+
+def test_update_mode_copies_seed_db_to_named_output_without_mutating_seed(tmp_path: Path):
+    initial = _inputs(tmp_path, "seed_initial", aln_a="ATGC")
+    seed_output = _build_db(tmp_path, initial, update=False)
+    seed_db = tmp_path / "seed.db"
+    shutil.copyfile(seed_output, seed_db)
+    seed_output.unlink()
+
+    update_inputs = _inputs(tmp_path, "seed_update", aln_a="AT--")
+    out_db = _build_db(tmp_path, update_inputs, update=True, update_db=seed_db)
+
+    assert out_db.exists()
+    assert out_db != seed_db
+
+    seed_conn = sqlite3.connect(str(seed_db))
+    try:
+        seed_alignment = seed_conn.execute(
+            "SELECT alignment FROM sequence_alignment WHERE primary_accession='A' AND segment='1'"
+        ).fetchone()[0]
+    finally:
+        seed_conn.close()
+
+    out_conn = sqlite3.connect(str(out_db))
+    try:
+        out_alignment = out_conn.execute(
+            "SELECT alignment FROM sequence_alignment WHERE primary_accession='A' AND segment='1'"
+        ).fetchone()[0]
+    finally:
+        out_conn.close()
+
+    assert seed_alignment == "ATGC"
+    assert out_alignment == "AT--"
+
+
+def test_update_mode_replaces_existing_usher_tree_with_same_key(tmp_path: Path):
+    initial = _inputs(tmp_path, "tree_initial", aln_a="ATGC")
+    seed_tree = tmp_path / "seed_tree.nwk"
+    seed_tree.write_text("(A:0.1);\n", encoding="utf-8")
+    seed_db = _build_db(tmp_path, initial, update=False, usher_tree=seed_tree)
+
+    update_inputs = _inputs(tmp_path, "tree_update", aln_a="AT--")
+    updated_tree = tmp_path / "updated_tree.nwk"
+    updated_tree.write_text("(A:0.1,B:0.2);\n", encoding="utf-8")
+    out_db = _build_db(tmp_path, update_inputs, update=True, update_db=seed_db, usher_tree=updated_tree)
+
+    conn = sqlite3.connect(str(out_db))
+    try:
+        rows = conn.execute("SELECT name, source, newick FROM trees WHERE source='usher'").fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "usher"
+        assert rows[0][2].strip() == "(A:0.1,B:0.2);"
+    finally:
+        conn.close()
+
+
+def test_update_mode_uses_meta_exclusion_criteria_when_filtered_files_are_empty(tmp_path: Path):
+    initial = _inputs(tmp_path, "meta_excl_initial", aln_a="ATGC")
+    seed_db = _build_db(tmp_path, initial, update=False)
+
+    update_inp = _inputs(tmp_path, "meta_excl_update", aln_a="ATGC")
+    pd.DataFrame(
+        [
+            ["REF1", "", "1", "master", "", ""],
+            ["Q_MISSING", "", "1", "query", "Unable to align during update", "1"],
+        ],
+        columns=[
+            "primary_accession",
+            "exclusion",
+            "segment",
+            "accession_type",
+            "exclusion_criteria",
+            "exclusion_status",
+        ],
+    ).to_csv(update_inp["meta"], sep="\t", index=False)
+
+    pd.DataFrame(
+        [["REF1", "REF1", "ATGC", "1"]],
+        columns=["primary_accession", "alignment_name", "alignment", "segment"],
+    ).to_csv(update_inp["aln"], sep="\t", index=False)
+
+    pd.DataFrame(
+        [["REF1", "REF1", "REF1", "1", "4", "1", "4", "P", "1"]],
+        columns=[
+            "accession",
+            "master_ref_accession",
+            "reference_accession",
+            "aln_start",
+            "aln_end",
+            "cds_start",
+            "cds_end",
+            "product",
+            "segment",
+        ],
+    ).to_csv(update_inp["features"], sep="\t", index=False)
+
+    pd.DataFrame(
+        [["REF1", "REF1", "ins:2:A", "1"]],
+        columns=["primary_accession", "reference", "insertion", "segment"],
+    ).to_csv(update_inp["insertions"], sep="\t", index=False)
+
+    update_inp["fasta"].write_text(">REF1\nATGC\n>Q_MISSING\nATTT\n", encoding="utf-8")
+
+    out_db = _build_db(tmp_path, update_inp, update=True, update_db=seed_db)
+
+    conn = sqlite3.connect(str(out_db))
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM meta_data WHERE primary_accession='Q_MISSING'")
+        assert cur.fetchone()[0] == 0
+
+        cur.execute("SELECT reason FROM excluded_accessions WHERE primary_accession='Q_MISSING' ORDER BY rowid DESC LIMIT 1")
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == "Unable to align during update"
     finally:
         conn.close()
