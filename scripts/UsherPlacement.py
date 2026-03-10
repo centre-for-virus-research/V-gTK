@@ -4,14 +4,15 @@ import os
 import re
 import sqlite3
 import subprocess
+import shutil
 from io import StringIO
 
 import pandas as pd
-from Bio import Phylo
+from Bio import Phylo, SeqIO
 
 
 class UsherPlacement:
-	def __init__(self, padded_aln, output_dir, mmseq_cluster_dir=None, iqtree_dir=None, update_db=None, threads=1, test_mode=False):
+	def __init__(self, padded_aln, output_dir, mmseq_cluster_dir=None, iqtree_dir=None, update_db=None, threads=1, test_mode=False, chunk_size=50000, chunk_threshold=100000):
 		self.padded_aln = padded_aln
 		self.output_dir = output_dir
 		self.mmseq_cluster_dir = self._normalize_optional_path(mmseq_cluster_dir)
@@ -19,6 +20,8 @@ class UsherPlacement:
 		self.update_db = self._normalize_optional_path(update_db)
 		self.threads = max(1, int(threads))
 		self.test_mode = str(test_mode).strip() == "1" if not isinstance(test_mode, bool) else test_mode
+		self.chunk_size = max(1, int(chunk_size))
+		self.chunk_threshold = max(1, int(chunk_threshold))
 
 	@staticmethod
 	def _normalize_optional_path(path_value):
@@ -209,6 +212,116 @@ class UsherPlacement:
 		)
 		return merged_fasta
 
+	def _count_sequences_to_place(self, alignment_fasta, ref_id, existing_ids):
+		aln_ids = self._read_ids_from_fasta(alignment_fasta)
+		placeable_ids = [acc for acc in aln_ids if acc != ref_id and acc not in existing_ids]
+		return aln_ids, placeable_ids
+
+	def _split_alignment_into_chunks_python(self, alignment_fasta, ref_id, placeable_ids):
+		if not placeable_ids:
+			return []
+
+		placeable_set = set(placeable_ids)
+		ref_record = None
+		for record in SeqIO.parse(alignment_fasta, "fasta"):
+			if record.id == ref_id:
+				ref_record = record
+				break
+		if ref_record is None:
+			raise ValueError(f"Reference ID {ref_id} not found in {alignment_fasta}")
+
+		chunk_dir = os.path.join(self.output_dir, "chunks")
+		os.makedirs(chunk_dir, exist_ok=True)
+		chunk_paths = []
+		chunk_handle = None
+		chunk_index = 0
+		written_in_chunk = 0
+
+		def open_chunk():
+			nonlocal chunk_handle, chunk_index, written_in_chunk
+			chunk_index += 1
+			written_in_chunk = 0
+			chunk_path = os.path.join(chunk_dir, f"chunk_{chunk_index:04d}.fasta")
+			chunk_paths.append(chunk_path)
+			chunk_handle = open(chunk_path, "w", encoding="utf-8")
+			SeqIO.write([ref_record], chunk_handle, "fasta")
+
+		def close_chunk():
+			nonlocal chunk_handle
+			if chunk_handle:
+				chunk_handle.close()
+				chunk_handle = None
+
+		try:
+			for record in SeqIO.parse(alignment_fasta, "fasta"):
+				if record.id == ref_id or record.id not in placeable_set:
+					continue
+				if chunk_handle is None or written_in_chunk >= self.chunk_size:
+					close_chunk()
+					open_chunk()
+				SeqIO.write([record], chunk_handle, "fasta")
+				written_in_chunk += 1
+		finally:
+			close_chunk()
+
+		return chunk_paths
+
+	def split_alignment_into_chunks(self, alignment_fasta, ref_id, placeable_ids):
+		if not placeable_ids:
+			return []
+		chunk_dir = os.path.join(self.output_dir, "chunks")
+		os.makedirs(chunk_dir, exist_ok=True)
+
+		seqkit = shutil.which("seqkit")
+		if not seqkit:
+			return self._split_alignment_into_chunks_python(alignment_fasta, ref_id, placeable_ids)
+
+		ref_fasta = os.path.join(chunk_dir, "reference.fasta")
+		ids_file = os.path.join(chunk_dir, "placeable_ids.txt")
+		placeable_fasta = os.path.join(chunk_dir, "placeable_only.fasta")
+		raw_chunk_dir = os.path.join(chunk_dir, "raw")
+		os.makedirs(raw_chunk_dir, exist_ok=True)
+
+		ref_record = None
+		for record in SeqIO.parse(alignment_fasta, "fasta"):
+			if record.id == ref_id:
+				ref_record = record
+				break
+		if ref_record is None:
+			raise ValueError(f"Reference ID {ref_id} not found in {alignment_fasta}")
+		with open(ref_fasta, "w", encoding="utf-8") as handle:
+			SeqIO.write([ref_record], handle, "fasta")
+
+		with open(ids_file, "w", encoding="utf-8") as handle:
+			for acc in placeable_ids:
+				handle.write(acc + "\n")
+
+		try:
+			subprocess.run([seqkit, "grep", "-n", "-f", ids_file, alignment_fasta, "-o", placeable_fasta], check=True)
+			subprocess.run([seqkit, "split2", "-s", str(self.chunk_size), "-O", raw_chunk_dir, placeable_fasta], check=True)
+		except subprocess.CalledProcessError:
+			return self._split_alignment_into_chunks_python(alignment_fasta, ref_id, placeable_ids)
+
+		raw_chunks = sorted(
+			os.path.join(raw_chunk_dir, name)
+			for name in os.listdir(raw_chunk_dir)
+			if name.lower().endswith((".fa", ".fasta", ".fna"))
+		)
+		if not raw_chunks:
+			return self._split_alignment_into_chunks_python(alignment_fasta, ref_id, placeable_ids)
+
+		chunk_paths = []
+		for idx, raw_chunk in enumerate(raw_chunks, start=1):
+			chunk_path = os.path.join(chunk_dir, f"chunk_{idx:04d}.fasta")
+			chunk_paths.append(chunk_path)
+			with open(chunk_path, "w", encoding="utf-8") as out_handle:
+				with open(ref_fasta, "r", encoding="utf-8") as ref_handle:
+					out_handle.write(ref_handle.read())
+				with open(raw_chunk, "r", encoding="utf-8") as raw_handle:
+					out_handle.write(raw_handle.read())
+
+		return chunk_paths
+
 	def resolve_non_update_assets(self):
 		if not self.mmseq_cluster_dir or not os.path.isdir(self.mmseq_cluster_dir):
 			raise FileNotFoundError(f"MMseqs cluster directory not found: {self.mmseq_cluster_dir}")
@@ -273,6 +386,40 @@ class UsherPlacement:
 		subprocess.run(cmd, check=True)
 		return vcf_path
 
+	@staticmethod
+	def _resolve_usher_tree_output(output_dir):
+		for name in ["final-tree.nh", "uncondensed-final-tree.nh"]:
+			path = os.path.join(output_dir, name)
+			if os.path.isfile(path):
+				return path
+		raise FileNotFoundError(f"USHER tree output not found in {output_dir}")
+
+	def run_usher(self, tree_file, vcf_path, output_dir):
+		os.makedirs(output_dir, exist_ok=True)
+		usher_help = subprocess.run(["usher", "--help"], capture_output=True, text=True, check=False)
+		usher_cmd = [
+			"usher",
+			"-v", vcf_path,
+			"-t", tree_file,
+			"-d", output_dir,
+			"-o", os.path.join(output_dir, "usher.pb"),
+			"-C", "-u",
+		]
+		if " -T " in (usher_help.stdout + usher_help.stderr):
+			usher_cmd.extend(["-T", str(self.threads)])
+
+		env = os.environ.copy()
+		for var in ["OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"]:
+			env[var] = str(self.threads)
+		subprocess.run(usher_cmd, check=True, env=env)
+		return self._resolve_usher_tree_output(output_dir)
+
+	def promote_final_usher_outputs(self, final_output_dir):
+		for name in ["final-tree.nh", "uncondensed-final-tree.nh", "usher.pb", "mutation-paths.txt", "placement_stats.tsv", "all_samples.vcf"]:
+			src = os.path.join(final_output_dir, name)
+			if os.path.isfile(src):
+				shutil.copyfile(src, os.path.join(self.output_dir, name))
+
 	def run(self):
 		os.makedirs(self.output_dir, exist_ok=True)
 
@@ -289,19 +436,43 @@ class UsherPlacement:
 			existing_ids_file = self.write_ids_file("exclude_ids.txt", centroid_ids[1:])
 
 		ref_id = self.resolve_reference_id(cluster_rep=cluster_rep, alignment_fasta=alignment_fasta)
-		aln_ids = self._read_ids_from_fasta(alignment_fasta)
+		existing_ids = []
+		if os.path.isfile(existing_ids_file):
+			existing_ids = self._read_text_lines(existing_ids_file)
+		aln_ids, placeable_ids = self._count_sequences_to_place(alignment_fasta, ref_id, set(existing_ids))
 		if len(aln_ids) <= 1:
 			raise ValueError(f"Need at least 2 sequences in {alignment_fasta}, found {len(aln_ids)}")
+
+		if self.update_db and not placeable_ids:
+			print("[info] No sequences require UShER placement after comparing alignment input to current tree; reusing existing tree.")
+			for tree_name in ["uncondensed-final-tree.nh", "final-tree.nh"]:
+				shutil.copyfile(tree_file, os.path.join(self.output_dir, tree_name))
+			return
+
+		if self.update_db and len(placeable_ids) > self.chunk_threshold:
+			chunk_fastas = self.split_alignment_into_chunks(alignment_fasta, ref_id, placeable_ids)
+			print(
+				f"[info] Splitting {len(placeable_ids)} update-placement sequence(s) into {len(chunk_fastas)} chunk(s) "
+				f"of up to {self.chunk_size} sequence(s) each."
+			)
+			current_tree = tree_file
+			final_chunk_dir = None
+			for idx, chunk_fasta in enumerate(chunk_fastas, start=1):
+				chunk_dir = os.path.join(self.output_dir, f"chunk_{idx:04d}")
+				vcf_path = self.build_vcf(ref_id, alignment_fasta=chunk_fasta)
+				current_tree = self.run_usher(current_tree, vcf_path, chunk_dir)
+				final_chunk_dir = chunk_dir
+			if final_chunk_dir:
+				self.promote_final_usher_outputs(final_chunk_dir)
+			return
 
 		exclude_ids_file = None
 		if self.update_db:
 			if os.path.isfile(existing_ids_file):
-				existing_ids = [x for x in self._read_text_lines(existing_ids_file) if x != ref_id]
+				existing_ids = [x for x in existing_ids if x != ref_id]
 				exclude_count = len(existing_ids)
 				if exclude_count < (len(aln_ids) - 1):
 					exclude_ids_file = self.write_ids_file("exclude_ids.txt", existing_ids)
-				else:
-					print("[info] No sequences require UShER placement after comparing alignment input to current tree; reusing tree without exclusion filter.")
 		else:
 			if os.path.isfile(existing_ids_file):
 				exclude_ids = self._read_text_lines(existing_ids_file)
@@ -313,23 +484,7 @@ class UsherPlacement:
 					print(f"[warn] Exclude list would remove all non-reference sequences ({exclude_count}/{len(aln_ids)}){mode}; running faToVcf without -excludeFile.")
 
 		vcf_path = self.build_vcf(ref_id, exclude_ids_file=exclude_ids_file, alignment_fasta=alignment_fasta)
-
-		usher_help = subprocess.run(["usher", "--help"], capture_output=True, text=True, check=False)
-		usher_cmd = [
-			"usher",
-			"-v", vcf_path,
-			"-t", tree_file,
-			"-d", self.output_dir,
-			"-o", os.path.join(self.output_dir, "usher.pb"),
-			"-C", "-u",
-		]
-		if " -T " in (usher_help.stdout + usher_help.stderr):
-			usher_cmd.extend(["-T", str(self.threads)])
-
-		env = os.environ.copy()
-		for var in ["OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"]:
-			env[var] = str(self.threads)
-		subprocess.run(usher_cmd, check=True, env=env)
+		self.run_usher(tree_file, vcf_path, self.output_dir)
 
 	@staticmethod
 	def _read_text_lines(path):
@@ -346,6 +501,8 @@ if __name__ == "__main__":
 	parser.add_argument("--update_db", default=None, help="Existing update DB for update-mode tree and ID extraction")
 	parser.add_argument("--threads", default=1, type=int, help="Thread count")
 	parser.add_argument("--test_mode", default="0", help="Whether test mode is enabled (1/0)")
+	parser.add_argument("--chunk_size", default=50000, type=int, help="Maximum sequences per iterative update chunk when chunking is triggered")
+	parser.add_argument("--chunk_threshold", default=100000, type=int, help="Trigger iterative chunked update placement when sequences-to-place exceed this count")
 	args = parser.parse_args()
 
 	UsherPlacement(
@@ -356,4 +513,6 @@ if __name__ == "__main__":
 		update_db=args.update_db,
 		threads=args.threads,
 		test_mode=args.test_mode,
+		chunk_size=args.chunk_size,
+		chunk_threshold=args.chunk_threshold,
 	).run()
