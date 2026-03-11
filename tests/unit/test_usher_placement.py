@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -209,6 +210,89 @@ def test_run_update_mode_chunks_iteratively_for_large_alignment(tmp_path: Path, 
 	assert run_calls[1][0] == "uncondensed-final-tree.nh"
 	assert run_calls[2][0] == "uncondensed-final-tree.nh"
 	assert (output_dir / "uncondensed-final-tree.nh").exists()
+
+
+def test_run_chunked_mode_reports_sequence_progress(tmp_path: Path, monkeypatch, capsys):
+	msa = tmp_path / "segment_1_dedup.fasta"
+	msa.write_text(
+		">REF1\nATGC\n>Q1\nATGA\n>Q2\nATGT\n>Q3\nATGG\n>Q4\nATCC\n>Q5\nATCA\n",
+		encoding="utf-8",
+	)
+	output_dir = tmp_path / "usher_out"
+	output_dir.mkdir(parents=True, exist_ok=True)
+	cluster_rep = tmp_path / "cluster_rep.fasta"
+	cluster_rep.write_text(">REF1\nATGC\n", encoding="utf-8")
+	seed_tree = tmp_path / "seed.treefile"
+	seed_tree.write_text("(REF1:0.1);\n", encoding="utf-8")
+
+	processor = UsherPlacement(
+		padded_aln=str(msa),
+		output_dir=str(output_dir),
+		mmseq_cluster_dir=str(tmp_path / "mmseq"),
+		iqtree_dir=str(tmp_path / "iqtree"),
+		chunk_size=2,
+		chunk_threshold=3,
+	)
+
+	monkeypatch.setattr(processor, "resolve_non_update_assets", lambda: (str(cluster_rep), str(seed_tree)))
+
+	def fake_build_vcf(ref_id, exclude_ids_file=None, alignment_fasta=None):
+		vcf_path = output_dir / f"{Path(alignment_fasta).stem}.vcf"
+		vcf_path.write_text("##fileformat=VCFv4.2\n", encoding="utf-8")
+		return str(vcf_path)
+	monkeypatch.setattr(processor, "build_vcf", fake_build_vcf)
+
+	def fake_run_usher(tree_file, vcf_path, chunk_output_dir):
+		Path(chunk_output_dir).mkdir(parents=True, exist_ok=True)
+		(Path(chunk_output_dir) / "uncondensed-final-tree.nh").write_text("(REF1:0.1,Q1:0.2);\n", encoding="utf-8")
+		(Path(chunk_output_dir) / "usher.pb").write_text("pb", encoding="utf-8")
+		return str(Path(chunk_output_dir) / "uncondensed-final-tree.nh")
+	monkeypatch.setattr(processor, "run_usher", fake_run_usher)
+
+	processor.run()
+
+	stdout = capsys.readouterr().out
+	assert "batches complete: 0/3; remaining: 3." in stdout
+	assert "batches complete: 1/3; remaining: 2." in stdout
+	assert "batches complete: 2/3; remaining: 1." in stdout
+	assert "batches complete: 3/3; remaining: 0." in stdout
+
+
+def test_run_usher_writes_verbose_output_to_chunk_log(tmp_path: Path, monkeypatch):
+	processor = UsherPlacement(
+		padded_aln=str(tmp_path / "input.fasta"),
+		output_dir=str(tmp_path / "usher_out"),
+		threads=4,
+	)
+	chunk_dir = tmp_path / "usher_out" / "chunk_0001"
+	tree_file = tmp_path / "seed.treefile"
+	vcf_path = tmp_path / "all_samples.vcf"
+	tree_file.write_text("(REF1:0.1);\n", encoding="utf-8")
+	vcf_path.write_text("##fileformat=VCFv4.2\n", encoding="utf-8")
+
+	run_calls = []
+
+	class FakeCompleted:
+		def __init__(self, stdout="", stderr=""):
+			self.stdout = stdout
+			self.stderr = stderr
+
+	def fake_run(cmd, **kwargs):
+		run_calls.append((cmd, kwargs))
+		if cmd == ["usher", "--help"]:
+			return FakeCompleted(stdout="usher usage -T threads", stderr="")
+		log_handle = kwargs["stdout"]
+		log_handle.write("verbose usher output\n")
+		(chunk_dir / "uncondensed-final-tree.nh").write_text("(REF1:0.1,Q1:0.2);\n", encoding="utf-8")
+		return FakeCompleted()
+
+	monkeypatch.setattr("subprocess.run", fake_run)
+
+	result = processor.run_usher(str(tree_file), str(vcf_path), str(chunk_dir))
+
+	assert result == str(chunk_dir / "uncondensed-final-tree.nh")
+	assert (chunk_dir / "usher.verbose.log").read_text(encoding="utf-8") == "verbose usher output\n"
+	assert run_calls[1][1]["stderr"] == subprocess.STDOUT
 
 
 def test_run_non_update_mode_chunks_iteratively_for_large_alignment(tmp_path: Path, monkeypatch):

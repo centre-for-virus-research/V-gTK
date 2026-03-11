@@ -217,6 +217,27 @@ class UsherPlacement:
 		placeable_ids = [acc for acc in aln_ids if acc != ref_id and acc not in existing_ids]
 		return aln_ids, placeable_ids
 
+	@staticmethod
+	def _render_progress_bar(completed, total, width=30):
+		if total <= 0:
+			return f"[{'-' * width}]"
+		ratio = min(max(completed / total, 0), 1)
+		filled = min(width, int(round(ratio * width)))
+		return f"[{'#' * filled}{'-' * (width - filled)}]"
+
+	def log_chunk_progress(self, completed_chunks, total_chunks):
+		bar = self._render_progress_bar(completed_chunks, total_chunks)
+		remaining_chunks = max(0, total_chunks - completed_chunks)
+		print(
+			f"[progress] {bar} batches complete: {completed_chunks}/{total_chunks}; "
+			f"remaining: {remaining_chunks}.",
+			flush=True,
+		)
+
+	@staticmethod
+	def _usher_verbose_log_path(output_dir):
+		return os.path.join(output_dir, "usher.verbose.log")
+
 	def _split_alignment_into_chunks_python(self, alignment_fasta, ref_id, placeable_ids):
 		if not placeable_ids:
 			return []
@@ -411,7 +432,9 @@ class UsherPlacement:
 		env = os.environ.copy()
 		for var in ["OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"]:
 			env[var] = str(self.threads)
-		subprocess.run(usher_cmd, check=True, env=env)
+		verbose_log = self._usher_verbose_log_path(output_dir)
+		with open(verbose_log, "w", encoding="utf-8") as verbose_handle:
+			subprocess.run(usher_cmd, check=True, env=env, stdout=verbose_handle, stderr=subprocess.STDOUT)
 		return self._resolve_usher_tree_output(output_dir)
 
 	def promote_final_usher_outputs(self, final_output_dir):
@@ -457,11 +480,17 @@ class UsherPlacement:
 			)
 			current_tree = tree_file
 			final_chunk_dir = None
+			print(
+				f"[info] Detailed USHER output for each batch is written under {os.path.join(self.output_dir, 'chunk_*', 'usher.verbose.log')}",
+				flush=True,
+			)
+			self.log_chunk_progress(0, len(chunk_fastas))
 			for idx, chunk_fasta in enumerate(chunk_fastas, start=1):
 				chunk_dir = os.path.join(self.output_dir, f"chunk_{idx:04d}")
 				vcf_path = self.build_vcf(ref_id, alignment_fasta=chunk_fasta)
 				current_tree = self.run_usher(current_tree, vcf_path, chunk_dir)
 				final_chunk_dir = chunk_dir
+				self.log_chunk_progress(idx, len(chunk_fastas))
 			if final_chunk_dir:
 				self.promote_final_usher_outputs(final_chunk_dir)
 			return
@@ -504,7 +533,7 @@ if __name__ == "__main__":
 	parser.add_argument("--chunk_size", default=5000, type=int, help="Maximum sequences per iterative placement chunk when chunking is triggered")
 	parser.add_argument("--chunk_threshold", default=10000, type=int, help="Trigger iterative chunked placement when sequences-to-place exceed this count")
 	args = parser.parse_args()
-
+	
 	UsherPlacement(
 		padded_aln=args.padded_aln,
 		output_dir=args.output_dir,
