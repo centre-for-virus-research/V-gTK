@@ -303,6 +303,33 @@ process VALIDATE_REF_LIST_DB {
     '''
 }
 
+process TEST_INPUT_DB_VALIDATION {
+    publishDir "${params.publish_dir}/tests"
+    when:
+        params.test == "1" && params.update_db
+    input:
+        path sqlite_db
+    output:
+        path "input_db_tree_validation.txt"
+        path "input_db_tree.png"
+    shell:
+    '''
+    EXTRA_ARGS=""
+    if [ "!{params.is_segmented}" = "Y" ]; then
+        EXTRA_ARGS="--expect-segment-trees"
+    fi
+
+    python !{scripts_dir}/ValidateDbTree.py \
+        --db !{sqlite_db} \
+        --outdir . \
+        --test-mode \
+        ${EXTRA_ARGS}
+
+    mv db_tree_validation.txt input_db_tree_validation.txt
+    mv db_tree.png input_db_tree.png
+    '''
+}
+
 process FETCH_GENBANK{
     publishDir "${params.publish_dir}"
     input:
@@ -1098,6 +1125,10 @@ workflow {
     }
 
     // decide on run mode, update or initial run
+
+    if( UPDATE_MODE ){
+        TEST_INPUT_DB_VALIDATION(file(params.update_db))
+    }
 
     VALIDATE_REF_LIST(params.ref_list, params.is_segmented)
     def ref_list_file = file(params.ref_list)

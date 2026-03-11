@@ -155,3 +155,52 @@ def test_non_segmented_empty_blast_file_warns_but_does_not_fail(tmp_path: Path):
     assert result.returncode == 0
     assert "all matrix records are excluded" in result.stdout
     assert "traceback" not in result.stderr.lower()
+
+
+def test_non_segmented_missing_alignment_reports_examples_and_duplicates(tmp_path: Path):
+    db = tmp_path / "diagnostic.db"
+    con = sqlite3.connect(db)
+    cur = con.cursor()
+    cur.execute("CREATE TABLE meta_data (primary_accession TEXT, segment TEXT)")
+    cur.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, alignment_name TEXT)")
+    cur.execute("CREATE TABLE excluded_accessions (primary_accession TEXT, reason TEXT)")
+    cur.execute("INSERT INTO meta_data VALUES ('A1', '1')")
+    cur.execute("INSERT INTO meta_data VALUES ('A2', '1')")
+    cur.execute("INSERT INTO sequence_alignment VALUES ('A1', 'A1')")
+    cur.execute("INSERT INTO sequence_alignment VALUES ('A1', 'A1')")
+    con.commit()
+    con.close()
+
+    gb_matrix = tmp_path / "gb.tsv"
+    _write_tsv(gb_matrix, "primary_accession\thost", ["A1\thuman", "A2\tdog"])
+
+    output = tmp_path / "out.txt"
+    blast_hits = tmp_path / "blast.tsv"
+    blast_hits.write_text("q\tr\tscore\tstrand\nq1\tr1\t100\t+\n", encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--mode",
+            "non_segmented",
+            "--blast_hits",
+            str(blast_hits),
+            "--gb_matrix",
+            str(gb_matrix),
+            "--sqlite_db",
+            str(db),
+            "--output",
+            str(output),
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    assert "duplicated aligned sequence_id values: 1" in result.stdout
+    assert "example duplicated sequence_alignment entries" in result.stdout
+    assert "2 | A1 | alignment_name(s): A1" in result.stdout
+    assert "example non-excluded meta_data accessions missing from sequence_alignment" in result.stdout
+    assert "A2" in result.stdout
+    assert "1 meta_data sequences missing alignment (examples: A2)" in result.stdout
+    assert "traceback" not in result.stderr.lower()

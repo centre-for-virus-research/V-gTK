@@ -60,6 +60,71 @@ def scalar(cur: sqlite3.Cursor, sql: str) -> int:
     return row[0] if row else 0
 
 
+def _truncate(text: str, limit: int = 140) -> str:
+    value = (text or "").strip().replace("\n", " ")
+    if len(value) > limit:
+        return value[: limit - 3] + "..."
+    return value
+
+
+def _fetch_missing_alignment_examples(
+    cur: sqlite3.Cursor, segmented: bool, limit: int = 10
+) -> List[str]:
+    segment_select = ", COALESCE(NULLIF(TRIM(m.segment), ''), '-')" if segmented else ""
+    cur.execute(
+        f"""
+        SELECT DISTINCT m.primary_accession{segment_select}
+        FROM meta_data m
+        WHERE m.primary_accession IS NOT NULL
+          AND TRIM(m.primary_accession) <> ''
+          AND NOT EXISTS (
+              SELECT 1 FROM sequence_alignment s
+              WHERE s.sequence_id = m.primary_accession
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM excluded_accessions e
+              WHERE e.primary_accession = m.primary_accession
+          )
+        ORDER BY m.primary_accession
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = cur.fetchall()
+
+    if segmented:
+        return [f"{accession} (segment={segment})" for accession, segment in rows]
+    return [accession for (accession,) in rows]
+
+
+def _fetch_duplicate_alignment_examples(cur: sqlite3.Cursor, limit: int = 10) -> List[str]:
+    cur.execute(
+        """
+        SELECT sequence_id,
+               COUNT(*) AS hit_count,
+               GROUP_CONCAT(DISTINCT alignment_name)
+        FROM sequence_alignment
+        WHERE sequence_id IS NOT NULL
+          AND TRIM(sequence_id) <> ''
+        GROUP BY sequence_id
+        HAVING COUNT(*) > 1
+        ORDER BY hit_count DESC, sequence_id
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = cur.fetchall()
+
+    examples = []
+    for sequence_id, hit_count, alignment_names in rows:
+        targets = _truncate(alignment_names or "", limit=100)
+        if targets:
+            examples.append(f"{hit_count} | {sequence_id} | alignment_name(s): {targets}")
+        else:
+            examples.append(f"{hit_count} | {sequence_id}")
+    return examples
+
+
 def _table_columns(cur: sqlite3.Cursor, table_name: str) -> set:
     cur.execute(f"PRAGMA table_info({table_name})")
     return {row[1] for row in cur.fetchall()}
@@ -153,6 +218,7 @@ def db_checks(db_path: str, segmented: bool) -> Tuple[List[str], List[str]]:
           )
         """,
     )
+    missing_alignment_examples = _fetch_missing_alignment_examples(cur, segmented)
 
     missing_alignment_ref_meta = scalar(
         cur,
@@ -165,9 +231,11 @@ def db_checks(db_path: str, segmented: bool) -> Tuple[List[str], List[str]]:
           AND r.primary_accession IS NULL
         """,
     )
+    duplicate_alignment_examples = _fetch_duplicate_alignment_examples(cur)
 
     lines.append(f"  - sequence_alignment rows: {alignment_rows}")
     lines.append(f"  - unique aligned sequence_id values: {distinct_seq_ids}")
+    lines.append(f"  - duplicated aligned sequence_id values: {max(alignment_rows - distinct_seq_ids, 0)}")
     lines.append(f"  - meta_data rows: {meta_rows}")
     lines.append(f"  - excluded_accessions rows: {excluded_rows}")
     lines.append(f"    - excluded: unprojectable reference projection: {excluded_unprojectable}")
@@ -175,6 +243,14 @@ def db_checks(db_path: str, segmented: bool) -> Tuple[List[str], List[str]]:
     lines.append(f"    - excluded: other reasons: {excluded_other}")
     lines.append(f"  - non-excluded meta_data accessions missing from sequence_alignment: {missing_from_alignment}")
     lines.append(f"  - alignment_name values missing in meta_data: {missing_alignment_ref_meta}")
+    if duplicate_alignment_examples:
+        lines.append("  - example duplicated sequence_alignment entries (count | sequence_id | alignment_name[s]):")
+        for example in duplicate_alignment_examples:
+            lines.append(f"    - {example}")
+    if missing_alignment_examples:
+        lines.append("  - example non-excluded meta_data accessions missing from sequence_alignment:")
+        for example in missing_alignment_examples:
+            lines.append(f"    - {example}")
 
     segment_mismatch = 0
     if segmented:
@@ -205,15 +281,18 @@ def db_checks(db_path: str, segmented: bool) -> Tuple[List[str], List[str]]:
     if top_reasons:
         lines.append("  - top exclusion reasons (count | reason):")
         for reason, count in top_reasons:
-            reason_text = (reason or "").strip().replace("\n", " ")
-            if len(reason_text) > 140:
-                reason_text = reason_text[:137] + "..."
+            reason_text = _truncate(reason or "")
             lines.append(f"    - {count} | {reason_text}")
 
     if alignment_rows == 0:
         errors.append("sequence_alignment is empty")
     if missing_from_alignment != 0:
-        errors.append(f"{missing_from_alignment} meta_data sequences missing alignment")
+        detail = ""
+        if missing_alignment_examples:
+            detail = " (examples: {})".format(
+                ", ".join(missing_alignment_examples[:3])
+            )
+        errors.append(f"{missing_from_alignment} meta_data sequences missing alignment{detail}")
     if missing_alignment_ref_meta != 0:
         errors.append(f"{missing_alignment_ref_meta} alignment_name entries not present in meta_data")
     if segmented and segment_mismatch != 0:

@@ -501,8 +501,8 @@ if __name__ == "__main__":
 	parser.add_argument("--update_db", default=None, help="Existing update DB for update-mode tree and ID extraction")
 	parser.add_argument("--threads", default=1, type=int, help="Thread count")
 	parser.add_argument("--test_mode", default="0", help="Whether test mode is enabled (1/0)")
-	parser.add_argument("--chunk_size", default=50000, type=int, help="Maximum sequences per iterative placement chunk when chunking is triggered")
-	parser.add_argument("--chunk_threshold", default=100000, type=int, help="Trigger iterative chunked placement when sequences-to-place exceed this count")
+	parser.add_argument("--chunk_size", default=5000, type=int, help="Maximum sequences per iterative placement chunk when chunking is triggered")
+	parser.add_argument("--chunk_threshold", default=10000, type=int, help="Trigger iterative chunked placement when sequences-to-place exceed this count")
 	args = parser.parse_args()
 
 	UsherPlacement(
