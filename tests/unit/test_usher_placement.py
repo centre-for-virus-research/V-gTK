@@ -209,3 +209,58 @@ def test_run_update_mode_chunks_iteratively_for_large_alignment(tmp_path: Path, 
 	assert run_calls[1][0] == "uncondensed-final-tree.nh"
 	assert run_calls[2][0] == "uncondensed-final-tree.nh"
 	assert (output_dir / "uncondensed-final-tree.nh").exists()
+
+
+def test_run_non_update_mode_chunks_iteratively_for_large_alignment(tmp_path: Path, monkeypatch):
+	msa = tmp_path / "segment_1_dedup.fasta"
+	msa.write_text(
+		">REF1\nATGC\n>C1\nATGA\n>C2\nATGT\n>Q1\nATGG\n>Q2\nATCC\n>Q3\nATCA\n>Q4\nATCG\n",
+		encoding="utf-8",
+	)
+	output_dir = tmp_path / "usher_out"
+	output_dir.mkdir(parents=True, exist_ok=True)
+	cluster_rep = tmp_path / "cluster_rep.fasta"
+	cluster_rep.write_text(">REF1\nATGC\n>C1\nATGA\n>C2\nATGT\n", encoding="utf-8")
+	seed_tree = tmp_path / "seed.treefile"
+	seed_tree.write_text("(REF1:0.1,C1:0.2,C2:0.2);\n", encoding="utf-8")
+
+	processor = UsherPlacement(
+		padded_aln=str(msa),
+		output_dir=str(output_dir),
+		mmseq_cluster_dir=str(tmp_path / "mmseq"),
+		iqtree_dir=str(tmp_path / "iqtree"),
+		chunk_size=2,
+		chunk_threshold=3,
+	)
+
+	monkeypatch.setattr(processor, "resolve_non_update_assets", lambda: (str(cluster_rep), str(seed_tree)))
+
+	vcf_calls = []
+	def fake_build_vcf(ref_id, exclude_ids_file=None, alignment_fasta=None):
+		assert alignment_fasta is not None
+		assert exclude_ids_file is None
+		vcf_calls.append(Path(alignment_fasta).name)
+		vcf_path = output_dir / f"{Path(alignment_fasta).stem}.vcf"
+		vcf_path.write_text("##fileformat=VCFv4.2\n", encoding="utf-8")
+		return str(vcf_path)
+	monkeypatch.setattr(processor, "build_vcf", fake_build_vcf)
+
+	run_calls = []
+	def fake_run_usher(tree_file, vcf_path, chunk_output_dir):
+		run_calls.append((os.path.basename(tree_file), os.path.basename(chunk_output_dir)))
+		Path(chunk_output_dir).mkdir(parents=True, exist_ok=True)
+		chunk_idx = len(run_calls)
+		(Path(chunk_output_dir) / "uncondensed-final-tree.nh").write_text(
+			f"(REF1:0.1,Q{chunk_idx}:0.2);\n",
+			encoding="utf-8",
+		)
+		(Path(chunk_output_dir) / "usher.pb").write_text("pb", encoding="utf-8")
+		return str(Path(chunk_output_dir) / "uncondensed-final-tree.nh")
+	monkeypatch.setattr(processor, "run_usher", fake_run_usher)
+
+	processor.run()
+
+	assert len(vcf_calls) == 2
+	assert run_calls[0][0] == "seed.treefile"
+	assert run_calls[1][0] == "uncondensed-final-tree.nh"
+	assert (output_dir / "uncondensed-final-tree.nh").exists()
