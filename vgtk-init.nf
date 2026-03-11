@@ -862,45 +862,24 @@ process CREATE_SQLITE_DB {
     shell:
     '''
     # For segmented viruses, there may be multiple directories - collect all trees with segment keys
-    IQTREE_FILE=$(find -L . -name "*.treefile" -print -quit || true)
+    IQTREE_FILE=""
+    if [ -d iqtree_inputs ]; then
+        IQTREE_FILE=$(find -L iqtree_inputs -name "*.treefile" -print -quit || true)
+    fi
     CLUSTER_TSV=$(find -L . -name "*_clusters.tsv" -print -quit || true)
-    USHER_FILE=$(find -L . -name "final-tree.nh" -print -quit || true)
-    if [ -z "$USHER_FILE" ]; then
-        USHER_FILE=$(find -L . -name "uncondensed-final-tree.nh" -print -quit || true)
+    USHER_FILE=""
+    if [ -d usher_inputs ]; then
+        USHER_FILE=$(find -L usher_inputs -name "final-tree.nh" -print -quit || true)
+        if [ -z "$USHER_FILE" ]; then
+            USHER_FILE=$(find -L usher_inputs -name "uncondensed-final-tree.nh" -print -quit || true)
+        fi
     fi
 
     TREE_MANIFEST="tree_manifest.tsv"
-    printf "source\tname\tsegment_key\tpath\n" > "$TREE_MANIFEST"
-
-    for d in IQTree_MMseqClusters_*; do
-        [ -d "$d" ] || continue
-        tf=$(find -L "$d" -name "*.treefile" -print -quit || true)
-        [ -n "$tf" ] || continue
-        seg_key=$(basename "$d" | sed -E 's/^IQTree_MMseqClusters_//' | sed -E 's/_dedup.*$//' | cut -d'.' -f1)
-        printf "iqtree\tiqtree_%s\t%s\t%s\n" "$seg_key" "$seg_key" "$tf" >> "$TREE_MANIFEST"
-    done
-
-    for d in Usher_MMseqClusters_*; do
-        [ -d "$d" ] || continue
-        tf=$(find -L "$d" -name "final-tree.nh" -print -quit || true)
-        if [ -z "$tf" ]; then
-            tf=$(find -L "$d" -name "uncondensed-final-tree.nh" -print -quit || true)
-        fi
-        [ -n "$tf" ] || continue
-        seg_key=$(basename "$d" | sed -E 's/^Usher_MMseqClusters_//' | sed -E 's/_dedup.*$//' | cut -d'.' -f1)
-        printf "usher\tusher_%s\t%s\t%s\n" "$seg_key" "$seg_key" "$tf" >> "$TREE_MANIFEST"
-    done
-
-    for d in UsherUpdate_*; do
-        [ -d "$d" ] || continue
-        tf=$(find -L "$d" -name "final-tree.nh" -print -quit || true)
-        if [ -z "$tf" ]; then
-            tf=$(find -L "$d" -name "uncondensed-final-tree.nh" -print -quit || true)
-        fi
-        [ -n "$tf" ] || continue
-        seg_key=$(basename "$d" | sed -E 's/^UsherUpdate_//' | sed -E 's/_dedup.*$//' | cut -d'.' -f1)
-        printf "usher\tusher_update_%s\t%s\t%s\n" "$seg_key" "$seg_key" "$tf" >> "$TREE_MANIFEST"
-    done
+    python !{scripts_dir}/BuildTreeManifest.py \
+        --output "$TREE_MANIFEST" \
+        --iqtree-dir iqtree_inputs \
+        --usher-dir usher_inputs
 
     TREE_MANIFEST_ARG=""
     if [ "$(wc -l < "$TREE_MANIFEST")" -gt 1 ]; then
