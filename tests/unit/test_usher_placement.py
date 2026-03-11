@@ -8,6 +8,12 @@ import pytest
 from UsherPlacement import UsherPlacement
 
 
+def write_fasta(path: Path, records):
+	with path.open("w", encoding="utf-8") as handle:
+		for seq_id, sequence in records:
+			handle.write(f">{seq_id}\n{sequence}\n")
+
+
 def test_prepare_update_assets_exports_tree_and_existing_ids(tmp_path: Path, basic_update_db: Path):
 	msa = tmp_path / "segment_1_dedup.fasta"
 	msa.write_text(">REF1\nATGC\n>Q_NEW\nATGT\n", encoding="utf-8")
@@ -233,6 +239,165 @@ def test_run_skips_usher_when_only_identical_duplicates_need_attaching(tmp_path:
 		"C1\tQ1\t0",
 	]
 	assert (output_dir / "exclude_ids.txt").read_text(encoding="utf-8").strip().splitlines() == ["C1"]
+
+
+def test_run_chunked_mode_only_places_unique_anchors_from_duplicate_swarms(tmp_path: Path, monkeypatch):
+	msa = tmp_path / "segment_1_dedup.fasta"
+	write_fasta(
+		msa,
+		[
+			("REF1", "AAAA"),
+			("C1", "AAAT"),
+			("SWARM_A1", "CCCC"),
+			("SWARM_A2", "CCCC"),
+			("SWARM_A3", "CCCC"),
+			("SWARM_B1", "GGGG"),
+			("SWARM_B2", "GGGG"),
+			("SWARM_C1", "TTTA"),
+			("SWARM_C2", "TTTA"),
+			("SWARM_C3", "TTTA"),
+			("SWARM_C4", "TTTA"),
+			("UNIQ1", "ACTG"),
+		],
+	)
+	output_dir = tmp_path / "usher_out"
+	output_dir.mkdir(parents=True, exist_ok=True)
+	cluster_rep = tmp_path / "cluster_rep.fasta"
+	write_fasta(cluster_rep, [("REF1", "AAAA"), ("C1", "AAAT")])
+	seed_tree = tmp_path / "seed.treefile"
+	seed_tree.write_text("(REF1:0.1,C1:0.2);\n", encoding="utf-8")
+
+	processor = UsherPlacement(
+		padded_aln=str(msa),
+		output_dir=str(output_dir),
+		mmseq_cluster_dir=str(tmp_path / "mmseq"),
+		iqtree_dir=str(tmp_path / "iqtree"),
+		chunk_size=2,
+		chunk_threshold=3,
+	)
+
+	monkeypatch.setattr(processor, "resolve_non_update_assets", lambda: (str(cluster_rep), str(seed_tree)))
+
+	vcf_inputs = {}
+	def fake_build_vcf(ref_id, exclude_ids_file=None, alignment_fasta=None):
+		chunk_ids = processor._read_ids_from_fasta(alignment_fasta)
+		vcf_path = output_dir / f"{Path(alignment_fasta).stem}.vcf"
+		vcf_path.write_text("##fileformat=VCFv4.2\n", encoding="utf-8")
+		vcf_inputs[str(vcf_path)] = chunk_ids
+		return str(vcf_path)
+	monkeypatch.setattr(processor, "build_vcf", fake_build_vcf)
+
+	placed_ids = set()
+	def fake_run_usher(tree_file, vcf_path, chunk_output_dir):
+		for seq_id in vcf_inputs[vcf_path]:
+			if seq_id != "REF1":
+				placed_ids.add(seq_id)
+			assert seq_id not in {"SWARM_A2", "SWARM_A3", "SWARM_B2", "SWARM_C2", "SWARM_C3", "SWARM_C4"}
+		Path(chunk_output_dir).mkdir(parents=True, exist_ok=True)
+		all_tips = ["REF1", "C1"] + sorted(placed_ids)
+		(Path(chunk_output_dir) / "uncondensed-final-tree.nh").write_text(
+			"(" + ",".join(f"{tip}:0.2" for tip in all_tips) + ");\n",
+			encoding="utf-8",
+		)
+		(Path(chunk_output_dir) / "usher.pb").write_text("pb", encoding="utf-8")
+		return str(Path(chunk_output_dir) / "uncondensed-final-tree.nh")
+	monkeypatch.setattr(processor, "run_usher", fake_run_usher)
+
+	processor.run()
+
+	assert placed_ids == {"SWARM_A1", "SWARM_B1", "SWARM_C1", "UNIQ1"}
+	assert len(vcf_inputs) == 2
+	all_chunk_ids = [seq_id for chunk_ids in vcf_inputs.values() for seq_id in chunk_ids if seq_id != "REF1"]
+	assert sorted(all_chunk_ids) == ["SWARM_A1", "SWARM_B1", "SWARM_C1", "UNIQ1"]
+
+	tree_text = (output_dir / "uncondensed-final-tree.nh").read_text(encoding="utf-8")
+	for seq_id in ["SWARM_A2", "SWARM_A3", "SWARM_B2", "SWARM_C2", "SWARM_C3", "SWARM_C4"]:
+		assert f"{seq_id}:0.00000" in tree_text
+
+	report_rows = (output_dir / "identical_sequence_groups.tsv").read_text(encoding="utf-8").strip().splitlines()
+	assert report_rows == [
+		"anchor_id\tmember_id\tanchor_requires_placement",
+		"SWARM_A1\tSWARM_A2\t1",
+		"SWARM_A1\tSWARM_A3\t1",
+		"SWARM_B1\tSWARM_B2\t1",
+		"SWARM_C1\tSWARM_C2\t1",
+		"SWARM_C1\tSWARM_C3\t1",
+		"SWARM_C1\tSWARM_C4\t1",
+	]
+
+
+def test_run_update_mode_collapses_against_existing_tree_and_new_duplicate_anchor(tmp_path: Path, monkeypatch):
+	msa = tmp_path / "segment_1_dedup.fasta"
+	write_fasta(
+		msa,
+		[
+			("REF1", "AAAA"),
+			("OLD1", "CCCC"),
+			("OLD_DUP1", "CCCC"),
+			("OLD_DUP2", "CCCC"),
+			("NEW1", "GGGG"),
+			("NEW2", "GGGG"),
+			("NEW3", "TTTT"),
+		],
+	)
+	output_dir = tmp_path / "usher_out"
+	output_dir.mkdir(parents=True, exist_ok=True)
+	seed_tree = output_dir / "seed_tree.nwk"
+	seed_tree.write_text("(REF1:0.1,OLD1:0.2);\n", encoding="utf-8")
+	ids_file = output_dir / "existing_ids_segment_1.txt"
+	ids_file.write_text("REF1\nOLD1\n", encoding="utf-8")
+
+	processor = UsherPlacement(
+		padded_aln=str(msa),
+		output_dir=str(output_dir),
+		update_db=str(tmp_path / "dummy.db"),
+	)
+
+	monkeypatch.setattr(processor, "prepare_update_assets", lambda: (str(seed_tree), str(ids_file)))
+	monkeypatch.setattr(processor, "build_update_alignment_input", lambda tree_file: str(msa))
+
+	vcf_calls = []
+	def fake_build_vcf(ref_id, exclude_ids_file=None, alignment_fasta=None):
+		vcf_calls.append({
+			"exclude_ids": Path(exclude_ids_file).read_text(encoding="utf-8").strip().splitlines(),
+			"alignment_ids": processor._read_ids_from_fasta(alignment_fasta),
+		})
+		vcf_path = output_dir / "all_samples.vcf"
+		vcf_path.write_text("##fileformat=VCFv4.2\n", encoding="utf-8")
+		return str(vcf_path)
+	monkeypatch.setattr(processor, "build_vcf", fake_build_vcf)
+
+	def fake_run_usher(tree_file, vcf_path, chunk_output_dir):
+		Path(chunk_output_dir).mkdir(parents=True, exist_ok=True)
+		(Path(chunk_output_dir) / "uncondensed-final-tree.nh").write_text(
+			"(REF1:0.1,OLD1:0.2,NEW1:0.2,NEW3:0.2);\n",
+			encoding="utf-8",
+		)
+		(Path(chunk_output_dir) / "final-tree.nh").write_text(
+			"(REF1:0.1,OLD1:0.2,NEW1:0.2,NEW3:0.2);\n",
+			encoding="utf-8",
+		)
+		return str(Path(chunk_output_dir) / "uncondensed-final-tree.nh")
+	monkeypatch.setattr(processor, "run_usher", fake_run_usher)
+
+	processor.run()
+
+	assert len(vcf_calls) == 1
+	assert vcf_calls[0]["alignment_ids"] == ["REF1", "OLD1", "OLD_DUP1", "OLD_DUP2", "NEW1", "NEW2", "NEW3"]
+	assert sorted(vcf_calls[0]["exclude_ids"]) == sorted(["OLD1", "OLD_DUP1", "OLD_DUP2", "NEW2"])
+
+	tree_text = (output_dir / "uncondensed-final-tree.nh").read_text(encoding="utf-8")
+	assert "OLD_DUP1:0.00000" in tree_text
+	assert "OLD_DUP2:0.00000" in tree_text
+	assert "NEW2:0.00000" in tree_text
+
+	report_rows = (output_dir / "identical_sequence_groups.tsv").read_text(encoding="utf-8").strip().splitlines()
+	assert report_rows == [
+		"anchor_id\tmember_id\tanchor_requires_placement",
+		"OLD1\tOLD_DUP1\t0",
+		"OLD1\tOLD_DUP2\t0",
+		"NEW1\tNEW2\t1",
+	]
 
 
 def test_run_update_mode_chunks_iteratively_for_large_alignment(tmp_path: Path, monkeypatch):
