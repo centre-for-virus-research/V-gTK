@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import csv
 import os
 import re
 import sqlite3
@@ -216,6 +217,55 @@ class UsherPlacement:
 		aln_ids = self._read_ids_from_fasta(alignment_fasta)
 		placeable_ids = [acc for acc in aln_ids if acc != ref_id and acc not in existing_ids]
 		return aln_ids, placeable_ids
+
+	def collapse_identical_sequences(self, alignment_fasta, ref_id, existing_ids):
+		existing_tree_ids = set(existing_ids)
+		if ref_id:
+			existing_tree_ids.add(ref_id)
+
+		aln_ids = []
+		seq_groups = {}
+		for record in SeqIO.parse(alignment_fasta, "fasta"):
+			seq_id = str(record.id).strip()
+			if not seq_id:
+				continue
+			aln_ids.append(seq_id)
+			seq_groups.setdefault(str(record.seq), []).append(seq_id)
+
+		placeable_ids = []
+		anchor_to_members = {}
+		member_to_anchor = {}
+
+		for group_ids in seq_groups.values():
+			anchor_id = next((acc for acc in group_ids if acc in existing_tree_ids), group_ids[0])
+			members_to_add = [
+				acc for acc in group_ids
+				if acc != anchor_id and acc not in existing_tree_ids
+			]
+			if members_to_add:
+				anchor_to_members[anchor_id] = members_to_add
+				for member_id in members_to_add:
+					member_to_anchor[member_id] = anchor_id
+			if anchor_id != ref_id and anchor_id not in existing_tree_ids:
+				placeable_ids.append(anchor_id)
+
+		return {
+			"alignment_ids": aln_ids,
+			"placeable_ids": placeable_ids,
+			"anchor_to_members": anchor_to_members,
+			"member_to_anchor": member_to_anchor,
+		}
+
+	def write_identical_sequence_report(self, collapse_plan):
+		report_path = os.path.join(self.output_dir, "identical_sequence_groups.tsv")
+		with open(report_path, "w", encoding="utf-8", newline="") as handle:
+			writer = csv.writer(handle, delimiter="\t")
+			writer.writerow(["anchor_id", "member_id", "anchor_requires_placement"])
+			placeable_ids = set(collapse_plan["placeable_ids"])
+			for anchor_id, member_ids in collapse_plan["anchor_to_members"].items():
+				for member_id in member_ids:
+					writer.writerow([anchor_id, member_id, int(anchor_id in placeable_ids)])
+		return report_path
 
 	@staticmethod
 	def _render_progress_bar(completed, total, width=30):
@@ -443,6 +493,42 @@ class UsherPlacement:
 			if os.path.isfile(src):
 				shutil.copyfile(src, os.path.join(self.output_dir, name))
 
+	def copy_tree_outputs(self, tree_file):
+		for name in ["uncondensed-final-tree.nh", "final-tree.nh"]:
+			shutil.copyfile(tree_file, os.path.join(self.output_dir, name))
+
+	@staticmethod
+	def _replace_terminal_with_polytomy(clade, anchor_id, member_ids):
+		for idx, child in enumerate(list(clade.clades)):
+			if child.is_terminal() and child.name == anchor_id:
+				replacement = child.__class__(branch_length=child.branch_length)
+				replacement.clades.append(child.__class__(name=anchor_id, branch_length=0.0))
+				for member_id in member_ids:
+					replacement.clades.append(child.__class__(name=member_id, branch_length=0.0))
+				clade.clades[idx] = replacement
+				return True
+			if UsherPlacement._replace_terminal_with_polytomy(child, anchor_id, member_ids):
+				return True
+		return False
+
+	def expand_identical_sequence_tree_outputs(self, anchor_to_members):
+		if not anchor_to_members:
+			return
+		for name in ["uncondensed-final-tree.nh", "final-tree.nh"]:
+			tree_path = os.path.join(self.output_dir, name)
+			if not os.path.isfile(tree_path):
+				continue
+			with open(tree_path, "r", encoding="utf-8") as handle:
+				newick = handle.read().strip()
+			if not newick:
+				continue
+			tree = Phylo.read(StringIO(newick), "newick")
+			for anchor_id, member_ids in anchor_to_members.items():
+				if not self._replace_terminal_with_polytomy(tree.root, anchor_id, member_ids):
+					print(f"[warn] Could not find identical-sequence anchor '{anchor_id}' in {tree_path}; skipping expansion for {len(member_ids)} sequence(s).")
+			with open(tree_path, "w", encoding="utf-8") as handle:
+				Phylo.write(tree, handle, "newick")
+
 	def run(self):
 		os.makedirs(self.output_dir, exist_ok=True)
 
@@ -462,14 +548,24 @@ class UsherPlacement:
 		existing_ids = []
 		if os.path.isfile(existing_ids_file):
 			existing_ids = self._read_text_lines(existing_ids_file)
-		aln_ids, placeable_ids = self._count_sequences_to_place(alignment_fasta, ref_id, set(existing_ids))
+		collapse_plan = self.collapse_identical_sequences(alignment_fasta, ref_id, set(existing_ids))
+		self.write_identical_sequence_report(collapse_plan)
+		aln_ids = collapse_plan["alignment_ids"]
+		placeable_ids = collapse_plan["placeable_ids"]
+		collapsed_count = len(collapse_plan["member_to_anchor"])
+		if collapsed_count:
+			print(
+				f"[info] Collapsed {collapsed_count} identical sequence(s) onto "
+				f"{len(collapse_plan['anchor_to_members'])} anchor node(s) before UShER placement.",
+				flush=True,
+			)
 		if len(aln_ids) <= 1:
 			raise ValueError(f"Need at least 2 sequences in {alignment_fasta}, found {len(aln_ids)}")
 
-		if self.update_db and not placeable_ids:
-			print("[info] No sequences require UShER placement after comparing alignment input to current tree; reusing existing tree.")
-			for tree_name in ["uncondensed-final-tree.nh", "final-tree.nh"]:
-				shutil.copyfile(tree_file, os.path.join(self.output_dir, tree_name))
+		if not placeable_ids:
+			print("[info] No sequences require UShER placement after collapsing identical sequences and checking the current tree; reusing existing tree.")
+			self.copy_tree_outputs(tree_file)
+			self.expand_identical_sequence_tree_outputs(collapse_plan["anchor_to_members"])
 			return
 
 		if len(placeable_ids) > self.chunk_threshold:
@@ -493,27 +589,24 @@ class UsherPlacement:
 				self.log_chunk_progress(idx, len(chunk_fastas))
 			if final_chunk_dir:
 				self.promote_final_usher_outputs(final_chunk_dir)
+				self.expand_identical_sequence_tree_outputs(collapse_plan["anchor_to_members"])
 			return
 
 		exclude_ids_file = None
-		if self.update_db:
-			if os.path.isfile(existing_ids_file):
-				existing_ids = [x for x in existing_ids if x != ref_id]
-				exclude_count = len(existing_ids)
-				if exclude_count < (len(aln_ids) - 1):
-					exclude_ids_file = self.write_ids_file("exclude_ids.txt", existing_ids)
+		exclude_ids = [
+			acc for acc in aln_ids
+			if acc != ref_id and acc not in set(placeable_ids)
+		]
+		exclude_count = len(exclude_ids)
+		if exclude_count < (len(aln_ids) - 1):
+			exclude_ids_file = self.write_ids_file("exclude_ids.txt", exclude_ids)
 		else:
-			if os.path.isfile(existing_ids_file):
-				exclude_ids = self._read_text_lines(existing_ids_file)
-				exclude_count = len(exclude_ids)
-				if exclude_count < (len(aln_ids) - 1):
-					exclude_ids_file = existing_ids_file
-				else:
-					mode = " in test mode" if self.test_mode else ""
-					print(f"[warn] Exclude list would remove all non-reference sequences ({exclude_count}/{len(aln_ids)}){mode}; running faToVcf without -excludeFile.")
+			mode = " in test mode" if self.test_mode else ""
+			print(f"[warn] Exclude list would remove all non-reference sequences ({exclude_count}/{len(aln_ids)}){mode}; running faToVcf without -excludeFile.")
 
 		vcf_path = self.build_vcf(ref_id, exclude_ids_file=exclude_ids_file, alignment_fasta=alignment_fasta)
 		self.run_usher(tree_file, vcf_path, self.output_dir)
+		self.expand_identical_sequence_tree_outputs(collapse_plan["anchor_to_members"])
 
 	@staticmethod
 	def _read_text_lines(path):

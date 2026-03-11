@@ -157,6 +157,84 @@ def test_split_alignment_into_chunks_uses_seqkit_outputs_when_available(tmp_path
 		assert Path(chunk_path).read_text(encoding="utf-8").startswith(">REF1\nATGC\n")
 
 
+def test_collapse_identical_sequences_prefers_existing_tree_anchor(tmp_path: Path):
+	msa = tmp_path / "segment_1_dedup.fasta"
+	msa.write_text(
+		">REF1\nATGC\n>C1\nATGA\n>Q1\nATGA\n>Q2\nATTT\n>Q3\nATTT\n",
+		encoding="utf-8",
+	)
+
+	processor = UsherPlacement(
+		padded_aln=str(msa),
+		output_dir=str(tmp_path / "usher_out"),
+	)
+
+	plan = processor.collapse_identical_sequences(str(msa), "REF1", {"C1"})
+
+	assert plan["placeable_ids"] == ["Q2"]
+	assert plan["anchor_to_members"] == {"C1": ["Q1"], "Q2": ["Q3"]}
+	assert plan["member_to_anchor"] == {"Q1": "C1", "Q3": "Q2"}
+
+
+def test_expand_identical_sequence_tree_outputs_adds_zero_length_polytomy(tmp_path: Path):
+	output_dir = tmp_path / "usher_out"
+	output_dir.mkdir(parents=True, exist_ok=True)
+	for name in ["uncondensed-final-tree.nh", "final-tree.nh"]:
+		(output_dir / name).write_text("(REF1:0.1,Q2:0.2);\n", encoding="utf-8")
+
+	processor = UsherPlacement(
+		padded_aln=str(tmp_path / "segment_1_dedup.fasta"),
+		output_dir=str(output_dir),
+	)
+
+	processor.expand_identical_sequence_tree_outputs({"Q2": ["Q3", "Q4"]})
+
+	for name in ["uncondensed-final-tree.nh", "final-tree.nh"]:
+		text = (output_dir / name).read_text(encoding="utf-8")
+		assert "Q2:0.00000" in text
+		assert "Q3:0.00000" in text
+		assert "Q4:0.00000" in text
+
+
+def test_run_skips_usher_when_only_identical_duplicates_need_attaching(tmp_path: Path, monkeypatch):
+	msa = tmp_path / "segment_1_dedup.fasta"
+	msa.write_text(
+		">REF1\nATGC\n>C1\nATGA\n>Q1\nATGA\n",
+		encoding="utf-8",
+	)
+	output_dir = tmp_path / "usher_out"
+	output_dir.mkdir(parents=True, exist_ok=True)
+	cluster_rep = tmp_path / "cluster_rep.fasta"
+	cluster_rep.write_text(">REF1\nATGC\n>C1\nATGA\n", encoding="utf-8")
+	seed_tree = tmp_path / "seed.treefile"
+	seed_tree.write_text("(REF1:0.1,C1:0.2);\n", encoding="utf-8")
+
+	processor = UsherPlacement(
+		padded_aln=str(msa),
+		output_dir=str(output_dir),
+		mmseq_cluster_dir=str(tmp_path / "mmseq"),
+		iqtree_dir=str(tmp_path / "iqtree"),
+	)
+
+	monkeypatch.setattr(processor, "resolve_non_update_assets", lambda: (str(cluster_rep), str(seed_tree)))
+
+	def fail_run_usher(tree_file, vcf_path, chunk_output_dir):
+		raise AssertionError("run_usher should not be called when only duplicate attachment is required")
+
+	monkeypatch.setattr(processor, "run_usher", fail_run_usher)
+
+	processor.run()
+
+	tree_text = (output_dir / "uncondensed-final-tree.nh").read_text(encoding="utf-8")
+	assert "Q1:0.00000" in tree_text
+	report_lines = (output_dir / "identical_sequence_groups.tsv").read_text(encoding="utf-8").strip().splitlines()
+	assert report_lines == [
+		"anchor_id\tmember_id\tanchor_requires_placement",
+		"C1\tQ1\t0",
+	]
+	assert (output_dir / "exclude_ids.txt").read_text(encoding="utf-8").strip().splitlines() == ["C1"]
+
+
 def test_run_update_mode_chunks_iteratively_for_large_alignment(tmp_path: Path, monkeypatch):
 	msa = tmp_path / "segment_1_dedup.fasta"
 	msa.write_text(
