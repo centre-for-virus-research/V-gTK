@@ -97,7 +97,7 @@ def scriptDefinedParams = [
     'tax_id', 'db_name', 'is_segmented', 'extra_info_fill', 'test',
     "scripts_dir", "publish_dir", "email", "ref_list", "bulk_fillup_table", "is_flu", "gene_info",
     "xml_dir", "update", "update_file", "update_db",
-    "mmseqs_min_seq_id", "mmseqs_trim_cds_file",
+    "mmseqs_min_seq_id", "mmseqs_trim_cds_file","mutation_catalog", "mutation_virus",
     "gisaid_dir", "previous_db", "conda_path", "test_max_cluster_seqs", "max_threads", "ref_set_aligned"
     // Add all parameter names defined above
 ]
