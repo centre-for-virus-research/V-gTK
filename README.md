@@ -23,4 +23,4 @@ Set `XML_source` to `XML` and provide `xml_dir` pointing at the `GenBank-XML` fo
 nextflow run vgtk-init.nf --XML_source XML --xml_dir /home1/jh212a/bin/TING/bash-wf/tmp/GenBank-XML/
 ```
 
-
+test
