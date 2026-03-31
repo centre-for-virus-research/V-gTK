@@ -128,9 +128,12 @@ class CalculateAlignmentCoordinates:
 
 			adj_start = cds_start - gaps_before_start + (start_offset - 1)
 			adj_end = cds_end - gaps_before_end + (start_offset - 1)
-
-			if [adj_start, adj_end] not in adjusted_coords and adj_start != adj_end:
+			if [adj_start, adj_end] not in adjusted_coords:
 				adjusted_coords.append([adj_start, adj_end])
+
+		if not adjusted_coords and cds_list:
+			adjusted_coords.append([0, 0])
+
 		return adjusted_coords
 
 
@@ -239,6 +242,8 @@ class CalculateAlignmentCoordinates:
 					#print(f">{record.id}", adjusted)
 					for each_cords in adjusted:
 						product = self.get_products_for_range(cds_list, each_cords)
+						if not product and cds_list:
+							product = [{'start': each_cords[0], 'end': each_cords[1], 'product': cds_list[0]['product']}]
 						if record.id in genome_coords:
 							master_acc, genome_cord_start, genome_cord_end = genome_coords[record.id]
 						else:

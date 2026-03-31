@@ -10,7 +10,7 @@ from Bio.Seq import Seq
 from ExportRefListFromUpdateDb import load_master_accessions, load_reference_rows
 
 class PadAlignment:
-	def __init__(self, reference_alignment, input_dir, base_dir, output_dir, keep_intermediate_files, new_outputfile=False, segment_manifest_out=None, strict_segment_backbone=False, update_db=None):
+	def __init__(self, reference_alignment, input_dir, base_dir, output_dir, keep_intermediate_files, new_outputfile=False, segment_manifest_out=None, strict_segment_backbone=False, update_db=None, skip_ids=None):
 		self.reference_alignment = reference_alignment
 		self.input_dir = input_dir
 		self.base_dir = base_dir
@@ -21,6 +21,27 @@ class PadAlignment:
 		self.strict_segment_backbone = strict_segment_backbone
 		self.update_db = self._normalize_optional_path(update_db)
 		self.segment_manifest_rows = []
+		self.skip_ids: set = self._load_skip_ids(skip_ids)
+
+	@staticmethod
+	def _load_skip_ids(skip_ids_arg) -> set:
+		"""Load a set of accession IDs to skip from a file path or return empty set."""
+		if not skip_ids_arg:
+			return set()
+		path_str = str(skip_ids_arg).strip()
+		if not path_str or path_str.lower() in ('null', 'none', 'unset'):
+			return set()
+		if not os.path.isfile(path_str):
+			print(f"[warn] skip_ids file not found: {path_str}; proceeding without skipping.")
+			return set()
+		ids = set()
+		with open(path_str, 'r', encoding='utf-8') as fh:
+			for line in fh:
+				acc = line.strip().split()[0] if line.strip() else ''
+				if acc:
+					ids.add(acc)
+		print(f"[skip_ids] Loaded {len(ids)} accessions to skip from {path_str}")
+		return ids
 
 	@staticmethod
 	def _normalize_optional_path(path_value):
@@ -339,6 +360,12 @@ class PadAlignment:
 			if os.path.exists(subalignment_file):
 				print(f"Processing subalignment for {ref_id} using {subalignment_file}")
 				subalignment_seqs = list(SeqIO.parse(subalignment_file, "fasta"))
+				if self.skip_ids:
+					before = len(subalignment_seqs)
+					subalignment_seqs = [r for r in subalignment_seqs if r.id.split('.')[0] not in self.skip_ids]
+					skipped = before - len(subalignment_seqs)
+					if skipped:
+						print(f"[skip_ids] Skipped {skipped} sequence(s) from {ref_id} subalignment")
 				updated_seqs = self.insert_gaps(ref_aligned, subalignment_seqs)
 				
 				# Add the reference sequence to the list of sequences
@@ -440,6 +467,7 @@ if __name__ == "__main__":
 	parser.add_argument("--segment_manifest_out", default=None, help="Optional TSV path for accession-to-segment-to-output mapping")
 	parser.add_argument("--strict_segment_backbone", action="store_true", help="Fail if segment-specific precomputed backbone is missing")
 	parser.add_argument("--update_db", default=None, help="Existing update DB; when set, derive per-segment backbone alignments from sequence_alignment")
+	parser.add_argument("--skip_ids", default=None, help="Path to a file listing accession IDs (one per line) to exclude from subalignments (e.g. filtered_sequences_ids.txt from CollectFilteredSequences)")
  
 	args = parser.parse_args()
 
@@ -453,6 +481,7 @@ if __name__ == "__main__":
 		args.segment_manifest_out,
 		args.strict_segment_backbone or bool(PadAlignment._normalize_optional_path(args.update_db)),
 		args.update_db,
+		args.skip_ids,
 	)
 
 	if args.master_acc and args.nextalign_dir:

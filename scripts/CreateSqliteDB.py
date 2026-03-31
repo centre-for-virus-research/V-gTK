@@ -556,19 +556,44 @@ class CreateSqliteDB:
 				print(f"[CreateSqliteDB] Retained {retained_refs} reference/master rows despite exclusion flags")
 
 		df_meta_data = self._add_cluster_column(df_meta_data)
+		valid_accessions = set(df_meta_data["primary_accession"].dropna().astype(str).str.strip()) if "primary_accession" in df_meta_data.columns else set()
+
 		df_features = self._read_tsv_required(self.features, [], "features")
+		if valid_accessions and "accession" in df_features.columns:
+			df_features = df_features[df_features["accession"].astype(str).str.strip().isin(valid_accessions)]
+		elif valid_accessions and "primary_accession" in df_features.columns:
+			df_features = df_features[df_features["primary_accession"].astype(str).str.strip().isin(valid_accessions)]
+
 		df_aln = self._read_tsv_required(self.pad_aln, [], "pad_aln")
 		df_aln = self._normalize_alignment_columns(df_aln, "pad_aln")
+		if valid_accessions and "sequence_id" in df_aln.columns:
+			df_aln = df_aln[df_aln["sequence_id"].astype(str).str.strip().isin(valid_accessions)]
+		elif valid_accessions and "primary_accession" in df_aln.columns:
+			df_aln = df_aln[df_aln["primary_accession"].astype(str).str.strip().isin(valid_accessions)]
+
 		df_gene = self._read_tsv_required(self.gene_info, [], "gene_info")
 		df_m49_country = self._read_csv_required(self.m49_countries, ["m49_code"], "m49_countries", dtype={"m49_code": str})
 		df_m49_interm = self._read_csv_required(self.m49_interm_region, [], "m49_interm_region")
 		df_m49_region = self._read_csv_required(self.m49_regions, [], "m49_regions")
 		df_m49_sub_region = self._read_csv_required(self.m49_sub_regions, [], "m49_sub_regions")
 		df_proj_setting = self._read_tsv_required(self.proj_settings, [], "proj_settings")
+		
 		df_insertions = self._read_tsv_required(self.insertions, [], "insertions")
 		df_insertions = self._ensure_primary_accession(df_insertions, "insertions", aliases=["accession", "sequence_id"])
+		if valid_accessions and "primary_accession" in df_insertions.columns:
+			df_insertions = df_insertions[df_insertions["primary_accession"].astype(str).str.strip().isin(valid_accessions)]
+		
 		df_host_taxa = self._read_tsv_required(self.host_taxa_file, [], "host_taxa_file", dtype=str)
+		host_meta_col = next((c for c in ["host_taxa_id", "taxonomy_id", "host_tax_id"] if c in df_meta_data.columns), None)
+		if host_meta_col and not df_host_taxa.empty:
+			valid_taxa = set(df_meta_data[host_meta_col].dropna().astype(str).str.strip())
+			taxa_col = next((c for c in ["taxa_id", "taxonomy_id", "host_taxa_id", "tax_id", "id"] if c in df_host_taxa.columns), None)
+			if taxa_col:
+				df_host_taxa = df_host_taxa[df_host_taxa[taxa_col].astype(str).str.strip().isin(valid_taxa)]
+		
 		df_fasta_sequences = self.load_fasta()
+		if valid_accessions and "header" in df_fasta_sequences.columns:
+			df_fasta_sequences = df_fasta_sequences[df_fasta_sequences["header"].astype(str).str.strip().isin(valid_accessions)]
 
 		db_path = self._db_path()
 		os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -604,10 +629,39 @@ class CreateSqliteDB:
 
 		if excluded_records:
 			df_excluded = pd.DataFrame(excluded_records).drop_duplicates(subset=["primary_accession"])
+			
+			df_excluded['base_reason'] = df_excluded['reason'].apply(lambda x: str(x).split(':')[0].strip() if ':' in str(x) else str(x).strip())
+			reason_counts = df_excluded['base_reason'].value_counts()
+			
+			summary_lines = []
+			summary_lines.append("\n" + "="*80)
+			summary_lines.append(f"[CreateSqliteDB] DB Construction Summary:")
+			summary_lines.append("="*80)
+			summary_lines.append(f"Successfully included in DB : {len(df_meta_data)}")
+			summary_lines.append(f"Sequences filtered out      :{len(df_excluded)}")
+			summary_lines.append("-" * 80)
+			summary_lines.append(f"{'Category':<45} | {'Count':<10}")
+			summary_lines.append("-" * 80)
+			for reason, count in reason_counts.items():
+				summary_lines.append(f"{reason:<45} | {count:<10}")
+			
+			summary_lines.append("\n[CreateSqliteDB] Detailed Exclusion Reasons (Top 10):")
+			detailed_counts = df_excluded['reason'].value_counts().head(10)
+			for reason, count in detailed_counts.items():
+				summary_lines.append(f"  - {count:<4} : {reason}")
+			summary_lines.append("="*80 + "\n")
+			
+			summary_str = "\n".join(summary_lines)
+			print(summary_str)
+			
+			summary_path = os.path.join(self.base_dir, self.output_dir, "db_summary.txt")
+			with open(summary_path, "w", encoding="utf-8") as sf:
+				sf.write(summary_str)
+
 			if self.update and self._table_exists(conn, "excluded_accessions"):
-				df_excluded.to_sql("excluded_accessions", conn, if_exists="append", index=False)
+				df_excluded[['primary_accession', 'reason']].to_sql("excluded_accessions", conn, if_exists="append", index=False)
 			else:
-				df_excluded.to_sql("excluded_accessions", conn, if_exists="replace", index=False)
+				df_excluded[['primary_accession', 'reason']].to_sql("excluded_accessions", conn, if_exists="replace", index=False)
 			print(f"[CreateSqliteDB] excluded_accessions now has >= {len(df_excluded)} newly added records")
 
 		if update_exclusions:

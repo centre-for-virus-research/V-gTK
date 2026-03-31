@@ -548,7 +548,12 @@ def main(argv=None):
                 report.write("\n".join(extra_in_tree[:50]) + "\n")
 
             report.write("\nTable-level accession coverage:\n")
-            for table_name in ["meta_data", "sequences", "sequence_alignment", "features", "insertions", "host_taxa"]:
+            table_list = ["meta_data", "sequences", "sequence_alignment", "features", "insertions", "host_taxa"]
+            if table_exists(conn, "sequence_mutations"):
+                table_list.append("sequence_mutations")
+            if table_exists(conn, "sequence_drug_resistance"):
+                table_list.append("sequence_drug_resistance")
+            for table_name in table_list:
                 if not table_exists(conn, table_name):
                     report.write(f"- {table_name}: table missing\n")
                     continue
@@ -597,6 +602,30 @@ def main(argv=None):
                         )
                         seg_mismatch_count = cursor.fetchone()[0]
                         report.write(f"- feature_segment_mismatch: {seg_mismatch_count}\n")
+
+            if table_exists(conn, "sequence_mutations"):
+                report.write("\nMutation integrity checks:\n")
+                cursor.execute("""
+                    SELECT COUNT(*)
+                    FROM sequence_mutations sm
+                    LEFT JOIN meta_data md ON sm.primary_accession = md.primary_accession
+                    WHERE md.primary_accession IS NULL
+                """)
+                missing_meta = cursor.fetchone()[0]
+                report.write(f"- sequence_mutations_without_metadata: {missing_meta}\n")
+                
+                if table_exists(conn, "sequence_drug_resistance"):
+                    cursor.execute("""
+                        SELECT sdr.primary_accession, sdr.combination_id, sdr.mutations_detected, sdr.mutations_required, sdr.combination_status
+                        FROM sequence_drug_resistance sdr
+                    """)
+                    bad_combos = 0
+                    for racc, rcomb, det, req, stat in cursor.fetchall():
+                        expected_stat = 'complete' if det >= req else 'partial'
+                        if stat != expected_stat:
+                            bad_combos += 1
+                            
+                    report.write(f"- drug_resistance_status_mismatches: {bad_combos}\n")
 
         if missing_in_tree:
             with open(missing_tree_path, "w", encoding="utf-8") as handle:

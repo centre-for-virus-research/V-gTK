@@ -79,7 +79,70 @@ def collect_unprojectable_queries(nextalign_dir: str) -> dict:
     return filtered
 
 
-def collect_filtered_sequences(nextalign_dir: str, output_file: str) -> dict:
+def collect_high_gap_sequences(nextalign_dir: str, max_gap_proportion: float = 0.5) -> dict:
+    """
+    Scan nextalign query_aln aligned FASTA files and flag query sequences that have
+    a gap proportion exceeding max_gap_proportion. Reference sequences (matching the
+    directory name) are always skipped.
+
+    Returns dict: {seq_name: {"reference": ref_id, "error": reason, "warnings": ""}}
+    """
+    filtered = {}
+    nextalign_path = Path(nextalign_dir)
+
+    for query_ref_dir in sorted(nextalign_path.glob("query_aln/*")):
+        if not query_ref_dir.is_dir():
+            continue
+        ref_id = _normalize_accession(query_ref_dir.name)
+        aln_file = query_ref_dir / f"{query_ref_dir.name}.aligned.fasta"
+        if not aln_file.exists():
+            continue
+
+        try:
+            with open(aln_file, "r", encoding="utf-8") as handle:
+                current_id = None
+                seq_parts: list = []
+                for line in handle:
+                    line = line.rstrip()
+                    if line.startswith(">"):
+                        if current_id and current_id != ref_id and seq_parts:
+                            seq = "".join(seq_parts)
+                            if seq:
+                                gap_prop = seq.count("-") / len(seq)
+                                if gap_prop > max_gap_proportion:
+                                    filtered[current_id] = {
+                                        "reference": ref_id,
+                                        "error": (
+                                            f"high_gap_proportion:{gap_prop:.3f} > {max_gap_proportion} "
+                                            f"against reference {ref_id}"
+                                        ),
+                                        "warnings": "",
+                                    }
+                        current_id = _normalize_accession(line[1:])
+                        seq_parts = []
+                    else:
+                        seq_parts.append(line)
+                # process last record
+                if current_id and current_id != ref_id and seq_parts:
+                    seq = "".join(seq_parts)
+                    if seq:
+                        gap_prop = seq.count("-") / len(seq)
+                        if gap_prop > max_gap_proportion:
+                            filtered[current_id] = {
+                                "reference": ref_id,
+                                "error": (
+                                    f"high_gap_proportion:{gap_prop:.3f} > {max_gap_proportion} "
+                                    f"against reference {ref_id}"
+                                ),
+                                "warnings": "",
+                            }
+        except Exception as e:
+            print(f"Warning: Could not parse {aln_file}: {e}")
+
+    return filtered
+
+
+def collect_filtered_sequences(nextalign_dir: str, output_file: str, max_gap_proportion: float = 0.5) -> dict:
     """
     Scan nextalign directory for .errors.csv files and collect filtered sequence IDs.
     
@@ -126,6 +189,16 @@ def collect_filtered_sequences(nextalign_dir: str, output_file: str) -> dict:
         if seq_name in filtered:
             continue
         filtered[seq_name] = info
+
+    # Add sequences with too many gaps in their reference-aligned FASTA.
+    high_gap = collect_high_gap_sequences(nextalign_dir, max_gap_proportion=max_gap_proportion)
+    gap_added = 0
+    for seq_name, info in high_gap.items():
+        if seq_name not in filtered:
+            filtered[seq_name] = info
+            gap_added += 1
+    if gap_added:
+        print(f"[gap_filter] Added {gap_added} sequence(s) with gap proportion > {max_gap_proportion}")
 
     return filtered
 
@@ -202,6 +275,12 @@ def main():
         default=".",
         help="Base directory for output"
     )
+    parser.add_argument(
+        "--max_gap_proportion",
+        type=float,
+        default=0.5,
+        help="Maximum allowed gap proportion in query_aln aligned FASTA; sequences exceeding this are filtered (default: 0.5)"
+    )
     
     args = parser.parse_args()
     
@@ -209,7 +288,7 @@ def main():
     
     try:
         print(f"Scanning {args.nextalign_dir} for filtered sequences...")
-        filtered = collect_filtered_sequences(args.nextalign_dir, output_path)
+        filtered = collect_filtered_sequences(args.nextalign_dir, output_path, max_gap_proportion=args.max_gap_proportion)
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
