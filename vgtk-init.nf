@@ -98,7 +98,8 @@ def scriptDefinedParams = [
     "scripts_dir", "publish_dir", "email", "ref_list", "bulk_fillup_table", "is_flu", "gene_info",
     "xml_dir", "update", "update_file", "update_db",
     "mmseqs_min_seq_id", "mmseqs_trim_cds_file","mutation_catalog", "mutation_virus",
-    "gisaid_dir", "previous_db", "conda_path", "test_max_cluster_seqs", "max_threads", "ref_set_aligned"
+    "gisaid_dir", "previous_db", "conda_path", "test_max_cluster_seqs", "max_threads", "ref_set_aligned",
+    "min_seq_length_ratio", "max_aln_gap_proportion"
     // Add all parameter names defined above
 ]
 
@@ -409,7 +410,8 @@ process GENBANK_PARSER{
         
         echo "DEBUG: Final extra args: ${extra}"
         
-        python !{scripts_dir}/GenBankParser.py -r !{ref_list_path} -d !{gen_bank_XML} -o . -b . ${extra}
+        python !{scripts_dir}/GenBankParser.py -r !{ref_list_path} -d !{gen_bank_XML} -o . -b . ${extra} \
+            --min_length_ratio !{params.min_seq_length_ratio}
         python !{scripts_dir}/ValidateMatrix.py -o . -a !{projectDir}/assets -b . \
         -g gB_matrix_raw.tsv \
         -m !{projectDir}/assets/host_mapping.tsv -n !{projectDir}/assets/country_mapping.tsv  \
@@ -578,12 +580,13 @@ process NEXTALIGN_ALIGNMENT{
 
 //"${scripts_dir}/PadAlignment-1.py" -r "/home3/sk312p/task_dir/projects/VGTK/dev_version-jun-09/TING/alUnc509RefseqsMafftHandModified.fa
 process PAD_ALIGNMENT{
-    publishDir "${params.publish_dir}"
+    publishDir "${params.publish_dir}", mode: 'copy'
     input:
         path nextalign_dir 
         val master_acc_str
         path master_file_opt
         val ref_set_aligned_dir
+        path filtered_ids
     output:
         path "*_merged_MSA.fasta", emit: merged_msa
     shell:
@@ -592,12 +595,13 @@ process PAD_ALIGNMENT{
         -m !{master_file_opt} \
         -o . -d . -i !{nextalign_dir}/query_aln --keep_intermediate_files \
         --precomputed_ref_dir "!{ref_set_aligned_dir}" --update_db "!{params.update_db}" \
-        --segment_manifest_out pad_alignment_manifest.tsv
+        --segment_manifest_out pad_alignment_manifest.tsv \
+        --skip_ids !{filtered_ids}
     '''
 }
 
 process COLLECT_FILTERED_SEQUENCES {
-    publishDir "${params.publish_dir}"
+    publishDir "${params.publish_dir}" , mode: 'copy'
     input:
         path nextalign_dir
     output:
@@ -609,12 +613,13 @@ process COLLECT_FILTERED_SEQUENCES {
     python !{scripts_dir}/CollectFilteredSequences.py \
         -n !{nextalign_dir} \
         -o filtered_sequences.tsv \
-        -b .
+        -b . \
+        --max_gap_proportion !{params.max_aln_gap_proportion}
     '''
 }
 
 process DEDUP_ALIGNMENT{
-    publishDir "${params.publish_dir}"
+    publishDir "${params.publish_dir}" , mode: 'copy'
     input:
         path padded_aln
     output:
@@ -626,7 +631,7 @@ process DEDUP_ALIGNMENT{
 }
 
 process TEST_SUBSAMPLE_CLUSTER_INPUT {
-    publishDir "${params.publish_dir}"
+    publishDir "${params.publish_dir}" , mode: 'copy'
     input:
         path dedup_msa
     output:
@@ -652,7 +657,7 @@ process TEST_SUBSAMPLE_CLUSTER_INPUT {
 }
 
 process MMSEQS_CLUSTERING{
-    publishDir "${params.publish_dir}"
+    publishDir "${params.publish_dir}" , mode: 'copy'
     cpus { params.is_segmented == 'Y' ? SEGMENT_PARALLEL_THREADS : MAX_THREADS }
     maxForks HEAVY_TASK_MAX_FORKS
     input:
@@ -673,7 +678,7 @@ process MMSEQS_CLUSTERING{
 }
 
 process IQ_TREE{
-    publishDir "${params.publish_dir}"
+    publishDir "${params.publish_dir}" , mode: 'copy'
     cpus { params.is_segmented == 'Y' ? SEGMENT_PARALLEL_THREADS : MAX_THREADS }
     maxForks HEAVY_TASK_MAX_FORKS
     input:
@@ -747,7 +752,7 @@ process IQ_TREE{
 }
 
 process USHER_PLACEMENT{
-    publishDir "${params.publish_dir}"
+    publishDir "${params.publish_dir}" , mode: 'copy'
     cpus { params.is_segmented == 'Y' ? SEGMENT_PARALLEL_THREADS : MAX_THREADS }
     maxForks HEAVY_TASK_MAX_FORKS
     input:
@@ -843,7 +848,7 @@ process GENERATE_TABLES {
 }
 
 process CREATE_SQLITE_DB {
-    publishDir "${params.publish_dir}"
+    publishDir "${params.publish_dir}" , mode: 'copy'
     input:
         path meta_data
         path features
@@ -858,7 +863,8 @@ process CREATE_SQLITE_DB {
         path filtered_tsv
         path filtered_ids
     output:
-        path "${params.db_name}.db"
+        path "${params.db_name}.db", emit: sqlite_db
+        path "db_summary.txt", emit: db_summary_out, optional: true
     shell:
     '''
     # For segmented viruses, there may be multiple directories - collect all trees with segment keys
@@ -923,13 +929,13 @@ process CREATE_SQLITE_DB {
     -mir !{projectDir}/assets/m49_intermediate_region.csv \
     -mr !{projectDir}/assets/m49_region.csv \
     -msr !{projectDir}/assets/m49_sub_region.csv \
-    -d !{params.db_name} -b . -o . ${IQTREE_ARG} ${USHER_ARG} ${CLUSTER_ARG} ${FILTERED_ARG} ${FILTERED_DETAILS_ARG} ${TREE_MANIFEST_ARG} ${UPDATE_ARGS}
+    -d !{params.db_name} -b . -o . ${IQTREE_ARG} ${USHER_ARG} ${CLUSTER_ARG} ${FILTERED_ARG} ${FILTERED_DETAILS_ARG} ${TREE_MANIFEST_ARG} ${UPDATE_ARGS} | tee db_summary.txt
     # need to make gene info come from gff file rather than hardcoded rabv one
     '''
 }
 
 process TEST_DB_VALIDATION {
-    publishDir "${params.publish_dir}/tests"
+    publishDir "${params.publish_dir}/tests" 
     when:
         params.test == "1"
     input:
@@ -992,7 +998,7 @@ process VALIDATE_STRAIN{
 }
 
 process PIVOT_TABLE_SEGMENTS{
-    publishDir "${params.publish_dir}"
+    publishDir "${params.publish_dir}" , mode: 'copy'
     when:
         params.is_segmented =="Y" &&
         params.is_flu == "Y"
@@ -1186,13 +1192,14 @@ workflow {
                         BLAST_ALIGNMENT.out.master_seq_dir,
                     params.ref_list,
                     effective_ref_list)
+    // Collect sequences that were filtered during nextalign alignment (runs first; feeds skip_ids into PAD)
+    COLLECT_FILTERED_SEQUENCES(NEXTALIGN_ALIGNMENT.out)
+
     PAD_ALIGNMENT(NEXTALIGN_ALIGNMENT.out,
                   params.ref_list,
                 effective_ref_list,
-                  ref_backbone_dir)
-    
-    // Collect sequences that were filtered during nextalign alignment
-    COLLECT_FILTERED_SEQUENCES(NEXTALIGN_ALIGNMENT.out)
+                  ref_backbone_dir,
+                  COLLECT_FILTERED_SEQUENCES.out.filtered_ids)
 
     // For segmented viruses, PAD_ALIGNMENT emits multiple fasta files (one per segment).
     // Use flatten() to create a channel where each file is processed independently in parallel.
@@ -1203,10 +1210,7 @@ workflow {
 
     // Keep clustered input small in test mode to speed up CI and avoid long MMseqs runs
     cluster_input_ch = DEDUP_ALIGNMENT.out.dedup_msa
-    if (params.test == "1" && !UPDATE_MODE) {
-        TEST_SUBSAMPLE_CLUSTER_INPUT(cluster_input_ch)
-        cluster_input_ch = TEST_SUBSAMPLE_CLUSTER_INPUT.out.dedup_for_cluster
-    }
+
 
     def iqtree_collected
     def mmseq_collected
@@ -1305,20 +1309,33 @@ workflow {
                 BLAST_ALIGNMENT.out.query_uniq_tophit_annotated,
                 VALIDATE_SEGMENT.out.validated_matrix,
                 PIVOT_TABLE_SEGMENTS.out.pivoted_matrix,
-                CREATE_SQLITE_DB.out
+                CREATE_SQLITE_DB.out.sqlite_db
             )
         } else if (params.is_segmented == "N") {
             TEST_NON_SEGMENTED_OUTPUT(
                 BLAST_ALIGNMENT.out.query_uniq_tophits,
                 data,
-                CREATE_SQLITE_DB.out
+                CREATE_SQLITE_DB.out.sqlite_db
             )
         }
     }
 
-    TEST_DB_VALIDATION(CREATE_SQLITE_DB.out)
+    TEST_DB_VALIDATION(CREATE_SQLITE_DB.out.sqlite_db)
 }
 
+workflow.onComplete {
+    def reportFile = file("${params.publish_dir}/db_summary.txt")
+    if (reportFile.exists()) {
+        println ""
+        println reportFile.text
+    } else {
+        println "\n[info] No DB summary report found at ${params.publish_dir}/db_summary.txt"
+    }
+    println "================================================================================"
+    println "Pipeline completed at: $workflow.complete"
+    println "Execution status     : ${workflow.success ? 'OK' : 'failed'}"
+    println "================================================================================\n"
+}
 
 // if you wanted it to do an update run, would have to swap "."s for all the directories for a pre-made one
 
