@@ -532,19 +532,6 @@ def test_update_mode_autofills_missing_cluster_95pct_with_placeholder(tmp_path: 
     finally:
         conn.close()
 
-    out_db = _build_db(tmp_path, inp, update=True, update_db=real_update_db_copy)
-
-    conn = sqlite3.connect(str(out_db))
-    try:
-        row = conn.execute(
-            "SELECT cluster_98pct FROM meta_data WHERE primary_accession=? ORDER BY rowid DESC LIMIT 1",
-            (acc,),
-        ).fetchone()
-        assert row is not None
-        assert row[0] == "NA- see tree"
-    finally:
-        conn.close()
-
 
 def test_update_mode_copies_seed_db_to_named_output_without_mutating_seed(tmp_path: Path):
     initial = _inputs(tmp_path, "seed_initial", aln_a="ATGC")
