@@ -24,6 +24,53 @@ def _add_required_alignment_tables(db_path: Path):
         conn.close()
 
 
+def _add_mutation_tables(db_path: Path):
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE sequence_mutations (
+                primary_accession TEXT,
+                mutation_id TEXT,
+                protein_name TEXT,
+                segment TEXT,
+                aa_position INTEGER,
+                alt_residue TEXT,
+                combination_id TEXT
+            )
+            """
+        )
+        cur.executemany(
+            "INSERT INTO sequence_mutations VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("REF1", "NS3:107I", "NS3", "1", 107, "I", "comboA"),
+                ("REF1", "NS3:155K", "NS3", "1", 155, "K", "comboA"),
+                ("Q_OLD", "NS5A:30Y", "NS5A", "1", 30, "Y", ""),
+            ],
+        )
+        cur.execute(
+            """
+            CREATE TABLE sequence_drug_resistance (
+                primary_accession TEXT,
+                combination_id TEXT,
+                combination_status TEXT,
+                mutations_detected INTEGER,
+                mutations_required INTEGER,
+                resistance_category TEXT,
+                drug TEXT
+            )
+            """
+        )
+        cur.execute(
+            "INSERT INTO sequence_drug_resistance VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("REF1", "comboA", "complete", 2, 2, "III", "drugA"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _create_segmented_subsample_db(db_path: Path):
     conn = sqlite3.connect(str(db_path))
     try:
@@ -90,6 +137,7 @@ def _create_segmented_subsample_db(db_path: Path):
 
 def test_validate_db_tree_update_integrity_passes_on_seed_db(tmp_path: Path, basic_update_db: Path):
     _add_required_alignment_tables(basic_update_db)
+    _add_mutation_tables(basic_update_db)
     outdir = tmp_path / "out"
 
     result = subprocess.run(
@@ -113,8 +161,12 @@ def test_validate_db_tree_update_integrity_passes_on_seed_db(tmp_path: Path, bas
     assert "[sequence_alignment vs meta_data]" in report
     assert "[features vs meta_data]" in report
     assert "[host_taxa vs meta_data]" in report
+    assert "Accepted distinct accessions:" in report
+    assert "Filtered distinct accessions:" in report
     assert "Update integrity checks:" in report
     assert "last_batch_id:" in report
+    assert "[sequence_mutations integrity]" in report
+    assert "[sequence_drug_resistance integrity]" in report
 
 
 def test_validate_db_tree_fails_when_features_do_not_match_expected_accessions(tmp_path: Path, basic_update_db: Path):
@@ -203,6 +255,73 @@ def test_validate_db_tree_update_integrity_detects_segment_contamination(tmp_pat
 
     assert result.returncode != 0
     assert "segment contamination detected" in result.stderr
+
+
+def test_validate_db_tree_detects_mutation_drug_resistance_count_mismatch(tmp_path: Path, basic_update_db: Path):
+    _add_required_alignment_tables(basic_update_db)
+    _add_mutation_tables(basic_update_db)
+
+    conn = sqlite3.connect(str(basic_update_db))
+    try:
+        conn.execute(
+            "UPDATE sequence_drug_resistance SET mutations_detected=1, combination_status='partial' WHERE primary_accession='REF1' AND combination_id='comboA'"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--db",
+            str(basic_update_db),
+            "--outdir",
+            str(tmp_path / "out"),
+            "--check-update-integrity",
+            "--expect-segment-trees",
+            "--test-mode",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "sequence_drug_resistance integrity" in result.stderr
+
+
+def test_validate_db_tree_detects_mutation_orphan_accession(tmp_path: Path, basic_update_db: Path):
+    _add_required_alignment_tables(basic_update_db)
+    _add_mutation_tables(basic_update_db)
+
+    conn = sqlite3.connect(str(basic_update_db))
+    try:
+        conn.execute(
+            "INSERT INTO sequence_mutations VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("MISSING_ACC", "NS3:999X", "NS3", "1", 999, "X", ""),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--db",
+            str(basic_update_db),
+            "--outdir",
+            str(tmp_path / "out"),
+            "--check-update-integrity",
+            "--expect-segment-trees",
+            "--test-mode",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "sequence_mutations integrity" in result.stderr
 
 
 def test_validate_db_tree_update_integrity_ignores_placeholder_cluster_assignments_for_excluded_rows(tmp_path: Path):
@@ -350,3 +469,66 @@ def test_validate_db_tree_segmented_test_mode_skips_strict_consistency_without_u
 
     assert result.returncode == 0
     assert "skipping strict DB consistency failures for segmented validation run" in result.stdout
+
+
+def test_validate_db_tree_prefers_largest_usher_tree_row(tmp_path: Path):
+    db_path = tmp_path / "multiple_usher_rows.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE meta_data (primary_accession TEXT, cluster_95pct TEXT)")
+        cur.executemany(
+            "INSERT INTO meta_data(primary_accession, cluster_95pct) VALUES (?, ?)",
+            [("A", "A"), ("B", "B"), ("C", "C")],
+        )
+        cur.execute("CREATE TABLE sequences (header TEXT, sequence TEXT)")
+        cur.executemany(
+            "INSERT INTO sequences(header, sequence) VALUES (?, ?)",
+            [("A", "ATGC"), ("B", "ATGT"), ("C", "ATGA")],
+        )
+        cur.execute(
+            "CREATE TABLE sequence_alignment (primary_accession TEXT, sequence_id TEXT, alignment_name TEXT, segment TEXT)"
+        )
+        cur.executemany(
+            "INSERT INTO sequence_alignment(primary_accession, sequence_id, alignment_name, segment) VALUES (?, ?, ?, ?)",
+            [("A", "A", "A", ""), ("B", "B", "B", ""), ("C", "C", "C", "")],
+        )
+        cur.execute("CREATE TABLE trees (name TEXT, source TEXT, newick TEXT, segment TEXT, segment_key TEXT)")
+        cur.executemany(
+            "INSERT INTO trees(name, source, newick, segment, segment_key) VALUES (?, ?, ?, ?, ?)",
+            [
+                ("usher_small", "usher", "(A:0.1);", "", None),
+                ("usher_large", "usher", "(A:0.1,B:0.2,C:0.3);", "", None),
+                ("iqtree_large", "iqtree", "(A:0.1,B:0.2,C:0.3,D:0.4);", "", None),
+            ],
+        )
+        cur.execute("CREATE TABLE excluded_accessions (primary_accession TEXT, reason TEXT)")
+        cur.execute("CREATE TABLE insertions (primary_accession TEXT)")
+        cur.executemany("INSERT INTO insertions(primary_accession) VALUES (?)", [("A",), ("B",), ("C",)])
+        cur.execute("CREATE TABLE host_taxa (primary_accession TEXT)")
+        cur.executemany("INSERT INTO host_taxa(primary_accession) VALUES (?)", [("A",), ("B",), ("C",)])
+        cur.execute("CREATE TABLE features (accession TEXT)")
+        cur.executemany("INSERT INTO features(accession) VALUES (?)", [("A",), ("B",), ("C",)])
+        conn.commit()
+    finally:
+        conn.close()
+
+    outdir = tmp_path / "out"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--db",
+            str(db_path),
+            "--outdir",
+            str(outdir),
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0
+    report = (outdir / "db_tree_validation.txt").read_text(encoding="utf-8")
+    assert "Tree terminals: 3" in report
+    assert "Tree source: usher" in report
+    assert "Tree name: usher_large" in report

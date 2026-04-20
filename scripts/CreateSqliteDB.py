@@ -275,6 +275,10 @@ class CreateSqliteDB:
 	def _normalize_key_series(s):
 		return s.fillna("").astype(str).str.strip()
 
+	@staticmethod
+	def _cluster_placeholder_columns(columns):
+		return [c for c in columns if re.fullmatch(r"cluster_\d+pct", str(c or "").strip())]
+
 	def _fetch_existing_keys(self, conn, table, key_cols):
 		if not self._table_exists(conn, table):
 			return set()
@@ -314,8 +318,9 @@ class CreateSqliteDB:
 			df = df.drop(columns=extra_cols)
 
 		missing_cols = [c for c in existing_cols if c not in df.columns]
-		if self.update and table == "meta_data" and "cluster_98pct" in missing_cols:
-			df["cluster_98pct"] = "NA- see tree"
+		if self.update and table == "meta_data":
+			for cluster_col in self._cluster_placeholder_columns(missing_cols):
+				df[cluster_col] = "NA- see tree"
 			missing_cols = [c for c in existing_cols if c not in df.columns]
 		if missing_cols:
 			raise ValueError(

@@ -72,7 +72,17 @@ def _inputs(tmp_path: Path, suffix: str, aln_a: str = "ATGC"):
     }
 
 
-def _build_db(tmp_path: Path, inp: dict, update=False, update_db=None, filtered_ids_file=None, iqtree_file=None, usher_tree=None):
+def _build_db(
+    tmp_path: Path,
+    inp: dict,
+    update=False,
+    update_db=None,
+    filtered_ids_file=None,
+    iqtree_file=None,
+    usher_tree=None,
+    cluster_tsv=None,
+    cluster_min_seq_id=None,
+):
     db = CreateSqliteDB(
         meta_data=str(inp["meta"]),
         features=str(inp["features"]),
@@ -92,6 +102,8 @@ def _build_db(tmp_path: Path, inp: dict, update=False, update_db=None, filtered_
         db_status="last updated" if update else "new db",
         iqtree_file=str(iqtree_file) if iqtree_file else None,
         usher_tree=str(usher_tree) if usher_tree else None,
+        cluster_tsv=str(cluster_tsv) if cluster_tsv else None,
+        cluster_min_seq_id=cluster_min_seq_id,
         update=update,
         update_db=str(update_db) if update_db else None,
         batch_id="batch_test",
@@ -446,6 +458,38 @@ def test_update_mode_autofills_missing_cluster_98pct_with_placeholder(tmp_path: 
     conn = sqlite3.connect(str(real_update_db_copy))
     try:
         cols = [row[1] for row in conn.execute("PRAGMA table_info(meta_data)").fetchall()]
+    finally:
+        conn.close()
+
+
+def test_update_mode_autofills_missing_cluster_95pct_with_placeholder(tmp_path: Path):
+    cluster_tsv = tmp_path / "clusters.tsv"
+    cluster_tsv.write_text("REP_A\tA\n", encoding="utf-8")
+
+    initial = _inputs(tmp_path, "cluster95_initial", aln_a="ATGC")
+    seed_db = _build_db(
+        tmp_path,
+        initial,
+        update=False,
+        cluster_tsv=cluster_tsv,
+        cluster_min_seq_id="0.95",
+    )
+
+    update_inputs = _inputs(tmp_path, "cluster95_update", aln_a="AT--")
+    meta_df = pd.read_csv(update_inputs["meta"], sep="\t", dtype=str)
+    if "cluster_95pct" in meta_df.columns:
+        meta_df = meta_df.drop(columns=["cluster_95pct"])
+    meta_df.to_csv(update_inputs["meta"], sep="\t", index=False)
+
+    out_db = _build_db(tmp_path, update_inputs, update=True, update_db=seed_db)
+
+    conn = sqlite3.connect(str(out_db))
+    try:
+        row = conn.execute(
+            "SELECT cluster_95pct FROM meta_data WHERE primary_accession='A' AND segment='1' ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "NA- see tree"
     finally:
         conn.close()
 

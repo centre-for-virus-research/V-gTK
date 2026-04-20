@@ -388,6 +388,8 @@ process GENBANK_PARSER{
     output:
         path "gB_matrix_validated.tsv" , emit: gb_matrix
         path "sequences.fa", emit: sequences_out
+        path "Taxa/names.dmp", emit: taxa_names
+        path "Taxa/nodes.dmp", emit: taxa_nodes
     shell:
     '''
         echo "DEBUG: params.test is '!{params.test}'"
@@ -837,13 +839,30 @@ process GENERATE_TABLES {
     output:
         path "Tables/sequence_alignment.tsv", emit: sequence_alignment
         path "Tables/insertions.tsv", emit: insertions
-        path "Tables/host_taxa.tsv", emit: host_taxa
         path "Tables", emit: tables_dir
     shell:
     '''
     python !{scripts_dir}/GenerateTables.py -g !{gb_matrix} \
     -bh !{blast_hits} -p !{padded_aln} -n !{nextalign_dir} \
     -b . -o Tables -e !{params.email}
+    '''
+}
+
+process HOST_TAXA_TABLE {
+    input:
+        path gb_matrix
+        path names_dmp
+        path nodes_dmp
+    output:
+        path "HostTaxa/Host_taxa.tsv", emit: host_taxa
+    shell:
+    '''
+    python !{scripts_dir}/HostTaxaTable.py \
+        -g !{gb_matrix} \
+        -n !{names_dmp} \
+        -s !{nodes_dmp} \
+        -b . \
+        -o HostTaxa
     '''
 }
 
@@ -875,10 +894,19 @@ process CREATE_SQLITE_DB {
     CLUSTER_TSV=$(find -L . -name "*_clusters.tsv" -print -quit || true)
     USHER_FILE=""
     if [ -d usher_inputs ]; then
-        USHER_FILE=$(find -L usher_inputs -name "final-tree.nh" -print -quit || true)
-        if [ -z "$USHER_FILE" ]; then
-            USHER_FILE=$(find -L usher_inputs -name "uncondensed-final-tree.nh" -print -quit || true)
-        fi
+        for USHER_DIR in usher_inputs/*; do
+            if [ ! -d "$USHER_DIR" ]; then
+                continue
+            fi
+            if [ -f "$USHER_DIR/final-tree.nh" ]; then
+                USHER_FILE="$USHER_DIR/final-tree.nh"
+                break
+            fi
+            if [ -f "$USHER_DIR/uncondensed-final-tree.nh" ]; then
+                USHER_FILE="$USHER_DIR/uncondensed-final-tree.nh"
+                break
+            fi
+        done
     fi
 
     TREE_MANIFEST="tree_manifest.tsv"
@@ -920,6 +948,8 @@ process CREATE_SQLITE_DB {
         UPDATE_ARGS="--update --update_db !{params.update_db} --batch_id nf_!{workflow.runName}"
     fi
 
+    set -o pipefail
+
     python !{scripts_dir}/CreateSqliteDB.py -m !{meta_data} \
     -rf !{features} -p !{sequence_alignment} \
     -i !{insertions} -ht !{host_taxa} \
@@ -930,7 +960,25 @@ process CREATE_SQLITE_DB {
     -mr !{projectDir}/assets/m49_region.csv \
     -msr !{projectDir}/assets/m49_sub_region.csv \
     -d !{params.db_name} -b . -o . ${IQTREE_ARG} ${USHER_ARG} ${CLUSTER_ARG} ${FILTERED_ARG} ${FILTERED_DETAILS_ARG} ${TREE_MANIFEST_ARG} ${UPDATE_ARGS} | tee db_summary.txt
+
+    if [ "!{params.mutation_catalog}" != "null" ] && [ -n "!{params.mutation_catalog}" ]; then
+        if [ ! -f "!{params.mutation_catalog}" ]; then
+            echo "[error] mutation catalog not found: !{params.mutation_catalog}" >&2
+            exit 1
+        fi
+
+        VIRUS_ARG=""
+        if [ "!{params.mutation_virus}" != "null" ] && [ -n "!{params.mutation_virus}" ]; then
+            VIRUS_ARG="--virus !{params.mutation_virus}"
+        fi
+
+        python !{scripts_dir}/AnnotateMutations.py \
+            --db !{params.db_name}.db \
+            --mutation_catalog !{params.mutation_catalog} \
+            ${VIRUS_ARG}
+    fi
     # need to make gene info come from gff file rather than hardcoded rabv one
+
     '''
 }
 
@@ -1289,11 +1337,15 @@ workflow {
                     PAD_ALIGNMENT.out.merged_msa.collect(), 
                     NEXTALIGN_ALIGNMENT.out)
 
+    HOST_TAXA_TABLE(data,
+                    GENBANK_PARSER.out.taxa_names,
+                    GENBANK_PARSER.out.taxa_nodes)
+
     CREATE_SQLITE_DB(data, 
                      CALC_ALIGNMENT_CORD.out.features, 
                      GENERATE_TABLES.out.sequence_alignment, 
                      GENERATE_TABLES.out.insertions, 
-                     GENERATE_TABLES.out.host_taxa, 
+                     HOST_TAXA_TABLE.out.host_taxa, 
                      SOFTWARE_VERSION.out.software_info, 
                      GENBANK_PARSER.out.sequences_out,
                      iqtree_collected,

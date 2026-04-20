@@ -185,3 +185,161 @@ def test_annotation_with_reference_indels(tmp_path):
     assert 'NS3:4Q' in seq_muts, "Failed to detect mutation at position 4 after an indel"
     
     conn.close()
+
+
+def test_annotate_mutations_falls_back_to_db_gff_coordinate_mapping(tmp_path):
+    db_path = tmp_path / "fallback_test.db"
+    catalog_path = tmp_path / "fallback_catalog.tsv"
+
+    catalog_data = [
+        ['protein_name', 'segment', 'aa_position', 'alt_residue', 'reference_accession', 'mutation_id', 'mutation_type', 'signature_id', 'signature_kind', 'combination_id', 'combination_size', 'resistance_category', 'drug'],
+        ['NS3', '1', '2', 'I', 'REF_MASTER_NC_004102', 'NS3:2I', 'snp', 'sig1', 'single', '', '', '', ''],
+        ['NS5A', '1', '1', 'Y', 'REF_MASTER_NC_004102', 'NS5A:1Y', 'snp', 'sig2', 'single', '', '', '', ''],
+    ]
+    with open(catalog_path, 'w') as f:
+        for row in catalog_data:
+            f.write('\t'.join(row) + '\n')
+
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE features (accession TEXT, product TEXT, cds_start INTEGER, cds_end INTEGER)")
+    cursor.executemany("INSERT INTO features VALUES (?, ?, ?, ?)", [
+        ('REF_MASTER', 'polyprotein', 4, 12),
+        ('seq1', 'polyprotein', 4, 15),
+        ('seq2', 'polyprotein', 4, 15),
+    ])
+    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, primary_accession TEXT, alignment_name TEXT, alignment TEXT)")
+    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?, ?, ?)", [
+        ('REF_MASTER', 'REF_MASTER', 'REF_MASTER', 'GGGCCGCCACAC'),
+        ('seq1', 'seq1', 'REF_MASTER', 'GGGCCCATATAC'),
+        ('seq2', 'seq2', 'REF_MASTER', 'GGGCCCAAATAC'),
+    ])
+    cursor.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT)")
+    cursor.execute("INSERT INTO meta_data VALUES (?, ?)", ('REF_MASTER', 'master'))
+    cursor.execute("CREATE TABLE gff_features (reference_accession TEXT, feature_type TEXT, product TEXT, start INTEGER, end INTEGER)")
+    cursor.executemany("INSERT INTO gff_features VALUES (?, ?, ?, ?, ?)", [
+        ('REF_MASTER', 'gene', 'NS3', 4, 9),
+        ('REF_MASTER', 'mat_peptide', 'NS5A', 10, 12),
+    ])
+    cursor.execute("CREATE TABLE genes (description TEXT, display_name TEXT, name TEXT, parent_name TEXT)")
+    cursor.executemany("INSERT INTO genes VALUES (?, ?, ?, ?)", [
+        ('Non-structural protein 3', 'NS3', 'NS3', 'whole_genome'),
+        ('Non-structural protein 5A', 'NS5A', 'NS5A', 'whole_genome'),
+        ('Whole genome', 'Whole genome', 'whole_genome', 'NULL'),
+    ])
+    conn.commit()
+    conn.close()
+
+    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--virus', '']
+    AnnotateMutations.main()
+
+    conn = sqlite3.connect(str(db_path))
+    mut = pd.read_sql_query("SELECT * FROM sequence_mutations ORDER BY primary_accession, mutation_id", conn)
+    conn.close()
+
+    assert mut['mutation_id'].tolist() == ['NS3:2I', 'NS5A:1Y', 'NS5A:1Y']
+    assert mut['primary_accession'].tolist() == ['seq1', 'seq1', 'seq2']
+
+
+def test_annotate_mutations_can_fetch_genbank_gff_when_enabled(tmp_path, monkeypatch):
+    db_path = tmp_path / "genbank_fallback.db"
+    catalog_path = tmp_path / "genbank_catalog.tsv"
+
+    catalog_data = [
+        ['protein_name', 'segment', 'aa_position', 'alt_residue', 'reference_accession', 'mutation_id', 'mutation_type', 'signature_id', 'signature_kind', 'combination_id', 'combination_size', 'resistance_category', 'drug'],
+        ['NS5A', '1', '1', 'Y', 'REF_FETCH', 'NS5A:1Y', 'snp', 'sig1', 'single', '', '', '', ''],
+    ]
+    with open(catalog_path, 'w') as f:
+        for row in catalog_data:
+            f.write('\t'.join(row) + '\n')
+
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE features (accession TEXT, product TEXT, cds_start INTEGER, cds_end INTEGER)")
+    cursor.executemany("INSERT INTO features VALUES (?, ?, ?, ?)", [
+        ('REF_FETCH', 'polyprotein', 4, 12),
+        ('seq1', 'polyprotein', 4, 12),
+    ])
+    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, primary_accession TEXT, alignment_name TEXT, alignment TEXT)")
+    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?, ?, ?)", [
+        ('REF_FETCH', 'REF_FETCH', 'REF_FETCH', 'GGGCCGCCACAC'),
+        ('seq1', 'seq1', 'REF_FETCH', 'GGGCCCAAATAC'),
+    ])
+    cursor.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT)")
+    cursor.execute("INSERT INTO meta_data VALUES (?, ?)", ('REF_FETCH', 'master'))
+    cursor.execute("CREATE TABLE genes (description TEXT, display_name TEXT, name TEXT, parent_name TEXT)")
+    cursor.execute("INSERT INTO genes VALUES (?, ?, ?, ?)", ('Non-structural protein 5A', 'NS5A', 'NS5A', 'whole_genome'))
+    conn.commit()
+    conn.close()
+
+    def fake_fetch_reference_gff_map(accession, alias_lookup):
+        assert accession == 'REF_FETCH'
+        return {
+            'NS5A': {
+                'product': 'NS5A',
+                'raw_product': 'NS5A',
+                'cds_start': 10,
+                'cds_end': 12,
+                'reference_accession': accession,
+                'feature_type': 'mat_peptide',
+                'source': 'genbank_gff',
+            }
+        }
+
+    monkeypatch.setattr(AnnotateMutations, 'fetch_reference_gff_map', fake_fetch_reference_gff_map)
+
+    sys.argv = [
+        'AnnotateMutations.py',
+        '--db', str(db_path),
+        '--mutation_catalog', str(catalog_path),
+        '--virus', '',
+        '--allow_genbank_reference_gff',
+    ]
+    AnnotateMutations.main()
+
+    conn = sqlite3.connect(str(db_path))
+    mut = pd.read_sql_query("SELECT * FROM sequence_mutations", conn)
+    conn.close()
+
+    assert mut['mutation_id'].tolist() == ['NS5A:1Y']
+    assert mut['primary_accession'].tolist() == ['seq1']
+
+
+def test_annotate_mutations_crashes_when_reference_mapping_unavailable(tmp_path, capsys):
+    db_path = tmp_path / "unmapped.db"
+    catalog_path = tmp_path / "unmapped_catalog.tsv"
+
+    catalog_data = [
+        ['protein_name', 'segment', 'aa_position', 'alt_residue', 'reference_accession', 'mutation_id', 'mutation_type', 'signature_id', 'signature_kind', 'combination_id', 'combination_size', 'resistance_category', 'drug'],
+        ['NS3', '1', '2', 'I', 'REF_MASTER_NC_004102', 'NS3:2I', 'snp', 'sig1', 'single', '', '', '', ''],
+    ]
+    with open(catalog_path, 'w') as f:
+        for row in catalog_data:
+            f.write('\t'.join(row) + '\n')
+
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE features (accession TEXT, product TEXT, cds_start INTEGER, cds_end INTEGER)")
+    cursor.executemany("INSERT INTO features VALUES (?, ?, ?, ?)", [
+        ('REF_MASTER', 'polyprotein', 4, 15),
+        ('seq1', 'polyprotein', 4, 15),
+    ])
+    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, primary_accession TEXT, alignment_name TEXT, alignment TEXT)")
+    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?, ?, ?)", [
+        ('REF_MASTER', 'REF_MASTER', 'REF_MASTER', 'GGGCCCAAATAC'),
+        ('seq1', 'seq1', 'REF_MASTER', 'GGGCCCATAAAC'),
+    ])
+    cursor.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT)")
+    cursor.execute("INSERT INTO meta_data VALUES (?, ?)", ('REF_MASTER', 'master'))
+    cursor.execute("CREATE TABLE genes (description TEXT, display_name TEXT, name TEXT, parent_name TEXT)")
+    cursor.execute("INSERT INTO genes VALUES (?, ?, ?, ?)", ('Non-structural protein 3', 'NS3', 'NS3', 'whole_genome'))
+    conn.commit()
+    conn.close()
+
+    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--virus', '']
+    with pytest.raises(SystemExit) as excinfo:
+        AnnotateMutations.main()
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 2
+    assert '--allow_genbank_reference_gff' in captured.err

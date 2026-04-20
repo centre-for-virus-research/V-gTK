@@ -1,0 +1,1 @@
+println params.max_aln_gap_proportion

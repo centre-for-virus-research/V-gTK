@@ -58,4 +58,25 @@ def test_workflow_update_glue_contains_skip_and_guard():
     assert "UsherPlacement.py" in text
     assert "process USHER_UPDATE_PLACEMENT" not in text
     assert "db_ref_backbones" not in text
-    assert "if (params.test == \"1\" && !UPDATE_MODE)" in text
+    assert "process HOST_TAXA_TABLE" in text
+    assert "HOST_TAXA_TABLE.out.host_taxa" in text
+    assert "GENERATE_TABLES.out.host_taxa" not in text
+    assert 'for USHER_DIR in usher_inputs/*; do' in text
+    assert 'USHER_FILE=$(find -L usher_inputs -name "final-tree.nh" -print -quit || true)' not in text
+    assert 'path "Taxa/names.dmp", emit: taxa_names' in text
+    assert 'path "Taxa/nodes.dmp", emit: taxa_nodes' in text
+    assert 'if [ "!{params.mutation_catalog}" != "null" ] && [ -n "!{params.mutation_catalog}" ]; then' in text
+    assert "AnnotateMutations.py" in text
+    assert "--mutation_catalog !{params.mutation_catalog}" in text
+    assert "--db !{params.db_name}.db" in text
+    # TEST_SUBSAMPLE_CLUSTER_INPUT should not be invoked in the workflow
+    # (subsampling happens at the GenBankFetcher stage, not after DB population)
+    assert "TEST_SUBSAMPLE_CLUSTER_INPUT(" not in text
+
+
+def test_nextflow_config_defines_mutation_defaults():
+    config_path = Path(__file__).resolve().parents[2] / "nextflow.config"
+    text = config_path.read_text(encoding="utf-8")
+
+    assert "mutation_catalog  = null" in text
+    assert "mutation_virus    = null" in text

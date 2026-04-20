@@ -31,6 +31,8 @@ CLUSTER_PLACEHOLDER_VALUES = {
 NA_SET = {"", "NA", "Na", "N/A", "na", "n/a", "-", None}
 HOST_TAXA_META_COLUMNS = ["host_taxa_id", "taxonomy_id", "host_tax_id"]
 HOST_TAXA_TABLE_COLUMNS = ["taxa_id", "taxonomy_id", "host_taxa_id", "tax_id", "id"]
+MUTATION_REQUIRED_COLUMNS = ["primary_accession", "mutation_id", "protein_name", "aa_position", "alt_residue"]
+DRUG_RESISTANCE_REQUIRED_COLUMNS = ["primary_accession", "combination_id", "combination_status", "mutations_detected", "mutations_required"]
 
 
 def get_table_columns(conn, table_name):
@@ -65,14 +67,23 @@ def is_cluster_placeholder(value):
 
 
 def fetch_tree_newick(conn):
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT name, source, newick FROM trees WHERE newick IS NOT NULL AND length(newick) > 0 ORDER BY CASE WHEN source='usher' THEN 0 WHEN source='iqtree' THEN 1 ELSE 2 END, name LIMIT 1"
-    )
-    row = cursor.fetchone()
-    if not row:
+    rows = fetch_trees(conn)
+    if not rows:
         return None, None, None
-    return row[0], row[1], row[2]
+
+    ranked_rows = []
+    for row in rows:
+        tree = Phylo.read(StringIO(row["newick"]), "newick")
+        terminal_count = len([tip for tip in tree.get_terminals() if tip.name])
+        source_rank = 2
+        if row["source"] == "usher":
+            source_rank = 0
+        elif row["source"] == "iqtree":
+            source_rank = 1
+        ranked_rows.append((source_rank, -terminal_count, row["name"] or "", row))
+
+    best_row = sorted(ranked_rows, key=lambda item: (item[0], item[1], item[2]))[0][3]
+    return best_row["name"], best_row["source"], best_row["newick"]
 
 
 def fetch_trees(conn, source=None):
@@ -187,9 +198,14 @@ def get_expected_accessions(conn, accession_column="primary_accession", exclusio
     expected = raw_expected - excluded_accessions
     total_rows = fetch_count(conn, "meta_data")
     nonexcluded_rows = fetch_count(conn, "meta_data", where_sql=where_sql, params=params) if where_sql else total_rows
+    accepted_accessions = set(expected)
+    filtered_accessions = set(excluded_accessions)
 
     return {
         "expected_accessions": expected,
+        "accepted_accessions": accepted_accessions,
+        "filtered_accessions": filtered_accessions,
+        "accepted_filtered_union": accepted_accessions | filtered_accessions,
         "meta_total_rows": total_rows,
         "meta_nonexcluded_rows": nonexcluded_rows,
         "meta_has_exclusion": exclusion_column in meta_cols,
@@ -293,6 +309,289 @@ def result_failed(result):
     return not result.get("ok", False) and not result.get("skipped", False)
 
 
+def validate_mutation_tables(conn, expected_accessions):
+    results = []
+
+    if not table_exists(conn, "sequence_mutations") and not table_exists(conn, "sequence_drug_resistance"):
+        return [
+            {
+                "title": "mutation tables",
+                "ok": True,
+                "skipped": True,
+                "reason": "No mutation tables present in DB.",
+            }
+        ]
+
+    if table_exists(conn, "sequence_mutations"):
+        mut_cols = get_table_columns(conn, "sequence_mutations")
+        missing_cols = [col for col in MUTATION_REQUIRED_COLUMNS if col not in mut_cols]
+        if missing_cols:
+            results.append(
+                {
+                    "title": "sequence_mutations schema",
+                    "ok": False,
+                    "error": f"Missing required columns: {missing_cols}. Present columns: {mut_cols}",
+                }
+            )
+        else:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM sequence_mutations
+                WHERE primary_accession IS NULL OR TRIM(CAST(primary_accession AS TEXT)) = ''
+                   OR mutation_id IS NULL OR TRIM(CAST(mutation_id AS TEXT)) = ''
+                   OR protein_name IS NULL OR TRIM(CAST(protein_name AS TEXT)) = ''
+                   OR aa_position IS NULL OR TRIM(CAST(aa_position AS TEXT)) = ''
+                   OR alt_residue IS NULL OR TRIM(CAST(alt_residue AS TEXT)) = ''
+                """
+            )
+            blank_required = int(cursor.fetchone()[0])
+
+            observed_accessions = fetch_distinct_values(conn, "sequence_mutations", "primary_accession")
+            orphan_accessions = sorted(observed_accessions - expected_accessions)
+
+            combination_col = "combination_id" if "combination_id" in mut_cols else None
+            if combination_col:
+                duplicate_sql = """
+                    SELECT COUNT(*)
+                    FROM (
+                        SELECT primary_accession, mutation_id, protein_name,
+                               COALESCE(TRIM(CAST(segment AS TEXT)), ''),
+                               COALESCE(TRIM(CAST(aa_position AS TEXT)), ''),
+                               alt_residue,
+                               COALESCE(TRIM(CAST(combination_id AS TEXT)), ''),
+                               COUNT(*) AS c
+                        FROM sequence_mutations
+                        GROUP BY 1,2,3,4,5,6,7
+                        HAVING c > 1
+                    )
+                """
+            else:
+                duplicate_sql = """
+                    SELECT COUNT(*)
+                    FROM (
+                        SELECT primary_accession, mutation_id, protein_name,
+                               COALESCE(TRIM(CAST(segment AS TEXT)), ''),
+                               COALESCE(TRIM(CAST(aa_position AS TEXT)), ''),
+                               alt_residue,
+                               COUNT(*) AS c
+                        FROM sequence_mutations
+                        GROUP BY 1,2,3,4,5,6
+                        HAVING c > 1
+                    )
+                """
+            cursor.execute(duplicate_sql)
+            duplicate_rows = int(cursor.fetchone()[0])
+
+            results.append(
+                {
+                    "title": "sequence_mutations integrity",
+                    "ok": blank_required == 0 and duplicate_rows == 0 and len(orphan_accessions) == 0,
+                    "table": "sequence_mutations",
+                    "blank_required_rows": blank_required,
+                    "duplicate_keys": duplicate_rows,
+                    "orphan_accessions": orphan_accessions,
+                    "observed_accessions": len(observed_accessions),
+                }
+            )
+    else:
+        results.append(
+            {
+                "title": "sequence_mutations table",
+                "ok": False,
+                "error": "sequence_drug_resistance exists but sequence_mutations table is missing.",
+            }
+        )
+
+    if table_exists(conn, "sequence_drug_resistance"):
+        dr_cols = get_table_columns(conn, "sequence_drug_resistance")
+        missing_cols = [col for col in DRUG_RESISTANCE_REQUIRED_COLUMNS if col not in dr_cols]
+        if missing_cols:
+            results.append(
+                {
+                    "title": "sequence_drug_resistance schema",
+                    "ok": False,
+                    "error": f"Missing required columns: {missing_cols}. Present columns: {dr_cols}",
+                }
+            )
+        else:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM sequence_drug_resistance
+                WHERE primary_accession IS NULL OR TRIM(CAST(primary_accession AS TEXT)) = ''
+                   OR combination_id IS NULL OR TRIM(CAST(combination_id AS TEXT)) = ''
+                   OR combination_status IS NULL OR TRIM(CAST(combination_status AS TEXT)) = ''
+                   OR mutations_detected IS NULL
+                   OR mutations_required IS NULL
+                """
+            )
+            blank_required = int(cursor.fetchone()[0])
+
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM (
+                    SELECT primary_accession, combination_id, COUNT(*) AS c
+                    FROM sequence_drug_resistance
+                    GROUP BY 1,2
+                    HAVING c > 1
+                )
+                """
+            )
+            duplicate_rows = int(cursor.fetchone()[0])
+
+            observed_accessions = fetch_distinct_values(conn, "sequence_drug_resistance", "primary_accession")
+            orphan_accessions = sorted(observed_accessions - expected_accessions)
+
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM sequence_drug_resistance
+                WHERE CAST(mutations_detected AS INTEGER) < 1
+                   OR CAST(mutations_required AS INTEGER) < 1
+                """
+            )
+            non_positive_counts = int(cursor.fetchone()[0])
+
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM sequence_drug_resistance
+                WHERE combination_status NOT IN ('complete', 'partial')
+                """
+            )
+            invalid_status_values = int(cursor.fetchone()[0])
+
+            combo_key_mismatches = 0
+            detected_count_mismatches = 0
+            status_mismatches = 0
+            if table_exists(conn, "sequence_mutations"):
+                cursor.execute(
+                    """
+                    WITH mutation_combo_counts AS (
+                        SELECT primary_accession, combination_id, COUNT(*) AS mutation_count
+                        FROM sequence_mutations
+                        WHERE combination_id IS NOT NULL AND TRIM(CAST(combination_id AS TEXT)) != ''
+                        GROUP BY 1,2
+                    ),
+                    resistance_keys AS (
+                        SELECT primary_accession, combination_id, mutations_detected, mutations_required, combination_status
+                        FROM sequence_drug_resistance
+                    )
+                    SELECT COUNT(*)
+                    FROM (
+                        SELECT primary_accession, combination_id FROM mutation_combo_counts
+                        EXCEPT
+                        SELECT primary_accession, combination_id FROM resistance_keys
+                    )
+                    UNION ALL
+                    SELECT COUNT(*)
+                    FROM (
+                        SELECT primary_accession, combination_id FROM resistance_keys
+                        EXCEPT
+                        SELECT primary_accession, combination_id FROM mutation_combo_counts
+                    )
+                    """
+                )
+                combo_key_mismatch_rows = cursor.fetchall()
+                combo_key_mismatches = sum(int(row[0]) for row in combo_key_mismatch_rows)
+
+                cursor.execute(
+                    """
+                    WITH mutation_combo_counts AS (
+                        SELECT primary_accession, combination_id, COUNT(*) AS mutation_count
+                        FROM sequence_mutations
+                        WHERE combination_id IS NOT NULL AND TRIM(CAST(combination_id AS TEXT)) != ''
+                        GROUP BY 1,2
+                    )
+                    SELECT COUNT(*)
+                    FROM sequence_drug_resistance sdr
+                    JOIN mutation_combo_counts mcc
+                      ON sdr.primary_accession = mcc.primary_accession
+                     AND sdr.combination_id = mcc.combination_id
+                    WHERE CAST(sdr.mutations_detected AS INTEGER) != mcc.mutation_count
+                    """
+                )
+                detected_count_mismatches = int(cursor.fetchone()[0])
+
+                cursor.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM sequence_drug_resistance
+                    WHERE combination_status != CASE
+                        WHEN CAST(mutations_detected AS INTEGER) >= CAST(mutations_required AS INTEGER) THEN 'complete'
+                        ELSE 'partial'
+                    END
+                    """
+                )
+                status_mismatches = int(cursor.fetchone()[0])
+
+            results.append(
+                {
+                    "title": "sequence_drug_resistance integrity",
+                    "ok": (
+                        blank_required == 0
+                        and duplicate_rows == 0
+                        and len(orphan_accessions) == 0
+                        and non_positive_counts == 0
+                        and invalid_status_values == 0
+                        and combo_key_mismatches == 0
+                        and detected_count_mismatches == 0
+                        and status_mismatches == 0
+                    ),
+                    "table": "sequence_drug_resistance",
+                    "blank_required_rows": blank_required,
+                    "duplicate_keys": duplicate_rows,
+                    "orphan_accessions": orphan_accessions,
+                    "non_positive_counts": non_positive_counts,
+                    "invalid_status_values": invalid_status_values,
+                    "combo_key_mismatches": combo_key_mismatches,
+                    "detected_count_mismatches": detected_count_mismatches,
+                    "status_mismatches": status_mismatches,
+                    "observed_accessions": len(observed_accessions),
+                }
+            )
+
+    return results
+
+
+def format_mutation_integrity_result(result, show_n=25):
+    lines = [f"[{result['title']}]"]
+    if result.get("skipped"):
+        lines.append("  OK: True (skipped)")
+        lines.append(f"  Reason: {result.get('reason', 'not provided')}")
+        return "\n".join(lines)
+    if "error" in result:
+        lines.append("  OK: False")
+        lines.append(f"  ERROR: {result['error']}")
+        return "\n".join(lines)
+
+    lines.append(f"  OK: {result.get('ok')}")
+    if result.get("table"):
+        lines.append(f"  Table: {result['table']}")
+    for key in [
+        "blank_required_rows",
+        "duplicate_keys",
+        "non_positive_counts",
+        "invalid_status_values",
+        "combo_key_mismatches",
+        "detected_count_mismatches",
+        "status_mismatches",
+        "observed_accessions",
+    ]:
+        if key in result:
+            lines.append(f"  {key}: {result[key]}")
+    orphan_accessions = result.get("orphan_accessions", [])
+    if orphan_accessions:
+        lines.append(f"  Orphan accession examples (up to {show_n}):")
+        for value in orphan_accessions[:show_n]:
+            lines.append(f"    - {value}")
+    return "\n".join(lines)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Validate SQLite DB contents against tree coverage and table consistency")
     parser.add_argument("--db", required=True, help="Path to SQLite DB")
@@ -356,6 +655,9 @@ def main(argv=None):
         meta_set = {str(x).strip() for x in meta_accessions if str(x).strip()}
         seq_set = {str(x).strip() for x in seq_headers if str(x).strip()}
         excluded_accessions = set(meta_info["excluded_accessions"])
+        accepted_accessions = set(meta_info["accepted_accessions"])
+        filtered_accessions = set(meta_info["filtered_accessions"])
+        accepted_filtered_union = set(meta_info["accepted_filtered_union"])
         expected_meta_set = set(expected_accessions)
         missing_in_sequences = sorted(expected_meta_set - seq_set)
         missing_in_meta = sorted(tree_terminals - meta_set)
@@ -400,6 +702,7 @@ def main(argv=None):
                 params=where_params,
             ),
         }
+        mutation_integrity_results = validate_mutation_tables(conn, expected_meta_set)
 
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM meta_data")
@@ -505,6 +808,9 @@ def main(argv=None):
                 )
             else:
                 report.write("meta_data exclusion column not found; using all rows.\n")
+            report.write(f"Accepted distinct accessions: {len(accepted_accessions)}\n")
+            report.write(f"Filtered distinct accessions: {len(filtered_accessions)}\n")
+            report.write(f"Accepted + filtered distinct accessions: {len(accepted_filtered_union)}\n")
             report.write(f"Excluded accessions table rows considered: {len(excluded_accessions)}\n")
             report.write(f"Expected distinct accessions (from meta_data.{args.accession_column}): {len(expected_meta_set)}\n")
             report.write("\n")
@@ -515,6 +821,7 @@ def main(argv=None):
 
             report.write("=== Tree Validation Summary ===\n")
             report.write(f"Tree source: {tree_source or tree_name}\n")
+            report.write(f"Tree name: {tree_name or ''}\n")
             report.write(f"Meta rows: {meta_count}\n")
             report.write(f"Sequence rows: {seq_count}\n")
             report.write(f"Tree terminals: {len(tree_terminals)}\n")
@@ -605,27 +912,9 @@ def main(argv=None):
 
             if table_exists(conn, "sequence_mutations"):
                 report.write("\nMutation integrity checks:\n")
-                cursor.execute("""
-                    SELECT COUNT(*)
-                    FROM sequence_mutations sm
-                    LEFT JOIN meta_data md ON sm.primary_accession = md.primary_accession
-                    WHERE md.primary_accession IS NULL
-                """)
-                missing_meta = cursor.fetchone()[0]
-                report.write(f"- sequence_mutations_without_metadata: {missing_meta}\n")
-                
-                if table_exists(conn, "sequence_drug_resistance"):
-                    cursor.execute("""
-                        SELECT sdr.primary_accession, sdr.combination_id, sdr.mutations_detected, sdr.mutations_required, sdr.combination_status
-                        FROM sequence_drug_resistance sdr
-                    """)
-                    bad_combos = 0
-                    for racc, rcomb, det, req, stat in cursor.fetchall():
-                        expected_stat = 'complete' if det >= req else 'partial'
-                        if stat != expected_stat:
-                            bad_combos += 1
-                            
-                    report.write(f"- drug_resistance_status_mismatches: {bad_combos}\n")
+                for result in mutation_integrity_results:
+                    report.write(format_mutation_integrity_result(result))
+                    report.write("\n\n")
 
         if missing_in_tree:
             with open(missing_tree_path, "w", encoding="utf-8") as handle:
@@ -645,6 +934,10 @@ def main(argv=None):
                 handle.write("\n".join(extra_in_tree) + "\n")
 
         print(f"[info] Tree source: {tree_source or tree_name}")
+        print(f"[info] Tree name: {tree_name or ''}")
+        print(f"[info] Accepted distinct accessions: {len(accepted_accessions)}")
+        print(f"[info] Filtered distinct accessions: {len(filtered_accessions)}")
+        print(f"[info] Accepted + filtered distinct accessions: {len(accepted_filtered_union)}")
         print(f"[info] Meta rows: {meta_count}, Sequence rows: {seq_count}, Tree terminals: {len(tree_terminals)}")
         print(f"[info] UShER tree rows: {usher_tree_count}")
         if segment_count is not None:
@@ -657,6 +950,18 @@ def main(argv=None):
             else:
                 print(
                     f"[info] {title}: ok={result['ok']} missing={len(result.get('missing', []))} extra={len(result.get('extra', []))}"
+                )
+        for result in mutation_integrity_results:
+            if result.get("skipped"):
+                print(f"[info] {result['title']}: skipped ({result.get('reason')})")
+            elif "error" in result:
+                print(f"[info] {result['title']}: ERROR: {result['error']}")
+            else:
+                print(
+                    f"[info] {result['title']}: ok={result['ok']} "
+                    f"blank_required_rows={result.get('blank_required_rows', 0)} "
+                    f"duplicate_keys={result.get('duplicate_keys', 0)} "
+                    f"orphan_accessions={len(result.get('orphan_accessions', []))}"
                 )
         if cluster_col:
             print(f"[info] Cluster column: {cluster_col}, Centroid count: {len(centroid_set)}")
@@ -725,12 +1030,13 @@ def main(argv=None):
                         raise SystemExit("Validation failed: segment contamination detected in features table")
 
         failed_consistency_checks = [title for title, result in consistency_results.items() if result_failed(result)]
-        if failed_consistency_checks:
+        failed_mutation_checks = [result["title"] for result in mutation_integrity_results if result_failed(result)]
+        if failed_consistency_checks or failed_mutation_checks:
             if args.test_mode and args.expect_segment_trees and segment_count is not None and segment_count > 1 and not args.check_update_integrity:
                 print("[info] Test mode: skipping strict DB consistency failures for segmented validation run")
             else:
                 raise SystemExit(
-                    "Validation failed: DB consistency checks failed for " + ", ".join(failed_consistency_checks)
+                    "Validation failed: DB consistency checks failed for " + ", ".join(failed_consistency_checks + failed_mutation_checks)
                 )
 
         if tree_source == "usher":

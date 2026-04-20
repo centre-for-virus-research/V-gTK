@@ -27,7 +27,15 @@ def _strip_source_prefixes(name: str, source: str) -> str:
 
 def _find_first_tree_file(directory: Path, source: str) -> Optional[Path]:
     for pattern in SOURCE_CONFIG[source]["patterns"]:
-        matches = sorted(directory.rglob(pattern))
+        matches = sorted(path for path in directory.glob(pattern) if path.is_file())
+        if matches:
+            return matches[0]
+
+    for pattern in SOURCE_CONFIG[source]["patterns"]:
+        matches = sorted(
+            (path for path in directory.rglob(pattern) if path.is_file()),
+            key=lambda path: (len(path.relative_to(directory).parts), str(path)),
+        )
         if matches:
             return matches[0]
     return None
