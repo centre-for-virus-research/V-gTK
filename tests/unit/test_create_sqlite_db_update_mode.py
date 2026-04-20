@@ -461,6 +461,45 @@ def test_update_mode_autofills_missing_cluster_98pct_with_placeholder(tmp_path: 
     finally:
         conn.close()
 
+    if "cluster_98pct" not in cols:
+        pytest.skip("Real update DB meta_data does not include cluster_98pct")
+
+    inp = _inputs(tmp_path, "cluster_placeholder_realdb", aln_a="ATGC")
+    _write_realdb_compatible_lookup_tables(inp)
+    _write_realdb_compatible_genes(inp, real_update_db_copy)
+
+    acc = "Q_CLUSTER_NA"
+    _write_realdb_compatible_meta(
+        inp,
+        real_update_db_copy,
+        [
+            {"primary_accession": acc, "segment": "1", "accession_type": "query", "exclusion_status": ""},
+        ],
+    )
+
+    meta_df = pd.read_csv(inp["meta"], sep="\t", dtype=str)
+    if "cluster_98pct" in meta_df.columns:
+        meta_df = meta_df.drop(columns=["cluster_98pct"])
+    meta_df.to_csv(inp["meta"], sep="\t", index=False)
+
+    pd.DataFrame(
+        [["3001", "Host Cluster", "species", "root;cluster"]],
+        columns=["taxonomy_id", "scientific_name", "rank", "lineage"],
+    ).to_csv(inp["host_taxa"], sep="\t", index=False)
+
+    out_db = _build_db(tmp_path, inp, update=True, update_db=real_update_db_copy)
+
+    conn = sqlite3.connect(str(out_db))
+    try:
+        row = conn.execute(
+            "SELECT cluster_98pct FROM meta_data WHERE primary_accession=? ORDER BY rowid DESC LIMIT 1",
+            (acc,),
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "NA- see tree"
+    finally:
+        conn.close()
+
 
 def test_update_mode_autofills_missing_cluster_95pct_with_placeholder(tmp_path: Path):
     cluster_tsv = tmp_path / "clusters.tsv"
@@ -492,32 +531,6 @@ def test_update_mode_autofills_missing_cluster_95pct_with_placeholder(tmp_path: 
         assert row[0] == "NA- see tree"
     finally:
         conn.close()
-
-    if "cluster_98pct" not in cols:
-        pytest.skip("Real update DB meta_data does not include cluster_98pct")
-
-    inp = _inputs(tmp_path, "cluster_placeholder_realdb", aln_a="ATGC")
-    _write_realdb_compatible_lookup_tables(inp)
-    _write_realdb_compatible_genes(inp, real_update_db_copy)
-
-    acc = "Q_CLUSTER_NA"
-    _write_realdb_compatible_meta(
-        inp,
-        real_update_db_copy,
-        [
-            {"primary_accession": acc, "segment": "1", "accession_type": "query", "exclusion_status": ""},
-        ],
-    )
-
-    meta_df = pd.read_csv(inp["meta"], sep="\t", dtype=str)
-    if "cluster_98pct" in meta_df.columns:
-        meta_df = meta_df.drop(columns=["cluster_98pct"])
-    meta_df.to_csv(inp["meta"], sep="\t", index=False)
-
-    pd.DataFrame(
-        [["3001", "Host Cluster", "species", "root;cluster"]],
-        columns=["taxonomy_id", "scientific_name", "rank", "lineage"],
-    ).to_csv(inp["host_taxa"], sep="\t", index=False)
 
     out_db = _build_db(tmp_path, inp, update=True, update_db=real_update_db_copy)
 

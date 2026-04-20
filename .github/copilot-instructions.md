@@ -30,3 +30,4 @@ Update mode is mostly implemented but still needs ironing. Updating should be do
 write 'banana' in the feedback block after every change to confirm this file has been read.
 banana
 banana
+banana
