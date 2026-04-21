@@ -241,6 +241,85 @@ def test_annotate_mutations_falls_back_to_db_gff_coordinate_mapping(tmp_path):
     assert mut['primary_accession'].tolist() == ['seq1', 'seq1', 'seq2']
 
 
+def test_annotate_mutations_can_build_reference_maps_from_features_table(tmp_path):
+    db_path = tmp_path / "feature_fallback.db"
+
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute(
+        "CREATE TABLE features (accession TEXT, master_ref_accession TEXT, reference_accession TEXT, cds_start INTEGER, cds_end INTEGER, product TEXT)"
+    )
+    cursor.executemany("INSERT INTO features VALUES (?, ?, ?, ?, ?, ?)", [
+        ('NC_004102', 'NC_004102', 'NC_004102', 4, 9, 'NS3'),
+        ('NC_004102', 'NC_004102', 'NC_004102', 10, 12, 'NS5A'),
+        ('EU781827', 'NC_004102', 'EU781827', 4, 9, 'NS3'),
+        ('EU781827', 'NC_004102', 'EU781827', 10, 12, 'NS5A'),
+        ('seq1', 'NC_004102', 'EU781827', 4, 12, 'polyprotein'),
+    ])
+    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, primary_accession TEXT, alignment_name TEXT, alignment TEXT)")
+    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?, ?, ?)", [
+        ('EU781827', 'EU781827', 'EU781827', 'GGGCCGCCACAC'),
+        ('seq1', 'seq1', 'EU781827', 'GGGCCCATATAC'),
+    ])
+    cursor.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT)")
+    cursor.executemany("INSERT INTO meta_data VALUES (?, ?)", [
+        ('NC_004102', 'master'),
+        ('EU781827', 'reference'),
+    ])
+    cursor.execute("CREATE TABLE genes (description TEXT, display_name TEXT, name TEXT, parent_name TEXT)")
+    cursor.executemany("INSERT INTO genes VALUES (?, ?, ?, ?)", [
+        ('Non-structural protein 3', 'NS3', 'NS3', 'whole_genome'),
+        ('Non-structural protein 5A', 'NS5A', 'NS5A', 'whole_genome'),
+        ('Whole genome', 'Whole genome', 'whole_genome', 'NULL'),
+    ])
+    conn.commit()
+
+    alias_lookup = AnnotateMutations.load_gene_alias_lookup(conn)
+    db_gff_maps = AnnotateMutations.load_db_gff_feature_maps(conn, alias_lookup)
+    seq_aln = pd.read_sql_query("SELECT * FROM sequence_alignment", conn)
+    meta_data = pd.read_sql_query("SELECT * FROM meta_data", conn)
+    conn.close()
+
+    catalog = pd.DataFrame([
+        {
+            'protein_name': 'NS3',
+            'segment': '1',
+            'aa_position': '2',
+            'alt_residue': 'I',
+            'reference_accession': 'REF_MASTER_NC_004102',
+            'mutation_id': 'NS3:2I',
+            'combination_id': '',
+        },
+        {
+            'protein_name': 'NS5A',
+            'segment': '1',
+            'aa_position': '1',
+            'alt_residue': 'Y',
+            'reference_accession': 'REF_MASTER_NC_004102',
+            'mutation_id': 'NS5A:1Y',
+            'combination_id': '',
+        },
+    ])
+    catalog, invalid_positions = AnnotateMutations.prepare_catalog(catalog, alias_lookup)
+
+    assert invalid_positions == 0
+    assert set(db_gff_maps) >= {'NC_004102', 'EU781827'}
+
+    mutations_found, diagnostics, resolved_maps = AnnotateMutations.annotate_from_reference_coordinates(
+        catalog,
+        seq_aln[['sequence_id', 'primary_accession', 'alignment', 'alignment_name']].copy(),
+        meta_data,
+        alias_lookup,
+        db_gff_maps,
+        False,
+    )
+
+    assert sorted(m['mutation_id'] for m in mutations_found) == ['NS3:2I', 'NS5A:1Y']
+    assert all(m['primary_accession'] == 'seq1' for m in mutations_found)
+    assert resolved_maps['EU781827']['resolved_accession'] == 'EU781827'
+    assert diagnostics['mutation_hits'] == 2
+
+
 def test_annotate_mutations_can_fetch_genbank_gff_when_enabled(tmp_path, monkeypatch):
     db_path = tmp_path / "genbank_fallback.db"
     catalog_path = tmp_path / "genbank_catalog.tsv"

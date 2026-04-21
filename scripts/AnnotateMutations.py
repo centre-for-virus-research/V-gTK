@@ -199,10 +199,48 @@ def fetch_reference_gff_map(accession, alias_lookup):
     return parse_gff_text_to_feature_map(gff_text, accession, alias_lookup, 'genbank_gff')
 
 
+def load_reference_accessions(conn):
+    try:
+        meta = pd.read_sql_query('SELECT primary_accession, accession_type FROM meta_data', conn)
+    except Exception:
+        return set()
+
+    if not {'primary_accession', 'accession_type'}.issubset(meta.columns):
+        return set()
+
+    mask = meta['accession_type'].fillna('').astype(str).str.strip().str.lower().isin({'master', 'reference'})
+    return set(meta.loc[mask, 'primary_accession'].dropna().astype(str).str.strip())
+
+
+def merge_feature_entry(feature_maps, reference_accession, product_name, start, end, feature_type, alias_lookup, raw_product=None, source='unknown'):
+    entry = make_feature_entry(
+        product_name,
+        start,
+        end,
+        reference_accession,
+        feature_type,
+        alias_lookup,
+        raw_product=raw_product,
+        source=source,
+    )
+    if entry is None:
+        return
+    reference_map = feature_maps.setdefault(reference_accession, {})
+    reference_map[entry['product']] = choose_feature_entry(reference_map.get(entry['product']), entry)
+
+
+def feature_map_has_gene_information(feature_map):
+    return any(
+        normalize_lookup_key(product_name) not in {'polyprotein', 'wholegenome'}
+        for product_name in (feature_map or {})
+    )
+
+
 def load_db_gff_feature_maps(conn, alias_lookup):
     table_names = pd.read_sql_query("SELECT name FROM sqlite_master WHERE type='table'", conn)['name'].tolist()
     candidate_tables = [name for name in ['gff_features', 'reference_gff_features', 'gff', 'reference_gff'] if name in table_names]
     feature_maps = {}
+    reference_accessions = load_reference_accessions(conn)
 
     for table_name in candidate_tables:
         df = pd.read_sql_query(f'SELECT * FROM {table_name}', conn)
@@ -217,20 +255,17 @@ def load_db_gff_feature_maps(conn, alias_lookup):
                 if not reference_accession:
                     continue
                 feature_type = str(row.get(feature_type_col, 'gene') or 'gene') if feature_type_col else 'gene'
-                entry = make_feature_entry(
+                merge_feature_entry(
+                    feature_maps,
+                    reference_accession,
                     row.get(product_col),
                     row.get('start'),
                     row.get('end'),
-                    reference_accession,
                     feature_type,
                     alias_lookup,
                     raw_product=row.get(product_col),
                     source=f'db_table:{table_name}',
                 )
-                if entry is None:
-                    continue
-                reference_map = feature_maps.setdefault(reference_accession, {})
-                reference_map[entry['product']] = choose_feature_entry(reference_map.get(entry['product']), entry)
         elif {'reference_accession', 'gff_text'}.issubset(columns) or {'reference_accession', 'content'}.issubset(columns):
             text_col = 'gff_text' if 'gff_text' in columns else 'content'
             for _, row in df.iterrows():
@@ -243,6 +278,42 @@ def load_db_gff_feature_maps(conn, alias_lookup):
                 reference_map = feature_maps.setdefault(reference_accession, {})
                 for product_name, entry in parsed.items():
                     reference_map[product_name] = choose_feature_entry(reference_map.get(product_name), entry)
+
+    if 'features' in table_names:
+        df = pd.read_sql_query('SELECT * FROM features', conn)
+        columns = set(df.columns)
+        accession_col = 'accession' if 'accession' in columns else 'primary_accession' if 'primary_accession' in columns else None
+        start_col = 'cds_start' if 'cds_start' in columns else 'start' if 'start' in columns else None
+        end_col = 'cds_end' if 'cds_end' in columns else 'end' if 'end' in columns else None
+        product_col = next((name for name in ['product', 'gene_name', 'name', 'raw_product'] if name in columns), None)
+        feature_type_col = 'feature_type' if 'feature_type' in columns else None
+
+        if accession_col and start_col and end_col and product_col:
+            for _, row in df.iterrows():
+                reference_accession = str(row.get(accession_col, '') or '').strip()
+                if not reference_accession:
+                    continue
+
+                ref_candidate = str(row.get('reference_accession', '') or '').strip() if 'reference_accession' in columns else ''
+                master_candidate = str(row.get('master_ref_accession', '') or '').strip() if 'master_ref_accession' in columns else ''
+                is_known_reference = reference_accession in reference_accessions if reference_accessions else False
+                is_self_backed = reference_accession in {ref_candidate, master_candidate}
+
+                if not is_known_reference and not is_self_backed:
+                    continue
+
+                feature_type = str(row.get(feature_type_col, 'gene') or 'gene') if feature_type_col else 'gene'
+                merge_feature_entry(
+                    feature_maps,
+                    reference_accession,
+                    row.get(product_col),
+                    row.get(start_col),
+                    row.get(end_col),
+                    feature_type,
+                    alias_lookup,
+                    raw_product=row.get(product_col),
+                    source='db_table:features',
+                )
 
     return feature_maps
 
@@ -257,7 +328,7 @@ def resolve_reference_feature_map(reference_hint, fallback_candidates, db_gff_ma
 
     for candidate in candidates:
         attempted.append(candidate)
-        if candidate in db_gff_maps and db_gff_maps[candidate]:
+        if candidate in db_gff_maps and feature_map_has_gene_information(db_gff_maps[candidate]):
             return candidate, db_gff_maps[candidate], attempted, 'db_gff'
 
     if not allow_genbank_gff:

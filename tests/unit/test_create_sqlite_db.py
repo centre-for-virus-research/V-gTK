@@ -251,6 +251,97 @@ def test_create_sqlite_db_maps_tree_manifest_segment_from_refset_key(tmp_path: P
     assert row == ("usher", "refset_1_aln_merged_MSA", "1")
 
 
+def test_create_sqlite_db_preserves_projected_gff_feature_columns(tmp_path: Path):
+    meta = tmp_path / "meta.tsv"
+    features = tmp_path / "features.tsv"
+    aln = tmp_path / "sequence_alignment.tsv"
+    gene = tmp_path / "gene.tsv"
+    m49_country = tmp_path / "m49_country.csv"
+    m49_inter = tmp_path / "m49_inter.csv"
+    m49_region = tmp_path / "m49_region.csv"
+    m49_sub = tmp_path / "m49_sub.csv"
+    proj = tmp_path / "software.tsv"
+    insertions = tmp_path / "insertions.tsv"
+    host_taxa = tmp_path / "host.tsv"
+    fasta = tmp_path / "seqs.fa"
+
+    write_tsv(
+        meta,
+        [["NC_004102", "master"], ["EU781827", "reference"], ["seq1", ""]],
+        ["primary_accession", "accession_type"],
+    )
+    write_tsv(
+        features,
+        [
+            ["NC_004102", "NC_004102", "NC_004102", "1", "9", "4", "9", "NS3"],
+            ["EU781827", "NC_004102", "EU781827", "1", "9", "4", "9", "NS3"],
+            ["seq1", "NC_004102", "EU781827", "1", "9", "4", "9", "NS3"],
+        ],
+        ["accession", "master_ref_accession", "reference_accession", "aln_start", "aln_end", "cds_start", "cds_end", "product"],
+    )
+    write_tsv(
+        aln,
+        [["NC_004102", "NC_004102", "ATGC"], ["EU781827", "EU781827", "ATGC"], ["seq1", "EU781827", "ATGC"]],
+        ["primary_accession", "alignment_name", "aligned_seq"],
+    )
+    write_tsv(gene, [["geneA", "Gene A"]], ["name", "description"])
+    write_csv(m49_country, [["001", "World"]], ["m49_code", "name"])
+    write_csv(m49_inter, [["X", "Inter"]], ["code", "name"])
+    write_csv(m49_region, [["Y", "Region"]], ["code", "name"])
+    write_csv(m49_sub, [["Z", "SubRegion"]], ["code", "name"])
+    write_tsv(proj, [["Python", "3.11"]], ["Software", "Version"])
+    write_tsv(insertions, [["NC_004102", "none"]], ["primary_accession", "insertions"])
+    write_tsv(host_taxa, [["NC_004102", "host1"]], ["primary_accession", "host"])
+    fasta.write_text(">NC_004102\nATGC\n>EU781827\nATGC\n>seq1\nATGC\n", encoding="utf-8")
+
+    db = CreateSqliteDB(
+        meta_data=str(meta),
+        features=str(features),
+        pad_aln=str(aln),
+        gene_info=str(gene),
+        m49_countries=str(m49_country),
+        m49_interm_region=str(m49_inter),
+        m49_regions=str(m49_region),
+        m49_sub_regions=str(m49_sub),
+        proj_settings=str(proj),
+        fasta_sequence_file=str(fasta),
+        insertions=str(insertions),
+        host_taxa_file=str(host_taxa),
+        base_dir=str(tmp_path),
+        output_dir="SqliteDB",
+        db_name="projected_features",
+        db_status="new db",
+    )
+
+    db.create_db()
+
+    conn = sqlite3.connect(tmp_path / "SqliteDB" / "projected_features.db")
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(features)")
+    columns = [row[1] for row in cur.fetchall()]
+    cur.execute(
+        "SELECT accession, master_ref_accession, reference_accession, cds_start, cds_end, product FROM features ORDER BY accession"
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    assert columns == [
+        'accession',
+        'master_ref_accession',
+        'reference_accession',
+        'aln_start',
+        'aln_end',
+        'cds_start',
+        'cds_end',
+        'product',
+    ]
+    assert rows == [
+        ('EU781827', 'NC_004102', 'EU781827', '4', '9', 'NS3'),
+        ('NC_004102', 'NC_004102', 'NC_004102', '4', '9', 'NS3'),
+        ('seq1', 'NC_004102', 'EU781827', '4', '9', 'NS3'),
+    ]
+
+
 def test_create_sqlite_db_raises_when_meta_file_missing(tmp_path: Path):
     features = tmp_path / "features.tsv"
     aln = tmp_path / "sequence_alignment.tsv"
