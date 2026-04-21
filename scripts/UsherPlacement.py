@@ -13,7 +13,7 @@ from Bio import Phylo, SeqIO
 
 
 class UsherPlacement:
-	def __init__(self, padded_aln, output_dir, mmseq_cluster_dir=None, iqtree_dir=None, update_db=None, threads=1, test_mode=False, chunk_size=50000, chunk_threshold=100000):
+	def __init__(self, padded_aln, output_dir, mmseq_cluster_dir=None, iqtree_dir=None, update_db=None, threads=1, test_mode=False, chunk_size=50000, chunk_threshold=100000, starter_tree=None, existing_ids_file=None):
 		self.padded_aln = padded_aln
 		self.output_dir = output_dir
 		self.mmseq_cluster_dir = self._normalize_optional_path(mmseq_cluster_dir)
@@ -23,6 +23,8 @@ class UsherPlacement:
 		self.test_mode = str(test_mode).strip() == "1" if not isinstance(test_mode, bool) else test_mode
 		self.chunk_size = max(1, int(chunk_size))
 		self.chunk_threshold = max(1, int(chunk_threshold))
+		self.starter_tree = self._normalize_optional_path(starter_tree)
+		self.existing_ids_file = self._normalize_optional_path(existing_ids_file)
 
 	@staticmethod
 	def _normalize_optional_path(path_value):
@@ -413,6 +415,15 @@ class UsherPlacement:
 
 		return cluster_rep, tree_file
 
+	def resolve_resume_assets(self):
+		if not self.starter_tree or not self.existing_ids_file:
+			raise ValueError("starter_tree and existing_ids_file are both required for resume mode")
+		if not os.path.isfile(self.starter_tree):
+			raise FileNotFoundError(f"Resume starter tree not found: {self.starter_tree}")
+		if not os.path.isfile(self.existing_ids_file):
+			raise FileNotFoundError(f"Resume existing IDs file not found: {self.existing_ids_file}")
+		return self.starter_tree, self.existing_ids_file
+
 	def resolve_reference_id(self, cluster_rep=None, alignment_fasta=None):
 		if cluster_rep:
 			cluster_ids = self._read_ids_from_fasta(cluster_rep)
@@ -534,7 +545,9 @@ class UsherPlacement:
 
 		cluster_rep = None
 		alignment_fasta = self.padded_aln
-		if self.update_db:
+		if self.starter_tree or self.existing_ids_file:
+			tree_file, existing_ids_file = self.resolve_resume_assets()
+		elif self.update_db:
 			tree_file, existing_ids_file = self.prepare_update_assets()
 			alignment_fasta = self.build_update_alignment_input(tree_file)
 		else:
@@ -621,6 +634,8 @@ if __name__ == "__main__":
 	parser.add_argument("--mmseq_cluster_dir", default=None, help="MMseqs cluster directory for standard mode")
 	parser.add_argument("--iqtree_dir", default=None, help="IQ-TREE directory for standard mode")
 	parser.add_argument("--update_db", default=None, help="Existing update DB for update-mode tree and ID extraction")
+	parser.add_argument("--starter_tree", default=None, help="Existing tree to resume iterative placement from")
+	parser.add_argument("--existing_ids_file", default=None, help="Text file listing tip IDs already present in --starter_tree")
 	parser.add_argument("--threads", default=1, type=int, help="Thread count")
 	parser.add_argument("--test_mode", default="0", help="Whether test mode is enabled (1/0)")
 	parser.add_argument("--chunk_size", default=5000, type=int, help="Maximum sequences per iterative placement chunk when chunking is triggered")
@@ -633,6 +648,8 @@ if __name__ == "__main__":
 		mmseq_cluster_dir=args.mmseq_cluster_dir,
 		iqtree_dir=args.iqtree_dir,
 		update_db=args.update_db,
+		starter_tree=args.starter_tree,
+		existing_ids_file=args.existing_ids_file,
 		threads=args.threads,
 		test_mode=args.test_mode,
 		chunk_size=args.chunk_size,

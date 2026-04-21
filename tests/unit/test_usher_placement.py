@@ -538,6 +538,60 @@ def test_run_usher_writes_verbose_output_to_chunk_log(tmp_path: Path, monkeypatc
 	assert run_calls[1][1]["stderr"] == subprocess.STDOUT
 
 
+def test_run_resume_mode_uses_supplied_tree_and_existing_ids(tmp_path: Path, monkeypatch):
+	msa = tmp_path / "resume_alignment.fasta"
+	msa.write_text(
+		">REF1\nAAAA\n>PLACED1\nAAAT\n>Q1\nCCCC\n>Q2\nCCCC\n",
+		encoding="utf-8",
+	)
+	output_dir = tmp_path / "resume_out"
+	output_dir.mkdir(parents=True, exist_ok=True)
+	starter_tree = tmp_path / "resume_tree.nwk"
+	starter_tree.write_text("(REF1:0.1,PLACED1:0.2);\n", encoding="utf-8")
+	existing_ids = tmp_path / "resume_existing_ids.txt"
+	existing_ids.write_text("REF1\nPLACED1\n", encoding="utf-8")
+
+	processor = UsherPlacement(
+		padded_aln=str(msa),
+		output_dir=str(output_dir),
+		starter_tree=str(starter_tree),
+		existing_ids_file=str(existing_ids),
+	)
+
+	vcf_calls = []
+	def fake_build_vcf(ref_id, exclude_ids_file=None, alignment_fasta=None):
+		vcf_calls.append({
+			"alignment_ids": processor._read_ids_from_fasta(alignment_fasta),
+			"exclude_ids": Path(exclude_ids_file).read_text(encoding="utf-8").strip().splitlines(),
+		})
+		vcf_path = output_dir / "resume.vcf"
+		vcf_path.write_text("##fileformat=VCFv4.2\n", encoding="utf-8")
+		return str(vcf_path)
+	monkeypatch.setattr(processor, "build_vcf", fake_build_vcf)
+
+	def fake_run_usher(tree_file, vcf_path, chunk_output_dir):
+		assert tree_file == str(starter_tree)
+		Path(chunk_output_dir).mkdir(parents=True, exist_ok=True)
+		(Path(chunk_output_dir) / "uncondensed-final-tree.nh").write_text(
+			"(REF1:0.1,PLACED1:0.2,Q1:0.3);\n",
+			encoding="utf-8",
+		)
+		(Path(chunk_output_dir) / "final-tree.nh").write_text(
+			"(REF1:0.1,PLACED1:0.2,Q1:0.3);\n",
+			encoding="utf-8",
+		)
+		return str(Path(chunk_output_dir) / "uncondensed-final-tree.nh")
+	monkeypatch.setattr(processor, "run_usher", fake_run_usher)
+
+	processor.run()
+
+	assert len(vcf_calls) == 1
+	assert vcf_calls[0]["alignment_ids"] == ["REF1", "PLACED1", "Q1", "Q2"]
+	assert sorted(vcf_calls[0]["exclude_ids"]) == ["PLACED1", "Q2"]
+	tree_text = (output_dir / "uncondensed-final-tree.nh").read_text(encoding="utf-8")
+	assert "Q2:0.00000" in tree_text
+
+
 def test_run_non_update_mode_chunks_iteratively_for_large_alignment(tmp_path: Path, monkeypatch):
 	msa = tmp_path / "segment_1_dedup.fasta"
 	msa.write_text(
