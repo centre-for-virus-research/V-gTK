@@ -6,7 +6,7 @@ KJ439777	reference
 KJ439780	reference
 KY348757	reference
 MH921830	reference
-AF009606	master
+NC_004102	master
 AJ278830	reference
 EF407457	reference
 HQ850279	reference
