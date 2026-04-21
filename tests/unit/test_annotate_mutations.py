@@ -384,6 +384,25 @@ def test_annotate_mutations_can_fetch_genbank_gff_when_enabled(tmp_path, monkeyp
     assert mut['primary_accession'].tolist() == ['seq1']
 
 
+def test_parse_gff_text_to_feature_map_accepts_mature_protein_regions():
+    alias_lookup = {
+        'nonstructuralproteinns5a': 'NS5A',
+        'rnadependentrnapolymerasens5b': 'NS5B',
+    }
+    gff_text = (
+        "##gff-version 3\n"
+        "NC_004102.1\tRefSeq\tmature_protein_region_of_CDS\t6258\t7601\t.\t+\t.\tID=id-NS5A;product=nonstructural protein NS5A\n"
+        "NC_004102.1\tRefSeq\tmature_protein_region_of_CDS\t7602\t9374\t.\t+\t.\tID=id-NS5B;product=RNA-dependent RNA polymerase NS5B\n"
+    )
+
+    feature_map = AnnotateMutations.parse_gff_text_to_feature_map(gff_text, 'NC_004102', alias_lookup, 'genbank_gff')
+
+    assert feature_map['NS5A']['cds_start'] == 6258
+    assert feature_map['NS5A']['cds_end'] == 7601
+    assert feature_map['NS5B']['cds_start'] == 7602
+    assert feature_map['NS5B']['cds_end'] == 9374
+
+
 def test_annotate_mutations_crashes_when_reference_mapping_unavailable(tmp_path, capsys):
     db_path = tmp_path / "unmapped.db"
     catalog_path = tmp_path / "unmapped_catalog.tsv"

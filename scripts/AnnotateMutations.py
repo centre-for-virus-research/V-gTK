@@ -112,6 +112,7 @@ def feature_priority(feature_type, product_name):
         return 99
     priorities = {
         'mat_peptide': 0,
+        'mature_protein_region_of_CDS': 0,
         'gene': 1,
         'CDS': 2,
         'cds': 2,
@@ -168,7 +169,7 @@ def parse_gff_text_to_feature_map(gff_text, reference_accession, alias_lookup, s
         if len(parts) != 9:
             continue
         _, _, feature_type, start, end, _, _, _, attributes = parts
-        if feature_type not in {'mat_peptide', 'gene', 'CDS'}:
+        if feature_type not in {'mat_peptide', 'gene', 'CDS', 'mature_protein_region_of_CDS'}:
             continue
         parsed_attributes = parse_gff_attributes(attributes)
         raw_product = parsed_attributes.get('gene') or parsed_attributes.get('product') or parsed_attributes.get('Name') or parsed_attributes.get('ID')

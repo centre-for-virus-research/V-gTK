@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from CalcAlignmentCord import CalculateAlignmentCoordinates
+from GffToDictionary import GffDictionary
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -73,6 +74,26 @@ def test_get_products_for_range(tmp_path: Path):
     ]
     products = processor.get_products_for_range(cds_list, [4, 8])
     assert [p["product"] for p in products] == ["P1", "P2"]
+
+
+def test_gff_dictionary_prefers_mature_protein_regions_for_effective_cds(tmp_path: Path):
+    gff_path = tmp_path / "hcv.gff3"
+    gff_path.write_text(
+        "##gff-version 3\n"
+        "NC_004102.1\tRefSeq\tgene\t342\t9377\t.\t+\t.\tID=gene-HCVgp1;gene=POLY\n"
+        "NC_004102.1\tRefSeq\tCDS\t342\t9377\t.\t+\t0\tID=cds-NP_671491.1;product=polyprotein\n"
+        "NC_004102.1\tRefSeq\tmature_protein_region_of_CDS\t3420\t5312\t.\t+\t.\tID=id-NS3;product=protease/helicase protein NS3\n"
+        "NC_004102.1\tRefSeq\tmature_protein_region_of_CDS\t6258\t7601\t.\t+\t.\tID=id-NS5A;product=nonstructural protein NS5A\n"
+        "NC_004102.1\tRefSeq\tCDS\t342\t369\t.\t+\t0\tID=cds-NP_803170.1;product=protein F\n",
+        encoding="utf-8",
+    )
+
+    gff_dict = GffDictionary(str(gff_path)).gff_dict
+
+    assert [entry["product"] for entry in gff_dict["CDS"]] == [
+        "protease/helicase protein NS3",
+        "nonstructural protein NS5A",
+    ]
 
 
 def test_load_blast_hits(tmp_path: Path):
