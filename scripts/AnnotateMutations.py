@@ -60,11 +60,42 @@ def normalize_segment(value):
     return text
 
 
+def infer_compact_product_name(product_name):
+    text = str(product_name or '').strip()
+    if not text:
+        return ''
+
+    ns_match = re.search(r'\b(NS[2-5](?:A|B)?)\b', text, flags=re.IGNORECASE)
+    if ns_match:
+        return ns_match.group(1).upper()
+
+    envelope_match = re.search(r'\b(E[12])\b', text, flags=re.IGNORECASE)
+    if envelope_match:
+        return envelope_match.group(1).upper()
+
+    if re.search(r'\bp7\b', text, flags=re.IGNORECASE):
+        return 'p7'
+
+    if re.search(r'\bcore\b', text, flags=re.IGNORECASE):
+        return 'Core'
+
+    normalized = normalize_lookup_key(text)
+    if normalized in {'polyprotein', 'wholegenome'}:
+        return 'Whole genome'
+
+    return ''
+
+
 def canonicalize_product(product_name, alias_lookup):
     product_name = str(product_name or '').strip()
     if not product_name:
         return ''
-    return alias_lookup.get(normalize_lookup_key(product_name), product_name)
+
+    canonical = alias_lookup.get(normalize_lookup_key(product_name), product_name)
+    inferred = infer_compact_product_name(canonical)
+    if inferred:
+        return inferred
+    return canonical
 
 
 def load_gene_alias_lookup(conn):
@@ -200,7 +231,7 @@ def fetch_reference_gff_map(accession, alias_lookup):
     return parse_gff_text_to_feature_map(gff_text, accession, alias_lookup, 'genbank_gff')
 
 
-def load_reference_accessions(conn):
+def load_master_accessions(conn):
     try:
         meta = pd.read_sql_query('SELECT primary_accession, accession_type FROM meta_data', conn)
     except Exception:
@@ -209,7 +240,7 @@ def load_reference_accessions(conn):
     if not {'primary_accession', 'accession_type'}.issubset(meta.columns):
         return set()
 
-    mask = meta['accession_type'].fillna('').astype(str).str.strip().str.lower().isin({'master', 'reference'})
+    mask = meta['accession_type'].fillna('').astype(str).str.strip().str.lower() == 'master'
     return set(meta.loc[mask, 'primary_accession'].dropna().astype(str).str.strip())
 
 
@@ -241,7 +272,7 @@ def load_db_gff_feature_maps(conn, alias_lookup):
     table_names = pd.read_sql_query("SELECT name FROM sqlite_master WHERE type='table'", conn)['name'].tolist()
     candidate_tables = [name for name in ['gff_features', 'reference_gff_features', 'gff', 'reference_gff'] if name in table_names]
     feature_maps = {}
-    reference_accessions = load_reference_accessions(conn)
+    master_accessions = load_master_accessions(conn)
 
     for table_name in candidate_tables:
         df = pd.read_sql_query(f'SELECT * FROM {table_name}', conn)
@@ -254,6 +285,8 @@ def load_db_gff_feature_maps(conn, alias_lookup):
             for _, row in df.iterrows():
                 reference_accession = str(row.get('reference_accession', '') or '').strip()
                 if not reference_accession:
+                    continue
+                if master_accessions and reference_accession not in master_accessions:
                     continue
                 feature_type = str(row.get(feature_type_col, 'gene') or 'gene') if feature_type_col else 'gene'
                 merge_feature_entry(
@@ -272,6 +305,8 @@ def load_db_gff_feature_maps(conn, alias_lookup):
             for _, row in df.iterrows():
                 reference_accession = str(row.get('reference_accession', '') or '').strip()
                 if not reference_accession:
+                    continue
+                if master_accessions and reference_accession not in master_accessions:
                     continue
                 parsed = parse_gff_text_to_feature_map(row.get(text_col, ''), reference_accession, alias_lookup, f'db_table:{table_name}')
                 if not parsed:
@@ -297,10 +332,10 @@ def load_db_gff_feature_maps(conn, alias_lookup):
 
                 ref_candidate = str(row.get('reference_accession', '') or '').strip() if 'reference_accession' in columns else ''
                 master_candidate = str(row.get('master_ref_accession', '') or '').strip() if 'master_ref_accession' in columns else ''
-                is_known_reference = reference_accession in reference_accessions if reference_accessions else False
-                is_self_backed = reference_accession in {ref_candidate, master_candidate}
-
-                if not is_known_reference and not is_self_backed:
+                is_master = reference_accession in master_accessions if master_accessions else False
+                if not is_master:
+                    continue
+                if reference_accession not in {ref_candidate, master_candidate, reference_accession}:
                     continue
 
                 feature_type = str(row.get(feature_type_col, 'gene') or 'gene') if feature_type_col else 'gene'
@@ -523,9 +558,10 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
 
     for reference_id in by_reference:
         try:
+            reference_candidates = master_candidates if master_candidates else [reference_id] + catalog_reference_hints
             resolved_accession, feature_map, attempted, source = resolve_reference_feature_map(
-                reference_id,
-                catalog_reference_hints + master_candidates,
+                reference_candidates[0] if reference_candidates else reference_id,
+                reference_candidates[1:],
                 db_gff_maps,
                 alias_lookup,
                 allow_genbank_reference_gff,
@@ -647,6 +683,32 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
     return mutations_found, diagnostics, resolved_maps
 
 
+def build_catalog_reference_table(catalog):
+    preferred_columns = [
+        'mutation_id',
+        'protein_name',
+        'segment',
+        'aa_position',
+        'alt_residue',
+        'reference_accession',
+        'mutation_type',
+        'signature_id',
+        'signature_kind',
+        'combination_id',
+        'combination_size',
+        'resistance_category',
+        'drug',
+    ]
+    available_columns = [column for column in preferred_columns if column in catalog.columns]
+    if not available_columns:
+        return pd.DataFrame(columns=preferred_columns)
+
+    catalog_reference = catalog[available_columns].copy()
+    catalog_reference = catalog_reference.fillna('')
+    catalog_reference = catalog_reference.drop_duplicates().reset_index(drop=True)
+    return catalog_reference
+
+
 def write_mutation_tables(conn, catalog, mutations_found, virus):
     df_mut = pd.DataFrame(mutations_found)
     if not df_mut.empty:
@@ -655,6 +717,24 @@ def write_mutation_tables(conn, catalog, mutations_found, virus):
         )
 
     cursor = conn.cursor()
+
+    print('Writing mutation_catalog table...')
+    df_catalog = build_catalog_reference_table(catalog)
+    cursor.execute('DROP TABLE IF EXISTS mutation_catalog')
+    if not df_catalog.empty:
+        df_catalog.to_sql('mutation_catalog', conn, if_exists='replace', index=False)
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_mut_catalog_mutid ON mutation_catalog(mutation_id)')
+        if 'protein_name' in df_catalog.columns and 'segment' in df_catalog.columns:
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_mut_catalog_seg_prot ON mutation_catalog(segment, protein_name)')
+        if 'combination_id' in df_catalog.columns:
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_mut_catalog_comb ON mutation_catalog(combination_id)')
+    else:
+        cursor.execute(
+            'CREATE TABLE mutation_catalog ('
+            'mutation_id TEXT, protein_name TEXT, segment TEXT, aa_position TEXT, alt_residue TEXT, '
+            'reference_accession TEXT, mutation_type TEXT, signature_id TEXT, signature_kind TEXT, '
+            'combination_id TEXT, combination_size TEXT, resistance_category TEXT, drug TEXT)'
+        )
 
     print('Writing sequence_mutations table...')
     cursor.execute('DROP TABLE IF EXISTS sequence_mutations')

@@ -61,6 +61,7 @@ def test_annotate_mutations_db_creation(tmp_path):
     
     # 4. Verify outcomes
     conn = sqlite3.connect(str(db_path))
+    catalog_table = pd.read_sql_query("SELECT * FROM mutation_catalog ORDER BY mutation_id, drug", conn)
     mut = pd.read_sql_query("SELECT * FROM sequence_mutations", conn)
     
     # seq1 should have NS3:2I, NS3:3K, NS5A:1Y
@@ -88,6 +89,13 @@ def test_annotate_mutations_db_creation(tmp_path):
     s2_dr = dr[dr['primary_accession']=='seq2'].iloc[0]
     assert s2_dr['mutations_detected'] == 1
     assert s2_dr['combination_status'] == 'partial'
+
+    assert set(catalog_table.columns) >= {
+        'mutation_id', 'protein_name', 'segment', 'aa_position', 'alt_residue',
+        'reference_accession', 'mutation_type', 'signature_id', 'signature_kind',
+        'combination_id', 'combination_size', 'resistance_category', 'drug'
+    }
+    assert sorted(catalog_table['mutation_id'].tolist()) == ['NS3:2I', 'NS3:3K', 'NS5A:1Y']
     
     conn.close()
 
@@ -303,7 +311,7 @@ def test_annotate_mutations_can_build_reference_maps_from_features_table(tmp_pat
     catalog, invalid_positions = AnnotateMutations.prepare_catalog(catalog, alias_lookup)
 
     assert invalid_positions == 0
-    assert set(db_gff_maps) >= {'NC_004102', 'EU781827'}
+    assert set(db_gff_maps) == {'NC_004102'}
 
     mutations_found, diagnostics, resolved_maps = AnnotateMutations.annotate_from_reference_coordinates(
         catalog,
@@ -316,8 +324,54 @@ def test_annotate_mutations_can_build_reference_maps_from_features_table(tmp_pat
 
     assert sorted(m['mutation_id'] for m in mutations_found) == ['NS3:2I', 'NS5A:1Y']
     assert all(m['primary_accession'] == 'seq1' for m in mutations_found)
-    assert resolved_maps['EU781827']['resolved_accession'] == 'EU781827'
+    assert resolved_maps['EU781827']['resolved_accession'] == 'NC_004102'
     assert diagnostics['mutation_hits'] == 2
+
+
+def test_annotate_mutations_uses_descriptive_hcv_feature_products_without_gene_aliases(tmp_path):
+    db_path = tmp_path / "descriptive_hcv_features.db"
+    catalog_path = tmp_path / "descriptive_hcv_catalog.tsv"
+
+    catalog_data = [
+        ['protein_name', 'segment', 'aa_position', 'alt_residue', 'reference_accession', 'mutation_id', 'mutation_type', 'signature_id', 'signature_kind', 'combination_id', 'combination_size', 'resistance_category', 'drug'],
+        ['NS3', '1', '2', 'I', 'REF_MASTER_NC_004102', 'NS3:2I', 'snp', 'sig1', 'single', '', '', '', ''],
+        ['NS5A', '1', '1', 'Y', 'REF_MASTER_NC_004102', 'NS5A:1Y', 'snp', 'sig2', 'single', '', '', '', ''],
+        ['NS5B', '1', '1', 'F', 'REF_MASTER_NC_004102', 'NS5B:1F', 'snp', 'sig3', 'single', '', '', '', ''],
+    ]
+    with open(catalog_path, 'w') as f:
+        for row in catalog_data:
+            f.write('\t'.join(row) + '\n')
+
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE features (accession TEXT, product TEXT, segment TEXT, cds_start INTEGER, cds_end INTEGER)")
+    cursor.executemany("INSERT INTO features VALUES (?, ?, ?, ?, ?)", [
+        ('seq1', 'protease/helicase protein NS3', '1', 1, 6),
+        ('seq1', 'nonstructural protein NS5A', '1', 7, 9),
+        ('seq1', 'RNA-dependent RNA polymerase NS5B', '1', 10, 12),
+        ('seq2', 'protease/helicase protein NS3', '1', 1, 6),
+        ('seq2', 'nonstructural protein NS5A', '1', 7, 9),
+        ('seq2', 'RNA-dependent RNA polymerase NS5B', '1', 10, 12),
+    ])
+    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, alignment TEXT)")
+    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?)", [
+        ('seq1', 'ATAATCTACTTT'),
+        ('seq2', 'ATAATCGGGTTC'),
+    ])
+    conn.commit()
+    conn.close()
+
+    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--virus', '']
+    AnnotateMutations.main()
+
+    conn = sqlite3.connect(str(db_path))
+    catalog_table = pd.read_sql_query("SELECT * FROM mutation_catalog ORDER BY mutation_id", conn)
+    mut = pd.read_sql_query("SELECT * FROM sequence_mutations ORDER BY primary_accession, mutation_id", conn)
+    conn.close()
+
+    assert catalog_table['mutation_id'].tolist() == ['NS3:2I', 'NS5A:1Y', 'NS5B:1F']
+    assert mut['primary_accession'].tolist() == ['seq1', 'seq1', 'seq1', 'seq2', 'seq2']
+    assert mut['mutation_id'].tolist() == ['NS3:2I', 'NS5A:1Y', 'NS5B:1F', 'NS3:2I', 'NS5B:1F']
 
 
 def test_annotate_mutations_can_fetch_genbank_gff_when_enabled(tmp_path, monkeypatch):
