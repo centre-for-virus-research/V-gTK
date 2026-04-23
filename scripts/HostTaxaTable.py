@@ -1,4 +1,4 @@
-import os
+/home/u6dr/omaclean.u6dr/RABV-gTK/vgtk-init.nfimport os
 import csv
 import sys
 import argparse
@@ -34,7 +34,10 @@ class HostTaxaTable:
       if column not in reader.fieldnames:
         raise ValueError(f"Column '{column}' not found in TSV file")
       for row in reader:
-        val = row[column].strip()
+        raw_val = row.get(column)
+        if raw_val is None:
+          continue
+        val = raw_val.strip()
         if val and val.upper() != "NA":
           taxa_ids.append(int(val))
     if unique:
