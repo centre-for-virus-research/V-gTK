@@ -1,4 +1,4 @@
-/home/u6dr/omaclean.u6dr/RABV-gTK/vgtk-init.nfimport os
+import os
 import csv
 import sys
 import argparse
