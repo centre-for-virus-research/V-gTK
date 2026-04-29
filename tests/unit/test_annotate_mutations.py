@@ -9,6 +9,21 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 
 import AnnotateMutations
 
+
+def _mutation_ids_by_accession(summary_df):
+    result = {}
+    for _, row in summary_df.iterrows():
+        mutation_ids = [value for value in str(row['relevant_mutations_present'] or '').split(';') if value]
+        result[row['primary_accession']] = mutation_ids
+    return result
+
+
+def _completed_signatures_by_accession(completed_df):
+    result = {}
+    for primary_accession, group in completed_df.groupby('primary_accession', sort=False):
+        result[primary_accession] = set(group['signature_id'].tolist())
+    return result
+
 def test_translate_codon():
     assert AnnotateMutations.translate_codon('ATG') == 'M'
     assert AnnotateMutations.translate_codon('A-G') == 'X'
@@ -62,33 +77,24 @@ def test_annotate_mutations_db_creation(tmp_path):
     # 4. Verify outcomes
     conn = sqlite3.connect(str(db_path))
     catalog_table = pd.read_sql_query("SELECT * FROM mutation_catalog ORDER BY mutation_id, drug", conn)
-    mut = pd.read_sql_query("SELECT * FROM sequence_mutations", conn)
+    mutation_summary = pd.read_sql_query(
+        "SELECT * FROM sequence_relevant_mutation_summary ORDER BY primary_accession",
+        conn,
+    )
+    completed = pd.read_sql_query(
+        "SELECT * FROM completed_signatures_only ORDER BY primary_accession, signature_id",
+        conn,
+    )
     
-    # seq1 should have NS3:2I, NS3:3K, NS5A:1Y
-    seq1_muts = set(mut[mut['primary_accession']=='seq1']['mutation_id'])
-    assert 'NS3:2I' in seq1_muts
-    assert 'NS3:3K' in seq1_muts
-    assert 'NS5A:1Y' in seq1_muts
-    
-    # seq2 should have NS3:3K
-    seq2_muts = list(mut[mut['primary_accession']=='seq2']['mutation_id'])
-    assert ['NS3:3K'] == seq2_muts
-    assert mut[(mut['primary_accession']=='seq2') & (mut['mutation_id']=='NS3:3K')]['combination_id'].iloc[0] == 'C1'
-    
-    # check drug resistance logic
-    dr = pd.read_sql_query("SELECT * FROM sequence_drug_resistance", conn)
-    assert len(dr) == 2
-    
-    # seq1 has both 2I and 3K, so C1 is complete (req=2)
-    s1_dr = dr[dr['primary_accession']=='seq1'].iloc[0]
-    assert s1_dr['combination_id'] == 'C1'
-    assert s1_dr['mutations_detected'] == 2
-    assert s1_dr['combination_status'] == 'complete'
-    
-    # seq2 only has 3K, so C1 is partial
-    s2_dr = dr[dr['primary_accession']=='seq2'].iloc[0]
-    assert s2_dr['mutations_detected'] == 1
-    assert s2_dr['combination_status'] == 'partial'
+    mutation_ids = _mutation_ids_by_accession(mutation_summary)
+    assert mutation_ids['seq1'] == ['NS3:2I', 'NS3:3K', 'NS5A:1Y']
+    assert mutation_ids['seq2'] == ['NS3:3K']
+    assert mutation_summary.set_index('primary_accession').loc['seq1', 'total_relevant_mutation_count'] == 3
+    assert mutation_summary.set_index('primary_accession').loc['seq2', 'total_relevant_mutation_count'] == 1
+
+    completed_by_accession = _completed_signatures_by_accession(completed)
+    assert completed_by_accession['seq1'] == {'sig2', 'sig3'}
+    assert completed_by_accession['seq2'] == {'sig2'}
 
     assert set(catalog_table.columns) >= {
         'mutation_id', 'protein_name', 'segment', 'aa_position', 'alt_residue',
@@ -182,15 +188,15 @@ def test_annotation_with_reference_indels(tmp_path):
     
     # 3. Verify
     conn = sqlite3.connect(str(db_path))
-    mut = pd.read_sql_query("SELECT * FROM sequence_mutations", conn)
+    mutation_summary = pd.read_sql_query("SELECT * FROM sequence_relevant_mutation_summary", conn)
+    completed = pd.read_sql_query("SELECT * FROM completed_signatures_only", conn)
     
-    # REF_MASTER should have NO mutations
-    ref_muts = mut[mut['primary_accession']=='REF_MASTER']
-    assert len(ref_muts) == 0, "Reference should not trigger any mutation hits"
-    
-    seq_muts = set(mut[mut['primary_accession']=='mutated_seq']['mutation_id'])
-    assert 'NS3:2V' in seq_muts, "Failed to detect mutation at position 2"
-    assert 'NS3:4Q' in seq_muts, "Failed to detect mutation at position 4 after an indel"
+    mutation_ids = _mutation_ids_by_accession(mutation_summary)
+    assert 'REF_MASTER' not in mutation_ids, "Reference should not trigger any mutation hits"
+    assert mutation_ids['mutated_seq'] == ['NS3:2V', 'NS3:4Q']
+
+    completed_by_accession = _completed_signatures_by_accession(completed)
+    assert completed_by_accession['mutated_seq'] == {'sig1', 'sig2'}
     
     conn.close()
 
@@ -242,11 +248,26 @@ def test_annotate_mutations_falls_back_to_db_gff_coordinate_mapping(tmp_path):
     AnnotateMutations.main()
 
     conn = sqlite3.connect(str(db_path))
-    mut = pd.read_sql_query("SELECT * FROM sequence_mutations ORDER BY primary_accession, mutation_id", conn)
+    mutation_summary = pd.read_sql_query(
+        "SELECT * FROM sequence_relevant_mutation_summary ORDER BY primary_accession",
+        conn,
+    )
+    completed = pd.read_sql_query(
+        "SELECT * FROM completed_signatures_only ORDER BY primary_accession, signature_id",
+        conn,
+    )
     conn.close()
 
-    assert mut['mutation_id'].tolist() == ['NS3:2I', 'NS5A:1Y', 'NS5A:1Y']
-    assert mut['primary_accession'].tolist() == ['seq1', 'seq1', 'seq2']
+    mutation_ids = _mutation_ids_by_accession(mutation_summary)
+    assert mutation_ids == {
+        'seq1': ['NS3:2I', 'NS5A:1Y'],
+        'seq2': ['NS5A:1Y'],
+    }
+    completed_by_accession = _completed_signatures_by_accession(completed)
+    assert completed_by_accession == {
+        'seq1': {'sig1', 'sig2'},
+        'seq2': {'sig2'},
+    }
 
 
 def test_annotate_mutations_can_build_reference_maps_from_features_table(tmp_path):
@@ -366,12 +387,27 @@ def test_annotate_mutations_uses_descriptive_hcv_feature_products_without_gene_a
 
     conn = sqlite3.connect(str(db_path))
     catalog_table = pd.read_sql_query("SELECT * FROM mutation_catalog ORDER BY mutation_id", conn)
-    mut = pd.read_sql_query("SELECT * FROM sequence_mutations ORDER BY primary_accession, mutation_id", conn)
+    mutation_summary = pd.read_sql_query(
+        "SELECT * FROM sequence_relevant_mutation_summary ORDER BY primary_accession",
+        conn,
+    )
+    completed = pd.read_sql_query(
+        "SELECT * FROM completed_signatures_only ORDER BY primary_accession, signature_id",
+        conn,
+    )
     conn.close()
 
     assert catalog_table['mutation_id'].tolist() == ['NS3:2I', 'NS5A:1Y', 'NS5B:1F']
-    assert mut['primary_accession'].tolist() == ['seq1', 'seq1', 'seq1', 'seq2', 'seq2']
-    assert mut['mutation_id'].tolist() == ['NS3:2I', 'NS5A:1Y', 'NS5B:1F', 'NS3:2I', 'NS5B:1F']
+    mutation_ids = _mutation_ids_by_accession(mutation_summary)
+    assert mutation_ids == {
+        'seq1': ['NS3:2I', 'NS5A:1Y', 'NS5B:1F'],
+        'seq2': ['NS3:2I', 'NS5B:1F'],
+    }
+    completed_by_accession = _completed_signatures_by_accession(completed)
+    assert completed_by_accession == {
+        'seq1': {'sig1', 'sig2', 'sig3'},
+        'seq2': {'sig1', 'sig3'},
+    }
 
 
 def test_annotate_mutations_can_fetch_genbank_gff_when_enabled(tmp_path, monkeypatch):
@@ -431,11 +467,14 @@ def test_annotate_mutations_can_fetch_genbank_gff_when_enabled(tmp_path, monkeyp
     AnnotateMutations.main()
 
     conn = sqlite3.connect(str(db_path))
-    mut = pd.read_sql_query("SELECT * FROM sequence_mutations", conn)
+    mutation_summary = pd.read_sql_query("SELECT * FROM sequence_relevant_mutation_summary", conn)
+    completed = pd.read_sql_query("SELECT * FROM completed_signatures_only", conn)
     conn.close()
 
-    assert mut['mutation_id'].tolist() == ['NS5A:1Y']
-    assert mut['primary_accession'].tolist() == ['seq1']
+    mutation_ids = _mutation_ids_by_accession(mutation_summary)
+    assert mutation_ids == {'seq1': ['NS5A:1Y']}
+    completed_by_accession = _completed_signatures_by_accession(completed)
+    assert completed_by_accession == {'seq1': {'sig1'}}
 
 
 def test_parse_gff_text_to_feature_map_accepts_mature_protein_regions():

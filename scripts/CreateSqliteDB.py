@@ -39,6 +39,7 @@ class CreateSqliteDB:
 		filtered_ids_file=None,
 		filtered_details_file=None,
 		tree_manifest=None,
+		reference_tsv=None,
 		update=False,
 		update_db=None,
 		batch_id=None,
@@ -67,6 +68,7 @@ class CreateSqliteDB:
 		self.filtered_ids_file = filtered_ids_file
 		self.filtered_details_file = filtered_details_file
 		self.tree_manifest = tree_manifest
+		self.reference_tsv = reference_tsv
 		self.update = bool(update)
 		self.update_db = update_db
 		self.batch_id = batch_id or datetime.now().strftime("batch_%Y%m%d_%H%M%S")
@@ -221,6 +223,65 @@ class CreateSqliteDB:
 			df_meta_data[col_name] = df_meta_data["primary_accession"].map(cluster_map)
 		return df_meta_data
 
+	@staticmethod
+	def _normalize_reference_field(value):
+		text = "" if value is None else str(value).strip()
+		if text.lower() in {"", "na", "n/a", "nan", "none", "null"}:
+			return ""
+		return text
+
+	def _load_reference_lookup(self):
+		if not self.reference_tsv:
+			return {}
+		try:
+			reference_df = pd.read_csv(self.reference_tsv, sep="\t", dtype=str).fillna("")
+		except FileNotFoundError:
+			return {}
+		required_cols = ["primary_accession", "genotype"]
+		if any(col not in reference_df.columns for col in required_cols):
+			return {}
+		selected_cols = required_cols + (["subtype"] if "subtype" in reference_df.columns else [])
+		reference_df = reference_df[selected_cols].copy()
+		if "subtype" not in reference_df.columns:
+			reference_df["subtype"] = ""
+		for col in ["primary_accession", "genotype", "subtype"]:
+			reference_df[col] = reference_df[col].map(self._normalize_reference_field)
+		reference_df = reference_df[reference_df["primary_accession"] != ""]
+		reference_df = reference_df.drop_duplicates(subset=["primary_accession"], keep="first")
+		return {
+			row["primary_accession"]: {
+				"nearest_reference_genotype": row["genotype"],
+				"nearest_reference_subtype": row["subtype"],
+			}
+			for _, row in reference_df.iterrows()
+		}
+
+	def _add_reference_columns(self, df_meta_data, df_aln):
+		lookup = self._load_reference_lookup()
+		if not lookup or "primary_accession" not in df_meta_data.columns:
+			return df_meta_data
+
+		meta_accessions = df_meta_data["primary_accession"].fillna("").astype(str).str.strip()
+		direct_genotype = meta_accessions.map(lambda accession: lookup.get(accession, {}).get("nearest_reference_genotype", ""))
+		direct_subtype = meta_accessions.map(lambda accession: lookup.get(accession, {}).get("nearest_reference_subtype", ""))
+
+		nearest_genotype = pd.Series("", index=df_meta_data.index, dtype=str)
+		nearest_subtype = pd.Series("", index=df_meta_data.index, dtype=str)
+		if df_aln is not None and not df_aln.empty and {"primary_accession", "alignment_name"}.issubset(df_aln.columns):
+			aln_map_df = df_aln[["primary_accession", "alignment_name"]].copy()
+			aln_map_df["primary_accession"] = aln_map_df["primary_accession"].fillna("").astype(str).str.strip()
+			aln_map_df["alignment_name"] = aln_map_df["alignment_name"].fillna("").astype(str).str.strip()
+			aln_map_df = aln_map_df[(aln_map_df["primary_accession"] != "") & (aln_map_df["alignment_name"] != "")]
+			aln_map_df = aln_map_df.drop_duplicates(subset=["primary_accession"], keep="first")
+			nearest_ref_map = dict(zip(aln_map_df["primary_accession"], aln_map_df["alignment_name"]))
+			nearest_ref_accession = meta_accessions.map(nearest_ref_map)
+			nearest_genotype = nearest_ref_accession.map(lambda accession: lookup.get(accession, {}).get("nearest_reference_genotype", "") if accession else "")
+			nearest_subtype = nearest_ref_accession.map(lambda accession: lookup.get(accession, {}).get("nearest_reference_subtype", "") if accession else "")
+
+		df_meta_data["nearest_reference_genotype"] = nearest_genotype.where(direct_genotype == "", direct_genotype)
+		df_meta_data["nearest_reference_subtype"] = nearest_subtype.where(direct_subtype == "", direct_subtype)
+		return df_meta_data
+
 	def load_fasta(self):
 		fasta_data = []
 		for record in SeqIO.parse(self.fasta_sequence_file, "fasta"):
@@ -329,6 +390,14 @@ class CreateSqliteDB:
 
 		return df[existing_cols]
 
+	def _ensure_update_columns(self, conn, table, df):
+		if not self.update or not self._table_exists(conn, table):
+			return
+		existing_cols = self._table_columns(conn, table)
+		for col in df.columns:
+			if col not in existing_cols:
+				conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+
 	def _resolve_key_cols_for_existing_schema(self, conn, table, key_cols, incoming_cols):
 		existing_cols = set(self._table_columns(conn, table))
 		if not existing_cols:
@@ -422,6 +491,7 @@ class CreateSqliteDB:
 			return len(df)
 
 		if self.update and self._table_exists(conn, table):
+			self._ensure_update_columns(conn, table, df)
 			df = self._align_df_to_existing_schema(conn, table, df)
 			key_cols = self._resolve_key_cols_for_existing_schema(conn, table, key_cols, set(df.columns))
 
@@ -560,7 +630,11 @@ class CreateSqliteDB:
 			if retained_refs:
 				print(f"[CreateSqliteDB] Retained {retained_refs} reference/master rows despite exclusion flags")
 
+		df_aln = self._read_tsv_required(self.pad_aln, [], "pad_aln")
+		df_aln = self._normalize_alignment_columns(df_aln, "pad_aln")
+
 		df_meta_data = self._add_cluster_column(df_meta_data)
+		df_meta_data = self._add_reference_columns(df_meta_data, df_aln)
 		valid_accessions = set(df_meta_data["primary_accession"].dropna().astype(str).str.strip()) if "primary_accession" in df_meta_data.columns else set()
 
 		df_features = self._read_tsv_required(self.features, [], "features")
@@ -568,9 +642,6 @@ class CreateSqliteDB:
 			df_features = df_features[df_features["accession"].astype(str).str.strip().isin(valid_accessions)]
 		elif valid_accessions and "primary_accession" in df_features.columns:
 			df_features = df_features[df_features["primary_accession"].astype(str).str.strip().isin(valid_accessions)]
-
-		df_aln = self._read_tsv_required(self.pad_aln, [], "pad_aln")
-		df_aln = self._normalize_alignment_columns(df_aln, "pad_aln")
 		if valid_accessions and "sequence_id" in df_aln.columns:
 			df_aln = df_aln[df_aln["sequence_id"].astype(str).str.strip().isin(valid_accessions)]
 		elif valid_accessions and "primary_accession" in df_aln.columns:
@@ -759,6 +830,7 @@ def process(args):
 		args.filtered_ids,
 		args.filtered_details,
 		args.tree_manifest,
+		args.reference_tsv,
 		update=args.update,
 		update_db=args.update_db,
 		batch_id=args.batch_id,
@@ -795,6 +867,7 @@ if __name__ == "__main__":
 	parser.add_argument('--update', action='store_true', help='Append/update into an existing DB instead of replacing tables')
 	parser.add_argument('--update_db', default=None, help='Path to existing DB file for update mode')
 	parser.add_argument('--batch_id', default=None, help='Optional update batch identifier for audit logging')
+	parser.add_argument('--reference_tsv', help='Optional reference TSV with columns: primary_accession, status,segment,genotype,subtype, to help resolve segment info for tree records', default=None)
 	args = parser.parse_args()
 	if args.update_db:
 		args.update_db = normpath(args.update_db)

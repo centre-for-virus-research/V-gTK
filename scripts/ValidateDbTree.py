@@ -33,6 +33,8 @@ HOST_TAXA_META_COLUMNS = ["host_taxa_id", "taxonomy_id", "host_tax_id"]
 HOST_TAXA_TABLE_COLUMNS = ["taxa_id", "taxonomy_id", "host_taxa_id", "tax_id", "id"]
 MUTATION_REQUIRED_COLUMNS = ["primary_accession", "mutation_id", "protein_name", "aa_position", "alt_residue"]
 DRUG_RESISTANCE_REQUIRED_COLUMNS = ["primary_accession", "combination_id", "combination_status", "mutations_detected", "mutations_required"]
+COMPACT_MUTATION_SUMMARY_COLUMNS = ["primary_accession", "relevant_mutations_present", "total_relevant_mutation_count"]
+COMPLETED_SIGNATURE_COLUMNS = ["primary_accession", "signature_id", "signature_kind"]
 
 
 def get_table_columns(conn, table_name):
@@ -312,7 +314,10 @@ def result_failed(result):
 def validate_mutation_tables(conn, expected_accessions):
     results = []
 
-    if not table_exists(conn, "sequence_mutations") and not table_exists(conn, "sequence_drug_resistance"):
+    has_legacy_mutation_tables = table_exists(conn, "sequence_mutations") or table_exists(conn, "sequence_drug_resistance")
+    has_compact_mutation_tables = table_exists(conn, "sequence_relevant_mutation_summary") or table_exists(conn, "completed_signatures_only")
+
+    if not has_legacy_mutation_tables and not has_compact_mutation_tables:
         return [
             {
                 "title": "mutation tables",
@@ -321,6 +326,138 @@ def validate_mutation_tables(conn, expected_accessions):
                 "reason": "No mutation tables present in DB.",
             }
         ]
+
+    if table_exists(conn, "sequence_relevant_mutation_summary"):
+        summary_cols = get_table_columns(conn, "sequence_relevant_mutation_summary")
+        missing_cols = [col for col in COMPACT_MUTATION_SUMMARY_COLUMNS if col not in summary_cols]
+        if missing_cols:
+            results.append(
+                {
+                    "title": "sequence_relevant_mutation_summary schema",
+                    "ok": False,
+                    "error": f"Missing required columns: {missing_cols}. Present columns: {summary_cols}",
+                }
+            )
+        else:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM sequence_relevant_mutation_summary
+                WHERE primary_accession IS NULL OR TRIM(CAST(primary_accession AS TEXT)) = ''
+                   OR relevant_mutations_present IS NULL OR TRIM(CAST(relevant_mutations_present AS TEXT)) = ''
+                   OR total_relevant_mutation_count IS NULL
+                """
+            )
+            blank_required = int(cursor.fetchone()[0])
+
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM (
+                    SELECT primary_accession, COUNT(*) AS c
+                    FROM sequence_relevant_mutation_summary
+                    GROUP BY 1
+                    HAVING c > 1
+                )
+                """
+            )
+            duplicate_rows = int(cursor.fetchone()[0])
+
+            observed_accessions = fetch_distinct_values(conn, "sequence_relevant_mutation_summary", "primary_accession")
+            orphan_accessions = sorted(observed_accessions - expected_accessions)
+
+            cursor.execute(
+                """
+                SELECT primary_accession, relevant_mutations_present, total_relevant_mutation_count
+                FROM sequence_relevant_mutation_summary
+                """
+            )
+            count_mismatches = 0
+            for primary_accession, mutation_list, total_count in cursor.fetchall():
+                mutation_ids = [value for value in str(mutation_list or '').split(';') if value]
+                try:
+                    parsed_total = int(total_count)
+                except (TypeError, ValueError):
+                    count_mismatches += 1
+                    continue
+                if parsed_total != len(mutation_ids) or parsed_total < 1:
+                    count_mismatches += 1
+
+            results.append(
+                {
+                    "title": "sequence_relevant_mutation_summary integrity",
+                    "ok": blank_required == 0 and duplicate_rows == 0 and len(orphan_accessions) == 0 and count_mismatches == 0,
+                    "table": "sequence_relevant_mutation_summary",
+                    "blank_required_rows": blank_required,
+                    "duplicate_keys": duplicate_rows,
+                    "orphan_accessions": orphan_accessions,
+                    "count_mismatches": count_mismatches,
+                    "observed_accessions": len(observed_accessions),
+                }
+            )
+
+    if table_exists(conn, "completed_signatures_only"):
+        completed_cols = get_table_columns(conn, "completed_signatures_only")
+        missing_cols = [col for col in COMPLETED_SIGNATURE_COLUMNS if col not in completed_cols]
+        if missing_cols:
+            results.append(
+                {
+                    "title": "completed_signatures_only schema",
+                    "ok": False,
+                    "error": f"Missing required columns: {missing_cols}. Present columns: {completed_cols}",
+                }
+            )
+        else:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM completed_signatures_only
+                WHERE primary_accession IS NULL OR TRIM(CAST(primary_accession AS TEXT)) = ''
+                   OR signature_id IS NULL OR TRIM(CAST(signature_id AS TEXT)) = ''
+                   OR signature_kind IS NULL OR TRIM(CAST(signature_kind AS TEXT)) = ''
+                """
+            )
+            blank_required = int(cursor.fetchone()[0])
+
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM (
+                    SELECT primary_accession, signature_id, COUNT(*) AS c
+                    FROM completed_signatures_only
+                    GROUP BY 1,2
+                    HAVING c > 1
+                )
+                """
+            )
+            duplicate_rows = int(cursor.fetchone()[0])
+
+            observed_accessions = fetch_distinct_values(conn, "completed_signatures_only", "primary_accession")
+            orphan_accessions = sorted(observed_accessions - expected_accessions)
+
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM completed_signatures_only
+                WHERE signature_kind NOT IN ('single', 'combination')
+                """
+            )
+            invalid_signature_kinds = int(cursor.fetchone()[0])
+
+            results.append(
+                {
+                    "title": "completed_signatures_only integrity",
+                    "ok": blank_required == 0 and duplicate_rows == 0 and len(orphan_accessions) == 0 and invalid_signature_kinds == 0,
+                    "table": "completed_signatures_only",
+                    "blank_required_rows": blank_required,
+                    "duplicate_keys": duplicate_rows,
+                    "orphan_accessions": orphan_accessions,
+                    "invalid_signature_kinds": invalid_signature_kinds,
+                    "observed_accessions": len(observed_accessions),
+                }
+            )
 
     if table_exists(conn, "sequence_mutations"):
         mut_cols = get_table_columns(conn, "sequence_mutations")
@@ -395,7 +532,7 @@ def validate_mutation_tables(conn, expected_accessions):
                     "observed_accessions": len(observed_accessions),
                 }
             )
-    else:
+    elif table_exists(conn, "sequence_drug_resistance"):
         results.append(
             {
                 "title": "sequence_mutations table",
@@ -910,7 +1047,7 @@ def main(argv=None):
                         seg_mismatch_count = cursor.fetchone()[0]
                         report.write(f"- feature_segment_mismatch: {seg_mismatch_count}\n")
 
-            if table_exists(conn, "sequence_mutations"):
+            if mutation_integrity_results:
                 report.write("\nMutation integrity checks:\n")
                 for result in mutation_integrity_results:
                     report.write(format_mutation_integrity_result(result))

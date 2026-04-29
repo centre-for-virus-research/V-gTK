@@ -942,6 +942,14 @@ process CREATE_SQLITE_DB {
     if [ -f "!{filtered_tsv}" ]; then
         FILTERED_DETAILS_ARG="-fd !{filtered_tsv}"
     fi
+    REFERENCE_ARG=""
+    if [ "!{params.ref_list}" != "null" ] && [ -n "!{params.ref_list}" ]; then
+        if [ ! -f "!{params.ref_list}" ]; then
+            echo "[error] reference TSV not found: !{params.ref_list}" >&2
+            exit 1
+        fi
+        REFERENCE_ARG="--reference_tsv !{params.ref_list}"
+    fi
 
     UPDATE_ARGS=""
     if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
@@ -959,8 +967,7 @@ process CREATE_SQLITE_DB {
     -mir !{projectDir}/assets/m49_intermediate_region.csv \
     -mr !{projectDir}/assets/m49_region.csv \
     -msr !{projectDir}/assets/m49_sub_region.csv \
-    -d !{params.db_name} -b . -o . ${IQTREE_ARG} ${USHER_ARG} ${CLUSTER_ARG} ${FILTERED_ARG} ${FILTERED_DETAILS_ARG} ${TREE_MANIFEST_ARG} ${UPDATE_ARGS} | tee db_summary.txt
-
+    -d !{params.db_name} -b . -o . ${IQTREE_ARG} ${USHER_ARG} ${CLUSTER_ARG} ${FILTERED_ARG} ${FILTERED_DETAILS_ARG} ${TREE_MANIFEST_ARG} ${REFERENCE_ARG} ${UPDATE_ARGS} | tee db_summary.txt
     if [ "!{params.mutation_catalog}" != "null" ] && [ -n "!{params.mutation_catalog}" ]; then
         if [ ! -f "!{params.mutation_catalog}" ]; then
             echo "[error] mutation catalog not found: !{params.mutation_catalog}" >&2

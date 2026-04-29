@@ -71,6 +71,75 @@ def _add_mutation_tables(db_path: Path):
         conn.close()
 
 
+def _add_compact_mutation_tables(db_path: Path):
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE mutation_catalog (
+                mutation_id TEXT,
+                protein_name TEXT,
+                segment TEXT,
+                aa_position TEXT,
+                alt_residue TEXT,
+                reference_accession TEXT,
+                mutation_type TEXT,
+                signature_id TEXT,
+                signature_kind TEXT,
+                combination_id TEXT,
+                combination_size TEXT,
+                resistance_category TEXT,
+                drug TEXT
+            )
+            """
+        )
+        cur.executemany(
+            "INSERT INTO mutation_catalog VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("NS3:107I", "NS3", "1", "107", "I", "REF1", "snp", "sig_ns3_107i", "single", "", "", "", ""),
+                ("comboA_part1", "NS3", "1", "107", "I", "REF1", "snp", "comboA_sig", "combination", "comboA", "2", "III", "drugA"),
+                ("comboA_part2", "NS3", "1", "155", "K", "REF1", "snp", "comboA_sig", "combination", "comboA", "2", "III", "drugA"),
+            ],
+        )
+        cur.execute(
+            """
+            CREATE TABLE sequence_relevant_mutation_summary (
+                primary_accession TEXT,
+                relevant_mutations_present TEXT,
+                total_relevant_mutation_count INTEGER
+            )
+            """
+        )
+        cur.executemany(
+            "INSERT INTO sequence_relevant_mutation_summary VALUES (?, ?, ?)",
+            [
+                ("REF1", "NS3:107I;comboA_part1;comboA_part2", 3),
+                ("Q_OLD", "NS3:107I", 1),
+            ],
+        )
+        cur.execute(
+            """
+            CREATE TABLE completed_signatures_only (
+                primary_accession TEXT,
+                signature_id TEXT,
+                signature_kind TEXT
+            )
+            """
+        )
+        cur.executemany(
+            "INSERT INTO completed_signatures_only VALUES (?, ?, ?)",
+            [
+                ("REF1", "sig_ns3_107i", "single"),
+                ("REF1", "comboA_sig", "combination"),
+                ("Q_OLD", "sig_ns3_107i", "single"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _create_segmented_subsample_db(db_path: Path):
     conn = sqlite3.connect(str(db_path))
     try:
@@ -167,6 +236,33 @@ def test_validate_db_tree_update_integrity_passes_on_seed_db(tmp_path: Path, bas
     assert "last_batch_id:" in report
     assert "[sequence_mutations integrity]" in report
     assert "[sequence_drug_resistance integrity]" in report
+
+
+def test_validate_db_tree_update_integrity_passes_with_compact_mutation_tables(tmp_path: Path, basic_update_db: Path):
+    _add_required_alignment_tables(basic_update_db)
+    _add_compact_mutation_tables(basic_update_db)
+    outdir = tmp_path / "out"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--db",
+            str(basic_update_db),
+            "--outdir",
+            str(outdir),
+            "--check-update-integrity",
+            "--expect-segment-trees",
+            "--test-mode",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0
+    report = (outdir / "db_tree_validation.txt").read_text(encoding="utf-8")
+    assert "[sequence_relevant_mutation_summary integrity]" in report
+    assert "[completed_signatures_only integrity]" in report
 
 
 def test_validate_db_tree_fails_when_features_do_not_match_expected_accessions(tmp_path: Path, basic_update_db: Path):

@@ -9,6 +9,7 @@ import sys
 from collections import Counter
 
 from Bio import Entrez, SeqIO
+from ExploreMutationStorageLayouts import build_completed_signatures_only, build_sequence_relevant_mutation_summary
 
 # Standard genetic code dictionary
 CODON_TABLE = {
@@ -715,6 +716,7 @@ def write_mutation_tables(conn, catalog, mutations_found, virus):
         df_mut = df_mut.drop_duplicates(
             subset=['primary_accession', 'mutation_id', 'protein_name', 'segment', 'aa_position', 'alt_residue', 'combination_id']
         )
+        df_mut = df_mut.fillna('')
 
     cursor = conn.cursor()
 
@@ -736,60 +738,27 @@ def write_mutation_tables(conn, catalog, mutations_found, virus):
             'combination_id TEXT, combination_size TEXT, resistance_category TEXT, drug TEXT)'
         )
 
-    print('Writing sequence_mutations table...')
+    print('Writing compact mutation summary tables...')
+    df_catalog_for_layouts = catalog.fillna('').copy()
+    df_relevant_summary = build_sequence_relevant_mutation_summary(df_mut)
+    df_completed_signatures = build_completed_signatures_only(df_mut, df_catalog_for_layouts)
+
     cursor.execute('DROP TABLE IF EXISTS sequence_mutations')
-    if not df_mut.empty:
-        df_mut.to_sql('sequence_mutations', conn, if_exists='replace', index=False)
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_seq_mut_acc_mutid ON sequence_mutations(primary_accession, mutation_id)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_seq_mut_seg_prot ON sequence_mutations(segment, protein_name)')
+    cursor.execute('DROP TABLE IF EXISTS sequence_drug_resistance')
+
+    cursor.execute('DROP TABLE IF EXISTS sequence_relevant_mutation_summary')
+    if not df_relevant_summary.empty:
+        df_relevant_summary.to_sql('sequence_relevant_mutation_summary', conn, if_exists='replace', index=False)
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_seq_rel_mut_acc ON sequence_relevant_mutation_summary(primary_accession)')
     else:
-        cursor.execute('CREATE TABLE sequence_mutations (primary_accession TEXT, mutation_id TEXT, protein_name TEXT, segment TEXT, aa_position INTEGER, alt_residue TEXT, combination_id TEXT)')
+        cursor.execute('CREATE TABLE sequence_relevant_mutation_summary (primary_accession TEXT, relevant_mutations_present TEXT, total_relevant_mutation_count INTEGER)')
 
-    if virus.upper() == 'HCV' and 'combination_id' in catalog.columns:
-        print('Evaluating HCV combination logics...')
-        comb_found = []
-        if not df_mut.empty:
-            comb_catalog = catalog[catalog['signature_kind'] == 'combination'].dropna(subset=['combination_id'])
-            comb_req = {}
-            for _, row in comb_catalog.iterrows():
-                cid = row['combination_id']
-                if pd.notna(cid) and str(cid).strip() != '':
-                    comb_req[cid] = {
-                        'size': int(float(row['combination_size'])) if pd.notna(row['combination_size']) and str(row['combination_size']).strip() != '' else 1,
-                        'drug': row.get('drug', ''),
-                        'resistance_category': row.get('resistance_category', ''),
-                    }
-
-            if comb_req:
-                df_comb = df_mut[df_mut['combination_id'] != '']
-                if not df_comb.empty:
-                    grouped = df_comb.groupby(['primary_accession', 'combination_id']).size().reset_index(name='count')
-                    for _, row in grouped.iterrows():
-                        acc = row['primary_accession']
-                        cid = row['combination_id']
-                        count = row['count']
-
-                        if cid in comb_req:
-                            req_size = comb_req[cid]['size']
-                            status = 'complete' if count >= req_size else 'partial'
-
-                            comb_found.append({
-                                'primary_accession': acc,
-                                'combination_id': cid,
-                                'combination_status': status,
-                                'mutations_detected': count,
-                                'mutations_required': req_size,
-                                'resistance_category': comb_req[cid]['resistance_category'],
-                                'drug': comb_req[cid]['drug'],
-                            })
-
-        df_drug = pd.DataFrame(comb_found)
-        cursor.execute('DROP TABLE IF EXISTS sequence_drug_resistance')
-        if not df_drug.empty:
-            df_drug.to_sql('sequence_drug_resistance', conn, if_exists='replace', index=False)
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_seq_drug_acc_comb ON sequence_drug_resistance(primary_accession, combination_id)')
-        else:
-            cursor.execute('CREATE TABLE sequence_drug_resistance (primary_accession TEXT, combination_id TEXT, combination_status TEXT, mutations_detected INTEGER, mutations_required INTEGER, resistance_category TEXT, drug TEXT)')
+    cursor.execute('DROP TABLE IF EXISTS completed_signatures_only')
+    if not df_completed_signatures.empty:
+        df_completed_signatures.to_sql('completed_signatures_only', conn, if_exists='replace', index=False)
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_completed_sig_acc_sig ON completed_signatures_only(primary_accession, signature_id)')
+    else:
+        cursor.execute('CREATE TABLE completed_signatures_only (primary_accession TEXT, signature_id TEXT, signature_kind TEXT)')
 
     conn.commit()
 
