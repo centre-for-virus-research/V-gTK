@@ -11,6 +11,8 @@ bash rabv-vgtk.sh
 
 ## Running the pipeline nextflow
 ```bash
+conda activate vgtk
+
 nextflow vgtk-init.nf --profile <YOUR PROFILE HERE>
 ```
 
