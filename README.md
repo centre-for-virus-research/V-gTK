@@ -24,7 +24,7 @@ nextflow vgtk-init.nf --profile <YOUR PROFILE HERE>
 see nextflow.config file for all the present ones
 
 For building from scratch (not recommended for viruses with lots of sequences)
-tests:
+**tests:**
 
 test
 
@@ -32,13 +32,13 @@ segmented_test
 
 HCV_test
 
-full runs:
+**full runs:**
 
 HCV_full
 
 setup_rabv_full
 
-updates:
+**updates:**
 
 HCV_update 
 
