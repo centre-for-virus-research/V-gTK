@@ -16,6 +16,27 @@ if SCRIPT_DIR not in sys.path:
 
 from ExploreMutationStorageLayouts import build_completed_signatures_only, build_sequence_relevant_mutation_summary
 
+REQUIRED_MUTATION_CATALOG_COLUMNS = [
+    'mutation_id',
+    'protein_name',
+    'segment',
+    'aa_position',
+    'alt_residue',
+    'reference_accession',
+    'mutation_type',
+    'signature_id',
+    'signature_kind',
+    'combination_id',
+    'combination_size',
+    'phenotype',
+]
+
+CATALOG_COLUMN_PROFILES = {
+    'HCV': ['resistance_category', 'drug'],
+    'influenza': ['serotypes_tested'],
+    'all_columns': None,
+}
+
 # Standard genetic code dictionary
 CODON_TABLE = {
     'ATA':'I', 'ATC':'I', 'ATT':'I', 'ATG':'M',
@@ -412,6 +433,29 @@ def prepare_catalog(catalog, alias_lookup):
     return prepared, invalid_positions
 
 
+def validate_required_catalog_columns(catalog):
+    missing = [column for column in REQUIRED_MUTATION_CATALOG_COLUMNS if column not in catalog.columns]
+    if missing:
+        raise ValueError(f"Catalog missing required column(s): {', '.join(missing)}")
+
+
+def build_catalog_reference_table(catalog, catalog_column_profile):
+    if catalog_column_profile == 'all_columns':
+        selected_columns = [column for column in catalog.columns if not column.startswith('_')]
+    else:
+        selected_columns = REQUIRED_MUTATION_CATALOG_COLUMNS + CATALOG_COLUMN_PROFILES[catalog_column_profile]
+
+    catalog_reference = catalog.copy()
+    for column in selected_columns:
+        if column not in catalog_reference.columns:
+            catalog_reference[column] = ''
+
+    catalog_reference = catalog_reference[selected_columns].copy()
+    catalog_reference = catalog_reference.fillna('')
+    catalog_reference = catalog_reference.drop_duplicates().reset_index(drop=True)
+    return catalog_reference
+
+
 def features_have_gene_information(features, catalog, alias_lookup):
     if features.empty or 'product' not in features.columns:
         return False
@@ -687,35 +731,7 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
         print(f'[AnnotateMutations][warn] Missing protein annotations for some reference groups: {preview}')
 
     return mutations_found, diagnostics, resolved_maps
-
-
-def build_catalog_reference_table(catalog):
-    preferred_columns = [
-        'mutation_id',
-        'protein_name',
-        'segment',
-        'aa_position',
-        'alt_residue',
-        'reference_accession',
-        'mutation_type',
-        'signature_id',
-        'signature_kind',
-        'combination_id',
-        'combination_size',
-        'resistance_category',
-        'drug',
-    ]
-    available_columns = [column for column in preferred_columns if column in catalog.columns]
-    if not available_columns:
-        return pd.DataFrame(columns=preferred_columns)
-
-    catalog_reference = catalog[available_columns].copy()
-    catalog_reference = catalog_reference.fillna('')
-    catalog_reference = catalog_reference.drop_duplicates().reset_index(drop=True)
-    return catalog_reference
-
-
-def write_mutation_tables(conn, catalog, mutations_found, virus):
+def write_mutation_tables(conn, catalog, mutations_found, catalog_column_profile):
     df_mut = pd.DataFrame(mutations_found)
     if not df_mut.empty:
         df_mut = df_mut.drop_duplicates(
@@ -726,22 +742,15 @@ def write_mutation_tables(conn, catalog, mutations_found, virus):
     cursor = conn.cursor()
 
     print('Writing mutation_catalog table...')
-    df_catalog = build_catalog_reference_table(catalog)
+    df_catalog = build_catalog_reference_table(catalog, catalog_column_profile)
     cursor.execute('DROP TABLE IF EXISTS mutation_catalog')
-    if not df_catalog.empty:
-        df_catalog.to_sql('mutation_catalog', conn, if_exists='replace', index=False)
+    df_catalog.to_sql('mutation_catalog', conn, if_exists='replace', index=False)
+    if 'mutation_id' in df_catalog.columns:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_mut_catalog_mutid ON mutation_catalog(mutation_id)')
-        if 'protein_name' in df_catalog.columns and 'segment' in df_catalog.columns:
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_mut_catalog_seg_prot ON mutation_catalog(segment, protein_name)')
-        if 'combination_id' in df_catalog.columns:
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_mut_catalog_comb ON mutation_catalog(combination_id)')
-    else:
-        cursor.execute(
-            'CREATE TABLE mutation_catalog ('
-            'mutation_id TEXT, protein_name TEXT, segment TEXT, aa_position TEXT, alt_residue TEXT, '
-            'reference_accession TEXT, mutation_type TEXT, signature_id TEXT, signature_kind TEXT, '
-            'combination_id TEXT, combination_size TEXT, resistance_category TEXT, drug TEXT)'
-        )
+    if 'protein_name' in df_catalog.columns and 'segment' in df_catalog.columns:
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_mut_catalog_seg_prot ON mutation_catalog(segment, protein_name)')
+    if 'combination_id' in df_catalog.columns:
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_mut_catalog_comb ON mutation_catalog(combination_id)')
 
     print('Writing compact mutation summary tables...')
     df_catalog_for_layouts = catalog.fillna('').copy()
@@ -773,6 +782,12 @@ def main():
     parser.add_argument("--mutation_catalog", required=True, help="Path to mutation catalog TSV.")
     parser.add_argument("--virus", default="", help="Virus context for specific logics (e.g. HCV)")
     parser.add_argument(
+        "--catalog_column_profile",
+        required=True,
+        choices=['HCV', 'influenza', 'all_columns'],
+        help="Select which mutation catalog columns are written to the database.",
+    )
+    parser.add_argument(
         "--allow_genbank_reference_gff",
         action="store_true",
         help="Allow fallback to fetch reference GFF annotations from NCBI when no usable annotated gene features or DB GFF annotations are available.",
@@ -792,10 +807,16 @@ def main():
     required_cols = ['protein_name', 'segment', 'aa_position', 'alt_residue', 
                      'reference_accession', 'mutation_id', 'mutation_type', 
                      'signature_id', 'signature_kind']
-    for col in required_cols:
+    for col in REQUIRED_MUTATION_CATALOG_COLUMNS:
         if col not in catalog.columns:
             print(f"Error: Catalog missing required column '{col}'.", file=sys.stderr)
             sys.exit(1)
+
+    try:
+        validate_required_catalog_columns(catalog)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     conn = sqlite3.connect(args.db)
 
@@ -852,7 +873,7 @@ def main():
                 raise AnnotationMappingError('No mutations were annotated because coordinate mapping failed for all available reference groups.')
             print('[AnnotateMutations][warn] No mutation hits were found after successful coordinate mapping')
 
-        write_mutation_tables(conn, catalog, mutations_found, args.virus)
+        write_mutation_tables(conn, catalog, mutations_found, args.catalog_column_profile)
     except AnnotationMappingError as exc:
         print(f'Error: {exc}', file=sys.stderr)
         conn.close()

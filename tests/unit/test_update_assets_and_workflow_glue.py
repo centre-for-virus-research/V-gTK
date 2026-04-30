@@ -68,6 +68,7 @@ def test_workflow_update_glue_contains_skip_and_guard():
     assert 'if [ "!{params.mutation_catalog}" != "null" ] && [ -n "!{params.mutation_catalog}" ]; then' in text
     assert "AnnotateMutations.py" in text
     assert "--mutation_catalog !{params.mutation_catalog}" in text
+    assert "--catalog_column_profile ${CATALOG_PROFILE}" in text
     assert "--db !{params.db_name}.db" in text
     # TEST_SUBSAMPLE_CLUSTER_INPUT should not be invoked in the workflow
     # (subsampling happens at the GenBankFetcher stage, not after DB population)

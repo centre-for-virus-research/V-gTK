@@ -318,6 +318,7 @@ class HcvMutationCatalogNormalizer:
             "signature_kind": signature_kind,
             "combination_id": combination_id,
             "combination_size": combination_size,
+            "phenotype": "",
             "component_order": component_order,
             "source_variation_name": source_variation_name,
             "source_phdr_ras_id": source_phdr_ras_id,

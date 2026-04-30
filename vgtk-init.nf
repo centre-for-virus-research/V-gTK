@@ -974,14 +974,17 @@ process CREATE_SQLITE_DB {
             exit 1
         fi
 
+        CATALOG_PROFILE="all_columns"
         VIRUS_ARG=""
         if [ "!{params.mutation_virus}" != "null" ] && [ -n "!{params.mutation_virus}" ]; then
             VIRUS_ARG="--virus !{params.mutation_virus}"
+            CATALOG_PROFILE="!{params.mutation_virus}"
         fi
 
         python !{scripts_dir}/AnnotateMutations.py \
             --db !{params.db_name}.db \
             --mutation_catalog !{params.mutation_catalog} \
+            --catalog_column_profile ${CATALOG_PROFILE} \
             ${VIRUS_ARG}
     fi
     # need to make gene info come from gff file rather than hardcoded rabv one

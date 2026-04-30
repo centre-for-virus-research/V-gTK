@@ -10,6 +10,19 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 import AnnotateMutations
 
 
+HCV_CATALOG_HEADER = [
+    'protein_name', 'segment', 'aa_position', 'alt_residue', 'reference_accession',
+    'mutation_id', 'mutation_type', 'signature_id', 'signature_kind', 'combination_id',
+    'combination_size', 'phenotype', 'resistance_category', 'drug'
+]
+
+HCV_DB_COLUMNS = [
+    'mutation_id', 'protein_name', 'segment', 'aa_position', 'alt_residue', 'reference_accession',
+    'mutation_type', 'signature_id', 'signature_kind', 'combination_id', 'combination_size',
+    'phenotype', 'resistance_category', 'drug'
+]
+
+
 def _mutation_ids_by_accession(summary_df):
     result = {}
     for _, row in summary_df.iterrows():
@@ -35,10 +48,10 @@ def test_annotate_mutations_db_creation(tmp_path):
     
     # 1. Create a dummy catalog
     catalog_data = [
-        ['protein_name', 'segment', 'aa_position', 'alt_residue', 'reference_accession', 'mutation_id', 'mutation_type', 'signature_id', 'signature_kind', 'combination_id', 'combination_size', 'resistance_category', 'drug'],
-        ['NS3', '1', '2', 'I', 'REF1', 'NS3:2I', 'snp', 'sig1', 'single', 'C1', '2', 'I', 'DrugA'],
-        ['NS3', '1', '3', 'K', 'REF1', 'NS3:3K', 'snp', 'sig2', 'combination', 'C1', '2', 'I', 'DrugA'],
-        ['NS5A', '', '1', 'Y', 'REF1', 'NS5A:1Y', 'snp', 'sig3', 'single', '', '', '', '']
+        HCV_CATALOG_HEADER,
+        ['NS3', '1', '2', 'I', 'REF1', 'NS3:2I', 'snp', 'sig1', 'single', 'C1', '2', '', 'I', 'DrugA'],
+        ['NS3', '1', '3', 'K', 'REF1', 'NS3:3K', 'snp', 'sig2', 'combination', 'C1', '2', '', 'I', 'DrugA'],
+        ['NS5A', '', '1', 'Y', 'REF1', 'NS5A:1Y', 'snp', 'sig3', 'single', '', '', '', '', '']
     ]
     with open(catalog_path, 'w') as f:
         for row in catalog_data:
@@ -71,7 +84,7 @@ def test_annotate_mutations_db_creation(tmp_path):
     
     # 3. Call the script logic
     # Mocking sys.argv
-    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--virus', 'HCV']
+    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--catalog_column_profile', 'HCV', '--virus', 'HCV']
     AnnotateMutations.main()
     
     # 4. Verify outcomes
@@ -99,7 +112,7 @@ def test_annotate_mutations_db_creation(tmp_path):
     assert set(catalog_table.columns) >= {
         'mutation_id', 'protein_name', 'segment', 'aa_position', 'alt_residue',
         'reference_accession', 'mutation_type', 'signature_id', 'signature_kind',
-        'combination_id', 'combination_size', 'resistance_category', 'drug'
+        'combination_id', 'combination_size', 'phenotype', 'resistance_category', 'drug'
     }
     assert sorted(catalog_table['mutation_id'].tolist()) == ['NS3:2I', 'NS3:3K', 'NS5A:1Y']
     
@@ -145,11 +158,11 @@ def test_annotation_with_reference_indels(tmp_path):
     
     # 1. Dummy catalog
     catalog_data = [
-        ['protein_name', 'segment', 'aa_position', 'alt_residue', 'reference_accession', 'mutation_id', 'mutation_type', 'signature_id', 'signature_kind', 'combination_id', 'combination_size', 'resistance_category', 'drug'],
+        HCV_CATALOG_HEADER,
         # Reference AA is M (ATG), we look for a mutation to V.
-        ['NS3', '1', '2', 'V', 'REF1', 'NS3:2V', 'snp', 'sig1', 'single', '', '', '', ''],
+        ['NS3', '1', '2', 'V', 'REF1', 'NS3:2V', 'snp', 'sig1', 'single', '', '', '', '', ''],
         # Reference AA is H (CAT) at pos 4 (pos 3 is a gaping deletion). We look for Q.
-        ['NS3', '1', '4', 'Q', 'REF1', 'NS3:4Q', 'snp', 'sig2', 'single', '', '', '', '']
+        ['NS3', '1', '4', 'Q', 'REF1', 'NS3:4Q', 'snp', 'sig2', 'single', '', '', '', '', '']
     ]
     with open(catalog_path, 'w') as f:
         for row in catalog_data:
@@ -183,7 +196,7 @@ def test_annotation_with_reference_indels(tmp_path):
     conn.close()
     
     # 2. Run annotation
-    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--virus', '']
+    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--catalog_column_profile', 'HCV', '--virus', '']
     AnnotateMutations.main()
     
     # 3. Verify
@@ -206,9 +219,9 @@ def test_annotate_mutations_falls_back_to_db_gff_coordinate_mapping(tmp_path):
     catalog_path = tmp_path / "fallback_catalog.tsv"
 
     catalog_data = [
-        ['protein_name', 'segment', 'aa_position', 'alt_residue', 'reference_accession', 'mutation_id', 'mutation_type', 'signature_id', 'signature_kind', 'combination_id', 'combination_size', 'resistance_category', 'drug'],
-        ['NS3', '1', '2', 'I', 'REF_MASTER_NC_004102', 'NS3:2I', 'snp', 'sig1', 'single', '', '', '', ''],
-        ['NS5A', '1', '1', 'Y', 'REF_MASTER_NC_004102', 'NS5A:1Y', 'snp', 'sig2', 'single', '', '', '', ''],
+        HCV_CATALOG_HEADER,
+        ['NS3', '1', '2', 'I', 'REF_MASTER_NC_004102', 'NS3:2I', 'snp', 'sig1', 'single', '', '', '', '', ''],
+        ['NS5A', '1', '1', 'Y', 'REF_MASTER_NC_004102', 'NS5A:1Y', 'snp', 'sig2', 'single', '', '', '', '', ''],
     ]
     with open(catalog_path, 'w') as f:
         for row in catalog_data:
@@ -244,7 +257,7 @@ def test_annotate_mutations_falls_back_to_db_gff_coordinate_mapping(tmp_path):
     conn.commit()
     conn.close()
 
-    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--virus', '']
+    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--catalog_column_profile', 'HCV', '--virus', '']
     AnnotateMutations.main()
 
     conn = sqlite3.connect(str(db_path))
@@ -354,10 +367,10 @@ def test_annotate_mutations_uses_descriptive_hcv_feature_products_without_gene_a
     catalog_path = tmp_path / "descriptive_hcv_catalog.tsv"
 
     catalog_data = [
-        ['protein_name', 'segment', 'aa_position', 'alt_residue', 'reference_accession', 'mutation_id', 'mutation_type', 'signature_id', 'signature_kind', 'combination_id', 'combination_size', 'resistance_category', 'drug'],
-        ['NS3', '1', '2', 'I', 'REF_MASTER_NC_004102', 'NS3:2I', 'snp', 'sig1', 'single', '', '', '', ''],
-        ['NS5A', '1', '1', 'Y', 'REF_MASTER_NC_004102', 'NS5A:1Y', 'snp', 'sig2', 'single', '', '', '', ''],
-        ['NS5B', '1', '1', 'F', 'REF_MASTER_NC_004102', 'NS5B:1F', 'snp', 'sig3', 'single', '', '', '', ''],
+        HCV_CATALOG_HEADER,
+        ['NS3', '1', '2', 'I', 'REF_MASTER_NC_004102', 'NS3:2I', 'snp', 'sig1', 'single', '', '', '', '', ''],
+        ['NS5A', '1', '1', 'Y', 'REF_MASTER_NC_004102', 'NS5A:1Y', 'snp', 'sig2', 'single', '', '', '', '', ''],
+        ['NS5B', '1', '1', 'F', 'REF_MASTER_NC_004102', 'NS5B:1F', 'snp', 'sig3', 'single', '', '', '', '', ''],
     ]
     with open(catalog_path, 'w') as f:
         for row in catalog_data:
@@ -382,7 +395,7 @@ def test_annotate_mutations_uses_descriptive_hcv_feature_products_without_gene_a
     conn.commit()
     conn.close()
 
-    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--virus', '']
+    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--catalog_column_profile', 'HCV', '--virus', '']
     AnnotateMutations.main()
 
     conn = sqlite3.connect(str(db_path))
@@ -415,8 +428,8 @@ def test_annotate_mutations_can_fetch_genbank_gff_when_enabled(tmp_path, monkeyp
     catalog_path = tmp_path / "genbank_catalog.tsv"
 
     catalog_data = [
-        ['protein_name', 'segment', 'aa_position', 'alt_residue', 'reference_accession', 'mutation_id', 'mutation_type', 'signature_id', 'signature_kind', 'combination_id', 'combination_size', 'resistance_category', 'drug'],
-        ['NS5A', '1', '1', 'Y', 'REF_FETCH', 'NS5A:1Y', 'snp', 'sig1', 'single', '', '', '', ''],
+        HCV_CATALOG_HEADER,
+        ['NS5A', '1', '1', 'Y', 'REF_FETCH', 'NS5A:1Y', 'snp', 'sig1', 'single', '', '', '', '', ''],
     ]
     with open(catalog_path, 'w') as f:
         for row in catalog_data:
@@ -461,6 +474,7 @@ def test_annotate_mutations_can_fetch_genbank_gff_when_enabled(tmp_path, monkeyp
         'AnnotateMutations.py',
         '--db', str(db_path),
         '--mutation_catalog', str(catalog_path),
+        '--catalog_column_profile', 'HCV',
         '--virus', '',
         '--allow_genbank_reference_gff',
     ]
@@ -501,8 +515,8 @@ def test_annotate_mutations_crashes_when_reference_mapping_unavailable(tmp_path,
     catalog_path = tmp_path / "unmapped_catalog.tsv"
 
     catalog_data = [
-        ['protein_name', 'segment', 'aa_position', 'alt_residue', 'reference_accession', 'mutation_id', 'mutation_type', 'signature_id', 'signature_kind', 'combination_id', 'combination_size', 'resistance_category', 'drug'],
-        ['NS3', '1', '2', 'I', 'REF_MASTER_NC_004102', 'NS3:2I', 'snp', 'sig1', 'single', '', '', '', ''],
+        HCV_CATALOG_HEADER,
+        ['NS3', '1', '2', 'I', 'REF_MASTER_NC_004102', 'NS3:2I', 'snp', 'sig1', 'single', '', '', '', '', ''],
     ]
     with open(catalog_path, 'w') as f:
         for row in catalog_data:
@@ -527,10 +541,70 @@ def test_annotate_mutations_crashes_when_reference_mapping_unavailable(tmp_path,
     conn.commit()
     conn.close()
 
-    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--virus', '']
+    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--catalog_column_profile', 'HCV', '--virus', '']
     with pytest.raises(SystemExit) as excinfo:
         AnnotateMutations.main()
 
     captured = capsys.readouterr()
     assert excinfo.value.code == 2
     assert '--allow_genbank_reference_gff' in captured.err
+
+
+def test_build_catalog_reference_table_hcv_profile_keeps_required_and_hcv_columns():
+    catalog = pd.DataFrame([
+        {
+            'mutation_id': 'm1',
+            'protein_name': 'NS3',
+            'segment': '1',
+            'aa_position': '2',
+            'alt_residue': 'I',
+            'reference_accession': 'REF1',
+            'mutation_type': 'snp',
+            'signature_id': 'sig1',
+            'signature_kind': 'single',
+            'combination_id': '',
+            'combination_size': '',
+            'phenotype': 'RAS',
+            'resistance_category': 'III',
+            'drug': 'drugA',
+            'alignment_name': 'AL_1',
+            '_canonical_protein': 'NS3',
+        }
+    ])
+
+    result = AnnotateMutations.build_catalog_reference_table(catalog, 'HCV')
+
+    assert result.columns.tolist() == HCV_DB_COLUMNS
+    assert result.iloc[0]['phenotype'] == 'RAS'
+    assert result.iloc[0]['drug'] == 'drugA'
+
+
+def test_build_catalog_reference_table_all_columns_preserves_input_columns():
+    catalog = pd.DataFrame([
+        {
+            'mutation_id': 'm1',
+            'protein_name': 'HA',
+            'segment': '4',
+            'aa_position': '10',
+            'alt_residue': 'N',
+            'reference_accession': 'REF_FLU',
+            'mutation_type': 'snp',
+            'signature_id': 'sig1',
+            'signature_kind': 'single',
+            'combination_id': '',
+            'combination_size': '',
+            'phenotype': 'escape',
+            'serotypes_tested': 'H1,H3',
+            'alignment_name': 'flu_alignment',
+            '_segment_norm': '4',
+        }
+    ])
+
+    result = AnnotateMutations.build_catalog_reference_table(catalog, 'all_columns')
+
+    assert result.columns.tolist() == [
+        'mutation_id', 'protein_name', 'segment', 'aa_position', 'alt_residue',
+        'reference_accession', 'mutation_type', 'signature_id', 'signature_kind',
+        'combination_id', 'combination_size', 'phenotype', 'serotypes_tested', 'alignment_name'
+    ]
+    assert result.iloc[0]['serotypes_tested'] == 'H1,H3'
