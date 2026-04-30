@@ -24,6 +24,7 @@ nextflow vgtk-init.nf --profile <YOUR PROFILE HERE>
 see nextflow.config file for all the present ones
 
 For building from scratch (not recommended for viruses with lots of sequences)
+
 **tests:**
 
 test
