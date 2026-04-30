@@ -12,7 +12,7 @@ from Bio import SeqIO
 from os.path import join
 from argparse import ArgumentParser
 import read_file
-from ExportRefListFromUpdateDb import load_reference_rows
+from ExportRefListFromUpdateDb import load_master_accessions_from_file, load_reference_file_table, load_reference_rows
 
 class BlastAlignment:
 	def __init__(self, query_fasta, db_fasta, base_dir, output_dir, output_file, is_segmented_virus, master_acc, is_update, keep_blast_tmp_dir, gb_matrix, segment_file=None, update_db=None):
@@ -128,14 +128,16 @@ class BlastAlignment:
 		# Use segment_file if available (segmented), otherwise master_acc (which may be a file)
 		ref_file = self.segment_file or self.master_acc
 		if ref_file and os.path.isfile(ref_file):
-			with open(ref_file) as f:
-				for line in f:
-					line = line.strip()
-					if not line:
-						continue
-					parts = line.split('\t')
-					if len(parts) >= 2 and parts[1].strip().lower() == 'exclusion_list':
-						exclusion_refs.add(parts[0].strip())
+			try:
+				df = load_reference_file_table(ref_file)
+				exclusion_refs = set(
+					df[df["accession_type"].astype(str).str.strip().str.lower() == "exclusion_list"]["primary_accession"]
+					.astype(str)
+					.str.strip()
+					.tolist()
+				)
+			except Exception:
+				pass
 		if exclusion_refs:
 			print(f"[exclusion_list] Found {len(exclusion_refs)} exclusion_list references: {', '.join(sorted(exclusion_refs))}")
 		return exclusion_refs
@@ -236,12 +238,7 @@ class BlastAlignment:
 	def get_master_list(self):
 		if os.path.isfile(self.master_acc):
 			try:
-				df = pd.read_csv(self.master_acc, sep='\t', header=None, dtype=str)
-				if df.shape[1] >= 2:
-					if df[1].str.lower().eq('master').any():
-						masters = df[df[1].str.lower() == 'master']
-						return masters[0].tolist()
-				return df[0].tolist()
+				return load_master_accessions_from_file(self.master_acc)
 			except:
 				return []
 		else:

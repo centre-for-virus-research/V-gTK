@@ -1,9 +1,8 @@
 import os
 import argparse
 import subprocess
-import pandas as pd
 from os.path import join
-from ExportRefListFromUpdateDb import load_master_accessions
+from ExportRefListFromUpdateDb import load_master_accessions, load_master_accessions_from_file, load_reference_file_accessions
 
 class NCBI_GFF_Downloader:
     def __init__(self, accession_ids, base_dir, output_dir, update_db=None):
@@ -20,21 +19,10 @@ class NCBI_GFF_Downloader:
                 return masters
         if os.path.isfile(self.accession_ids):
             try:
-                # Try reading as TSV without header
-                df = pd.read_csv(self.accession_ids, sep='\t', header=None, dtype=str)
-                
-                # If 2nd column exists and contains 'master', filter by it
-                if df.shape[1] >= 2:
-                    # Check if any value in column 1 is 'master' (case insensitive)
-                    if df[1].str.lower().eq('master').any():
-                        print(f"Found 'master' indicators in {self.accession_ids}. Filtering...")
-                        masters = df[df[1].str.lower() == 'master']
-                        return masters[0].tolist()
-                
-                # If no 'master' found or only 1 column, return all from first column
-                print(f"No 'master' indicators found in {self.accession_ids}. Using all accessions from first column.")
-                return df[0].tolist()
-                
+                masters = load_master_accessions_from_file(self.accession_ids)
+                if masters:
+                    return masters
+                return load_reference_file_accessions(self.accession_ids)
             except Exception as e:
                 print(f"Error reading accession file: {e}")
                 return []

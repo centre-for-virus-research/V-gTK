@@ -9,7 +9,7 @@ from os.path import join
 from argparse import ArgumentParser
 from TextFileHandler import TextFileLoader
 from FastaHandler import RemoveRedundantSequence
-from ExportRefListFromUpdateDb import load_master_accessions
+from ExportRefListFromUpdateDb import load_master_accessions, load_master_accessions_from_file
 
 class NextalignAlignment:
 	def __init__(self, gb_matrix, query_dir, ref_dir, ref_fa_file, master_seq_dir, tmp_dir, master_ref, nextalign_dir, reference_alignment, update_db=None):
@@ -39,12 +39,7 @@ class NextalignAlignment:
 				return masters
 		if os.path.isfile(self.master_ref):
 			try:
-				df = pd.read_csv(self.master_ref, sep='\t', header=None, dtype=str)
-				if df.shape[1] >= 2:
-					if df[1].str.lower().eq('master').any():
-						masters = df[df[1].str.lower() == 'master']
-						return masters[0].tolist()
-				return df[0].tolist()
+				return load_master_accessions_from_file(self.master_ref)
 			except:
 				return []
 		else:

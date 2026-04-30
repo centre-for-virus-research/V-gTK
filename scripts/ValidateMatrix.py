@@ -244,18 +244,20 @@ class ValidateMatrix:
             return ("NA", "NA", "NA", comment)
 
         host = re.sub(r'\s*\([^)]*\)', '', str(host_value).strip())
+        host_key = host.lower()
 
-        if host in taxa_dict:
-            taxaid = taxa_dict[host]
+        if host_key in taxa_dict:
+            taxaid = taxa_dict[host_key]
             sci_name = scientific_dict.get(taxaid, "NA")
             return ("Yes", taxaid, sci_name, comment)
 
-        repl = host_map.get(host)
+        repl = host_map.get(host) or host_map.get(host_key)
         if repl:
             self.host_mapped_count += 1
             comment = f"Host mapped from mapping file: '{host}' -> '{repl}'"
-            if repl in taxa_dict:
-                taxaid = taxa_dict[repl]
+            repl_key = repl.lower()
+            if repl_key in taxa_dict:
+                taxaid = taxa_dict[repl_key]
                 sci_name = scientific_dict.get(taxaid, "NA")
                 return ("Yes", taxaid, sci_name, comment)
             else:

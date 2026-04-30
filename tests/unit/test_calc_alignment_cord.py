@@ -63,7 +63,10 @@ def test_gap_helpers_and_cds_recalculation(tmp_path: Path):
         {"start": "5", "end": "9", "product": "P2"},
     ]
     adjusted = processor.recalculate_cds_coordinates("Q_A", gaps, cds_list, start_offset=1)
-    assert adjusted == [[1, 3], [4, 8]]
+    assert adjusted == [
+        {"start": 1, "end": 3, "product": "P1"},
+        {"start": 4, "end": 8, "product": "P2"},
+    ]
 
 
 def test_get_products_for_range(tmp_path: Path):
@@ -108,6 +111,37 @@ def test_find_gaps_in_fasta_matches_expected(tmp_path: Path):
     actual = read_tsv_as_dicts(tmp_path / "Tables" / "features.tsv")
     expected = read_tsv_as_dicts(DATA_DIR / "expected_features.tsv")
     assert actual == expected
+
+
+def test_find_gaps_in_fasta_preserves_projected_product_identity(tmp_path: Path):
+    processor = make_processor(tmp_path)
+    processor.find_gaps_in_fasta()
+
+    rows = read_tsv_as_dicts(tmp_path / "Tables" / "features.tsv")
+    q_a_rows = [row for row in rows if row["accession"] == "Q_A"]
+
+    assert q_a_rows == [
+        {
+            "accession": "Q_A",
+            "master_ref_accession": "MASTER1",
+            "reference_accession": "REF_A",
+            "aln_start": "1",
+            "aln_end": "9",
+            "cds_start": "1",
+            "cds_end": "3",
+            "product": "P1",
+        },
+        {
+            "accession": "Q_A",
+            "master_ref_accession": "MASTER1",
+            "reference_accession": "REF_A",
+            "aln_start": "1",
+            "aln_end": "9",
+            "cds_start": "4",
+            "cds_end": "8",
+            "product": "P2",
+        },
+    ]
 
 
 def test_cli_generates_expected_features(tmp_path: Path):

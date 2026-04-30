@@ -5,7 +5,7 @@ from os.path import join
 import xml.etree.ElementTree as ET
 from argparse import ArgumentParser
 from date_utils import split_date_components
-from ExportRefListFromUpdateDb import load_reference_dict
+from ExportRefListFromUpdateDb import load_reference_dict, load_reference_file_dict
 
 # add source example NCBI or GISAID, or user define, add temp sequences 
 # temp sequences which should available for temp purpose 
@@ -60,21 +60,8 @@ class GenBankParser:
 				return ref_dict
 		if acc_list_file is None:
 			return []
-		ref_dict = {}
 		try:
-			with open(acc_list_file) as file:
-				for line in file:
-					parts = line.strip().split("\t")
-					if len(parts) == 3:
-						accession, accession_type, segment = parts
-					elif len(parts) == 2:
-						accession, accession_type = parts
-					else:
-						print(f"Warning: Skipping malformed line in ref list: {line.strip()}")
-						continue
-						
-					if accession not in ref_dict:
-						ref_dict[accession] = accession_type
+			ref_dict = load_reference_file_dict(acc_list_file)
 		except FileNotFoundError:
 			raise FileNotFoundError(f"Reference list not found: {acc_list_file}")
 		return ref_dict

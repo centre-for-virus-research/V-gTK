@@ -5,7 +5,7 @@ import tempfile
 from Bio import SeqIO
 from os.path import join
 from argparse import ArgumentParser
-from ExportRefListFromUpdateDb import load_reference_dict
+from ExportRefListFromUpdateDb import load_reference_dict, load_reference_file_dict
 
 #genbank_divisions = ['VRL', 'PAT', 'SYN', 'ENV']
 
@@ -38,15 +38,7 @@ class FilterAndExtractSequences:
 			ref_dict = load_reference_dict(self.update_db)
 			if ref_dict:
 				return ref_dict
-		ref_list = {}
-		with open(self.ref_file) as f:
-			for each_ref in f:
-				split_col = each_ref.split("\t")
-				accs = split_col[0]
-				acc_type = split_col[1]
-				ref_list[accs] = acc_type
-				#ref_list.append(each_ref.strip())
-		return ref_list
+		return load_reference_file_dict(self.ref_file)
 
 	def read_ref_list_segmented_virus(self):
 		"""Return a dict {accession: type} where type is master/reference/exclusion_list."""
@@ -54,25 +46,7 @@ class FilterAndExtractSequences:
 			ref_dict = load_reference_dict(self.update_db)
 			if ref_dict:
 				return ref_dict
-		ref_list = {}
-		with open(self.ref_file) as f:
-			for each_ref_line in f:
-				line = each_ref_line.strip()
-				if not line: continue
-				
-				if '\t' in line:
-					parts = line.split('\t')
-					acc = parts[0].strip()
-					acc_type = parts[1].strip() if len(parts) > 1 else 'reference'
-				elif '|' in line:
-					acc = line.split("|")[0].strip()
-					acc_type = 'reference'
-				else:
-					acc = line.strip()
-					acc_type = 'reference'
-				
-				ref_list[acc] = acc_type
-		return ref_list
+		return load_reference_file_dict(self.ref_file)
 
 	def check_gb_division(self):
 		if self.gb_division is not None:

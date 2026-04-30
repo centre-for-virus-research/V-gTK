@@ -7,7 +7,7 @@ import pandas as pd
 from os.path import join
 from Bio import SeqIO
 from Bio.Seq import Seq
-from ExportRefListFromUpdateDb import load_master_accessions, load_reference_rows
+from ExportRefListFromUpdateDb import load_master_accessions, load_master_accessions_from_file, load_reference_file_table, load_reference_rows
 
 class PadAlignment:
 	def __init__(self, reference_alignment, input_dir, base_dir, output_dir, keep_intermediate_files, new_outputfile=False, segment_manifest_out=None, strict_segment_backbone=False, update_db=None, skip_ids=None):
@@ -57,17 +57,7 @@ class PadAlignment:
 			return load_master_accessions(self.update_db)
 		if os.path.isfile(master_acc):
 			try:
-				df = pd.read_csv(master_acc, sep='\t', header=None, dtype=str)
-				if df.shape[1] >= 2:
-					# Filter for master if available
-					if df[1].str.lower().eq('master').any():
-						masters = df[df[1].str.lower() == 'master']
-						return masters[0].tolist()
-						
-					# If no explicit master, exclude exclusion_list entries
-					df = df[df[1].str.lower() != 'exclusion_list']
-						
-				return df[0].tolist()
+				return load_master_accessions_from_file(master_acc)
 			except:
 				return []
 		else:
@@ -91,20 +81,16 @@ class PadAlignment:
 		if not os.path.isfile(master_acc):
 			return master_segment
 		try:
-			df = pd.read_csv(master_acc, sep='\t', header=None, dtype=str)
+			df = load_reference_file_table(master_acc)
 		except Exception:
 			return master_segment
 
-		if df.shape[1] < 3:
+		if not df["segment"].astype(str).str.strip().ne("").any():
 			return master_segment
 
-		df[0] = df[0].astype(str).str.strip()
-		df[1] = df[1].astype(str).str.strip().str.lower()
-		df[2] = df[2].astype(str).str.strip()
-
-		masters = df[df[1] == 'master']
+		masters = df[df["accession_type"].astype(str).str.strip().str.lower() == 'master']
 		for _, row in masters.iterrows():
-			master_segment[row[0]] = row[2]
+			master_segment[row["primary_accession"]] = row["segment"]
 		return master_segment
 
 	@staticmethod

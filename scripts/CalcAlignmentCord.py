@@ -7,6 +7,7 @@ from os.path import join
 from argparse import ArgumentParser
 from GffToDictionary import GffDictionary
 from CalcGenomeCords import CalculateGenomeCoordinates 
+from ExportRefListFromUpdateDb import load_master_accessions_from_file
 
 class CalculateAlignmentCoordinates:
 
@@ -61,12 +62,7 @@ class CalculateAlignmentCoordinates:
 	def get_master_list(self):
 		if os.path.isfile(self.master_accession):
 			try:
-				df = pd.read_csv(self.master_accession, sep='\t', header=None, dtype=str)
-				if df.shape[1] >= 2:
-					if df[1].str.lower().eq('master').any():
-						masters = df[df[1].str.lower() == 'master']
-						return masters[0].tolist()
-				return df[0].tolist()
+				return load_master_accessions_from_file(self.master_accession)
 			except:
 				return []
 		else:
@@ -128,11 +124,16 @@ class CalculateAlignmentCoordinates:
 
 			adj_start = cds_start - gaps_before_start + (start_offset - 1)
 			adj_end = cds_end - gaps_before_end + (start_offset - 1)
-			if [adj_start, adj_end] not in adjusted_coords:
-				adjusted_coords.append([adj_start, adj_end])
+			adjusted_entry = {
+				'start': adj_start,
+				'end': adj_end,
+				'product': cds['product'],
+			}
+			if adjusted_entry not in adjusted_coords:
+				adjusted_coords.append(adjusted_entry)
 
 		if not adjusted_coords and cds_list:
-			adjusted_coords.append([0, 0])
+			adjusted_coords.append({'start': 0, 'end': 0, 'product': cds_list[0]['product']})
 
 		return adjusted_coords
 
@@ -241,38 +242,26 @@ class CalculateAlignmentCoordinates:
 
 					#print(f">{record.id}", adjusted)
 					for each_cords in adjusted:
-						product = self.get_products_for_range(cds_list, each_cords)
-						if not product and cds_list:
-							product = [{'start': each_cords[0], 'end': each_cords[1], 'product': cds_list[0]['product']}]
 						if record.id in genome_coords:
 							master_acc, genome_cord_start, genome_cord_end = genome_coords[record.id]
 						else:
 							# Fallback if record not in genome_coords (should not happen if calc worked)
 							genome_cord_start, genome_cord_end = "NA", "NA"
+						reference_acc = blast_dict[record.id] if record.id in blast_dict else current_master
+						if segment_map:
+							record_segment = segment_map.get(record.id, "")
+							master_segment = segment_map.get(current_master, record_segment)
+							ref_segment = segment_map.get(reference_acc, record_segment)
+							if record_segment and master_segment and record_segment != master_segment:
+								raise ValueError(f"Segment mismatch for {record.id}: record={record_segment}, master={master_segment}")
+							if record_segment and ref_segment and record_segment != ref_segment:
+								raise ValueError(f"Segment mismatch for {record.id}: record={record_segment}, ref={ref_segment}")
 
-						for overlap_product in product:
-							reference_acc = blast_dict[record.id] if record.id in blast_dict else current_master
-							if segment_map:
-								record_segment = segment_map.get(record.id, "")
-								master_segment = segment_map.get(current_master, record_segment)
-								ref_segment = segment_map.get(reference_acc, record_segment)
-								if record_segment and master_segment and record_segment != master_segment:
-									raise ValueError(f"Segment mismatch for {record.id}: record={record_segment}, master={master_segment}")
-								if record_segment and ref_segment and record_segment != ref_segment:
-									raise ValueError(f"Segment mismatch for {record.id}: record={record_segment}, ref={ref_segment}")
-
-							if record.id in blast_dict:
-								data = [record.id, current_master, blast_dict[record.id], str(genome_cord_start), str(genome_cord_end), str(each_cords[0]), str(each_cords[1]), overlap_product['product']]
-								if segment_map:
-									data.append(segment_map.get(record.id, ""))
-								out_f.write('\t'.join(data))
-								out_f.write("\n")
-							else:
-								data = [record.id, current_master, current_master, str(genome_cord_start), str(genome_cord_end), str(each_cords[0]), str(each_cords[1]), overlap_product['product']]
-								if segment_map:
-									data.append(segment_map.get(record.id, ""))
-								out_f.write('\t'.join(data))	
-								out_f.write("\n")				
+						data = [record.id, current_master, reference_acc, str(genome_cord_start), str(genome_cord_end), str(each_cords['start']), str(each_cords['end']), each_cords['product']]
+						if segment_map:
+							data.append(segment_map.get(record.id, ""))
+						out_f.write('\t'.join(data))
+						out_f.write("\n")
 if __name__ == "__main__":
 	parser = ArgumentParser(description='Calculates the genome and cds coordinates for a given sequences')
 	parser.add_argument('-i', '--paded_alignment', help='Sequence file directory, it can be single or multiple fasta sequence files.', required=True)

@@ -10,6 +10,7 @@ from Bio import SeqIO
 from os.path import join, normpath
 from datetime import datetime
 from argparse import ArgumentParser
+from ExportRefListFromUpdateDb import load_reference_file_table
 
 
 class CreateSqliteDB:
@@ -234,16 +235,14 @@ class CreateSqliteDB:
 		if not self.reference_tsv:
 			return {}
 		try:
-			reference_df = pd.read_csv(self.reference_tsv, sep="\t", dtype=str).fillna("")
+			reference_df = load_reference_file_table(self.reference_tsv)
 		except FileNotFoundError:
 			return {}
-		required_cols = ["primary_accession", "genotype"]
-		if any(col not in reference_df.columns for col in required_cols):
+		if "genotype" not in reference_df.columns:
 			return {}
-		selected_cols = required_cols + (["subtype"] if "subtype" in reference_df.columns else [])
-		reference_df = reference_df[selected_cols].copy()
-		if "subtype" not in reference_df.columns:
-			reference_df["subtype"] = ""
+		reference_df = reference_df[["primary_accession", "genotype", "subtype"]].copy()
+		if reference_df.empty:
+			return {}
 		for col in ["primary_accession", "genotype", "subtype"]:
 			reference_df[col] = reference_df[col].map(self._normalize_reference_field)
 		reference_df = reference_df[reference_df["primary_accession"] != ""]

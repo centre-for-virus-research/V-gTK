@@ -132,3 +132,22 @@ def test_validate_ref_list_edge_segmented_exclusion_only_passes():
 
     assert result.returncode == 0
     assert "validation passed" in result.stdout.lower()
+
+
+def test_validate_ref_list_accepts_headered_segmented_file(tmp_path: Path):
+    ref = tmp_path / "headered.tsv"
+    ref.write_text(
+        "primary_accession\tstatus\tsegment\tgenotype\tsubtype\n"
+        "NC_004102\tmaster\t1\t1\ta\n"
+        "EU781827\treference\t1\t1\tb\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT_PATH), "-r", str(ref), "-s", "Y"],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0
+    assert "validation passed" in result.stdout.lower()

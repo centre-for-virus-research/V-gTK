@@ -106,6 +106,40 @@ def test_fetch_genbank_data_adds_ref_list_and_saves_batches(tmp_path: Path, monk
     assert any("efetch.fcgi" in c for c in calls)
 
 
+def test_fetch_genbank_data_adds_headered_ref_list(tmp_path: Path, monkeypatch):
+    ref_file = tmp_path / "refs.tsv"
+    ref_file.write_text(
+        "primary_accession\tstatus\tsegment\nREF1\tmaster\t1\nREF2\treference\t1\n",
+        encoding="utf-8",
+    )
+
+    fetcher = GenBankFetcher(
+        taxid="11292",
+        base_url="https://example/",
+        email="x@y.com",
+        output_dir=str(tmp_path),
+        batch_size=100,
+        sleep_time=0,
+        base_dir="GenBank-XML",
+        update_file=None,
+        ref_list=str(ref_file),
+    )
+    fetcher.efetch_batch_size = 10
+
+    called_urls = []
+
+    def fake_get(url):
+        called_urls.append(url)
+        return _FakeResponse(json_data={}, text_data="<GBSet></GBSet>")
+
+    monkeypatch.setattr("GenBankFetcher.requests.get", fake_get)
+    monkeypatch.setattr(fetcher, "save_data", lambda *_: None)
+
+    fetcher.fetch_genbank_data(["A"])
+
+    assert any("REF1" in url and "REF2" in url for url in called_urls)
+
+
 def test_update_requires_meta_data_table(tmp_path: Path):
     bad_db = tmp_path / "bad.db"
     conn = sqlite3.connect(str(bad_db))

@@ -180,3 +180,40 @@ def test_update_db_reference_source_overrides_ref_file(tmp_path: Path):
     query_fa = (tmp_path / "Sequences" / "query_seq.fa").read_text(encoding="utf-8")
     assert ">REF_DB" in ref_fa
     assert ">Q1" in query_fa
+
+
+def test_filter_columns_accepts_headered_ref_list(tmp_path: Path):
+    matrix = tmp_path / "gB_matrix_raw.tsv"
+    seqs = tmp_path / "sequences.fa"
+    refs = tmp_path / "refs.tsv"
+
+    _write_tsv(
+        matrix,
+        [["VRL", "REF1", "4", "0", "0", ""], ["VRL", "Q1", "4", "0", "0", ""]],
+        ["division", "gi_number", "length", "n", "exclusion_status", "exclusion_criteria"],
+    )
+    seqs.write_text(">REF1\nATGC\n>Q1\nAATT\n", encoding="utf-8")
+    refs.write_text(
+        "primary_accession\tstatus\tsegment\tgenotype\nREF1\treference\t1\t1\n",
+        encoding="utf-8",
+    )
+
+    processor = FilterAndExtractSequences(
+        genbank_matrix=str(matrix),
+        sequence_file=str(seqs),
+        genbank_matrix_filtered=str(tmp_path),
+        ref_file=str(refs),
+        base_dir=str(tmp_path),
+        output_dir="Sequences",
+        total_length=1,
+        real_length=1,
+        prop_ambigious=None,
+        segmented_virus="N",
+        gb_division=None,
+        valid_divisions=["VRL", "ENV"],
+        seq_type=None,
+    )
+    processor.process()
+
+    ref_fa = (tmp_path / "Sequences" / "ref_seq.fa").read_text(encoding="utf-8")
+    assert ">REF1" in ref_fa

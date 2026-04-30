@@ -60,6 +60,9 @@ jobs:
             test)
               test -f test_out/basic_test/tests/test_non_segmented_results.txt
               ;;
+            update_test)
+              test -f test_out/update_test/tests/test_non_segmented_results.txt
+              ;;
             segmented_test)
               test -f test_out/IAV_DB/tests/test_segmented_results.txt
               ;;

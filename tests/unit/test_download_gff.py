@@ -43,6 +43,17 @@ def test_get_accession_list_falls_back_to_first_column(tmp_path: Path):
     assert d.get_accession_list() == ["A1", "A2"]
 
 
+def test_get_accession_list_from_headered_master_marked_file(tmp_path: Path):
+    ref_file = tmp_path / "refs.tsv"
+    ref_file.write_text(
+        "primary_accession\tstatus\tsegment\nACC_MASTER_1\tmaster\t1\nACC_REF_1\treference\t1\n",
+        encoding="utf-8",
+    )
+
+    d = NCBI_GFF_Downloader(str(ref_file), str(tmp_path), "Gff")
+    assert d.get_accession_list() == ["ACC_MASTER_1"]
+
+
 def test_get_accession_list_from_comma_separated_string(tmp_path: Path):
     d = NCBI_GFF_Downloader("A1, A2 ,,A3", str(tmp_path), "Gff")
     assert d.get_accession_list() == ["A1", "A2", "A3"]

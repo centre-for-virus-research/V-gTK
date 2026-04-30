@@ -113,6 +113,26 @@ def test_load_ref_list_supports_two_and_three_column_lines(tmp_path: Path):
     assert refs == {"REF1": "master", "REF2": "reference"}
 
 
+def test_load_ref_list_supports_headered_lines(tmp_path: Path):
+    ref_file = tmp_path / "ref_list.tsv"
+    ref_file.write_text(
+        "primary_accession\tstatus\tsegment\tgenotype\tsubtype\nREF1\tmaster\t1\t1\ta\nREF2\treference\t1\t1\tb\n",
+        encoding="utf-8",
+    )
+
+    parser = GenBankParser(
+        input_dir=str(tmp_path),
+        base_dir=str(tmp_path),
+        output_dir="out",
+        ref_list=str(ref_file),
+        exclusion_list=None,
+        is_segmented_virus="Y",
+    )
+
+    refs = parser.load_ref_list(str(ref_file))
+    assert refs == {"REF1": "master", "REF2": "reference"}
+
+
 def test_xml_to_tsv_parses_and_applies_exclusion(tmp_path: Path):
     xml_file = tmp_path / "batch-1.xml"
     _write_xml(

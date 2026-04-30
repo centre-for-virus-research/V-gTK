@@ -6,6 +6,7 @@ import random
 from time import sleep
 from os.path import join
 from argparse import ArgumentParser
+from ExportRefListFromUpdateDb import load_reference_file_accessions
 
 try:
 	import requests
@@ -191,10 +192,7 @@ class GenBankFetcher:
 
 		if self.ref_list and not self.update_file:
 			try:
-				ref_list = []
-				with open(self.ref_list, 'r') as f:
-					for line in f:
-						ref_list.append(line.strip().split('\t')[0])
+				ref_list = load_reference_file_accessions(self.ref_list)
 				ids.extend(ref_list)
 				print(f"Added {len(ref_list)} IDs from reference list.")
 			except Exception as e:
@@ -347,17 +345,7 @@ class GenBankFetcher:
 	def _load_ref_accessions(self):
 		if not self.ref_list or not os.path.exists(self.ref_list):
 			return []
-		refs = []
-		with open(self.ref_list, "r", encoding="utf-8") as handle:
-			for line in handle:
-				parts = line.strip().split("\t")
-				if len(parts) < 2:
-					continue
-				acc = parts[0].strip()
-				typ = parts[1].strip().lower()
-				if acc and typ in {"master", "reference"}:
-					refs.append(acc)
-		return sorted(set(refs))
+		return sorted(set(load_reference_file_accessions(self.ref_list, allowed_types={"master", "reference"})))
 
 	def _write_update_log(self, updated_versions, new_accessions):
 		if not self.update_log:
