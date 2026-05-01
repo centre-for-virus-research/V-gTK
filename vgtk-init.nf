@@ -684,7 +684,7 @@ process IQ_TREE{
     cpus { params.is_segmented == 'Y' ? SEGMENT_PARALLEL_THREADS : MAX_THREADS }
     maxForks HEAVY_TASK_MAX_FORKS
     input:
-        path mmseq_cluster_dir
+        tuple path(mmseq_cluster_dir), path(guide_tree_dir)
     output:
         path "IQTree_${mmseq_cluster_dir.baseName}", emit: iqtree_out
     shell:
@@ -748,8 +748,14 @@ process IQ_TREE{
             exit 1
         fi
 
+        GUIDE_TREE=$(find -L !{guide_tree_dir} -name "*.nwk" -print -quit)
+        if [ -z "$GUIDE_TREE" ]; then
+            echo "[error] No guide tree found in !{guide_tree_dir}" >&2
+            exit 1
+        fi
+
         mkdir -p IQTree_!{mmseq_cluster_dir.baseName}
-        "$IQTREE_BIN" -s "$CLUSTER_REP" -nt AUTO -ntmax !{task.cpus} -m GTR -pre IQTree_!{mmseq_cluster_dir.baseName}/iqtree -mem 100G
+        "$IQTREE_BIN" -s "$CLUSTER_REP" -t "$GUIDE_TREE" -ntmax !{task.cpus} -m GTR -pre IQTree_!{mmseq_cluster_dir.baseName}/iqtree -mem 100G
     '''
 }
 
@@ -817,15 +823,34 @@ process VERY_FAST_TREE{
     cpus { params.is_segmented == 'Y' ? SEGMENT_PARALLEL_THREADS : MAX_THREADS }
     maxForks HEAVY_TASK_MAX_FORKS
     when: 
-        params.update == null
+        params.update_db == null
     input:
-        path padded_aln
+        path mmseq_cluster_dir
     output:
-        path "tree.nwk"
+        path "VeryFastTree_${mmseq_cluster_dir.baseName}", emit: guide_tree_out
     shell:
     '''
-        seqkit rmdup !{padded_aln} -o !{padded_aln}_dedup.fa
-        VeryFastTree -threads !{task.cpus} -nt -gtr -double-precision !{padded_aln}_dedup.fa > tree.nwk
+        CLUSTER_REP=$(find -L !{mmseq_cluster_dir} -name "*_cluster_rep.fasta" -print -quit)
+        if [ -z "$CLUSTER_REP" ]; then
+            CLUSTER_REP=$(find -L !{mmseq_cluster_dir} -name "*.fasta" -print -quit)
+            if [ -n "$CLUSTER_REP" ]; then
+                echo "[warn] *_cluster_rep.fasta not found; falling back to $CLUSTER_REP" >&2
+            else
+                echo "[error] No FASTA found in !{mmseq_cluster_dir}" >&2
+                exit 1
+            fi
+        fi
+
+        mkdir -p VeryFastTree_!{mmseq_cluster_dir.baseName}
+        GUIDE_TREE=VeryFastTree_!{mmseq_cluster_dir.baseName}/guide_tree.nwk
+        if command -v VeryFastTree >/dev/null 2>&1; then
+            VeryFastTree -threads !{task.cpus} -nt -gtr -double-precision "$CLUSTER_REP" > "$GUIDE_TREE"
+        elif command -v FastTree >/dev/null 2>&1; then
+            FastTree -nt -gtr "$CLUSTER_REP" > "$GUIDE_TREE"
+        else
+            echo "[error] Neither VeryFastTree nor FastTree was found in PATH. Activate the vgtk conda environment / conda profile." >&2
+            exit 1
+        fi
     '''
 }
 
@@ -1283,7 +1308,31 @@ workflow {
             }
     } else {
         MMSEQS_CLUSTERING(cluster_input_ch)
-        IQ_TREE(MMSEQS_CLUSTERING.out.mmseq_clusters)
+        VERY_FAST_TREE(MMSEQS_CLUSTERING.out.mmseq_clusters)
+
+        mmseq_tree_input_ch = MMSEQS_CLUSTERING.out.mmseq_clusters
+            .map { dir ->
+                def key = dir.name
+                    .replaceFirst(/^MMseqClusters_/, '')
+                    .replaceFirst(/_dedup$/, '')
+                    .tokenize('.')[0]
+                [key, dir]
+            }
+            .join(
+                VERY_FAST_TREE.out.guide_tree_out
+                    .map { dir ->
+                        def key = dir.name
+                            .replaceFirst(/^VeryFastTree_MMseqClusters_/, '')
+                            .replaceFirst(/_dedup$/, '')
+                            .tokenize('.')[0]
+                        [key, dir]
+                    }
+            )
+            .map { key, mmseq_dir, guide_tree_dir ->
+                tuple(mmseq_dir, guide_tree_dir)
+            }
+
+        IQ_TREE(mmseq_tree_input_ch)
         
         // Join the channels by segment name for USHER_PLACEMENT
         // Create tuples of (basename, file) for proper matching
@@ -1329,8 +1378,6 @@ workflow {
         iqtree_collected = usher_collected
         mmseq_collected = usher_collected
     }
-    
-    // VERY_FAST_TREE(PAD_ALIGNMENT.out.merged_msa)
     
     // For CALC_ALIGNMENT_CORD, collect all MSA files back together
     CALC_ALIGNMENT_CORD(PAD_ALIGNMENT.out.merged_msa.collect(), 
