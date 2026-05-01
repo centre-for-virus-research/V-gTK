@@ -91,14 +91,18 @@ def test_create_sqlite_db_exclusions_clusters_and_trees(tmp_path: Path):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 
-    cur.execute("SELECT primary_accession, cluster_95pct FROM meta_data ORDER BY primary_accession")
+    cur.execute(
+        "SELECT primary_accession, cluster_95pct, exclusion_status, exclusion_criteria FROM meta_data ORDER BY primary_accession"
+    )
     meta_rows = cur.fetchall()
-    # B is filtered, C has exclusion -> only A remains
-    assert meta_rows == [("A", "REP_A")]
+    assert meta_rows == [
+        ("A", "REP_A", "", ""),
+        ("B", "REP_B", "1", "alignment_filtering"),
+        ("C", None, "1", "manual exclusion reason"),
+    ]
 
-    cur.execute("SELECT primary_accession, reason FROM excluded_accessions ORDER BY primary_accession")
-    excluded = cur.fetchall()
-    assert excluded == [("B", "alignment_filtering"), ("C", "manual exclusion reason")]
+    cur.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='excluded_accessions'")
+    assert cur.fetchone()[0] == 0
 
     cur.execute("SELECT name, source, newick FROM trees ORDER BY source")
     trees = cur.fetchall()
@@ -173,13 +177,16 @@ def test_create_sqlite_db_uses_filtered_details_reason(tmp_path: Path):
 
     conn = sqlite3.connect(tmp_path / "SqliteDB" / "testdb2.db")
     cur = conn.cursor()
-    cur.execute("SELECT primary_accession, reason FROM excluded_accessions ORDER BY primary_accession")
+    cur.execute(
+        "SELECT primary_accession, exclusion_status, exclusion_criteria FROM meta_data WHERE primary_accession='B'"
+    )
     rows = cur.fetchall()
     conn.close()
 
     assert rows == [
         (
             "B",
+            "1",
             "alignment_filtering: reference not present in master-projected reference_aln; query cannot be projected into merged segment alignment",
         )
     ]

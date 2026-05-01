@@ -16,11 +16,12 @@ def test_non_segmented_empty_blast_with_non_excluded_rows_fails(tmp_path: Path):
     db = tmp_path / "ok.db"
     con = sqlite3.connect(db)
     cur = con.cursor()
-    cur.execute("CREATE TABLE meta_data (primary_accession TEXT, segment TEXT)")
+    cur.execute(
+        "CREATE TABLE meta_data (primary_accession TEXT, segment TEXT, exclusion_status TEXT, exclusion_criteria TEXT)"
+    )
     cur.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, alignment_name TEXT)")
-    cur.execute("CREATE TABLE excluded_accessions (primary_accession TEXT, reason TEXT)")
-    cur.execute("INSERT INTO meta_data VALUES ('A1', '1')")
-    cur.execute("INSERT INTO meta_data VALUES ('REF1', '1')")
+    cur.execute("INSERT INTO meta_data VALUES ('A1', '1', '', '')")
+    cur.execute("INSERT INTO meta_data VALUES ('REF1', '1', '', '')")
     cur.execute("INSERT INTO sequence_alignment VALUES ('A1', 'REF1')")
     cur.execute("INSERT INTO sequence_alignment VALUES ('REF1', 'REF1')")
     con.commit()

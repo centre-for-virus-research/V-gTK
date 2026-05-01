@@ -136,6 +136,14 @@ class UsherPlacement:
 			df_aln = pd.read_sql_query("SELECT * FROM sequence_alignment", conn)
 			excluded = set()
 			cur = conn.cursor()
+			meta_cols = {row[1] for row in cur.execute("PRAGMA table_info(meta_data)").fetchall()}
+			if "exclusion_status" in meta_cols:
+				for (acc,) in cur.execute(
+					"SELECT primary_accession FROM meta_data WHERE primary_accession IS NOT NULL AND TRIM(primary_accession) <> '' "
+					"AND LOWER(TRIM(COALESCE(CAST(exclusion_status AS TEXT), ''))) NOT IN ('', '0', 'false', 'no', 'na', 'none', 'nan')"
+				):
+					if acc:
+						excluded.add(str(acc).strip())
 			if cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='excluded_accessions'").fetchone():
 				for (acc,) in cur.execute("SELECT primary_accession FROM excluded_accessions"):
 					if acc:

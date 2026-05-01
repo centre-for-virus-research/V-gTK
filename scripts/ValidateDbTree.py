@@ -178,6 +178,13 @@ def get_meta_nonexcluded_filter(meta_cols, exclusion_column, exclude_value):
     return where_sql, (str(exclude_value),)
 
 
+def get_meta_excluded_filter(meta_cols, exclusion_column, exclude_value):
+    if exclusion_column not in meta_cols:
+        return None, ()
+    where_sql = f"NOT ({exclusion_column} IS NULL OR CAST({exclusion_column} AS TEXT) != ?)"
+    return where_sql, (str(exclude_value),)
+
+
 def get_expected_accessions(conn, accession_column="primary_accession", exclusion_column="exclusion_status", exclude_value="1"):
     if not table_exists(conn, "meta_data"):
         raise RuntimeError("Table 'meta_data' not found in DB.")
@@ -189,19 +196,29 @@ def get_expected_accessions(conn, accession_column="primary_accession", exclusio
         )
 
     where_sql, params = get_meta_nonexcluded_filter(meta_cols, exclusion_column, exclude_value)
+    excluded_where_sql, excluded_params = get_meta_excluded_filter(meta_cols, exclusion_column, exclude_value)
     raw_expected = fetch_distinct_values(conn, "meta_data", accession_column, where_sql=where_sql, params=params)
-    excluded_accessions = set()
+    meta_excluded_accessions = set()
+    if excluded_where_sql:
+        meta_excluded_accessions = fetch_distinct_values(
+            conn,
+            "meta_data",
+            accession_column,
+            where_sql=excluded_where_sql,
+            params=excluded_params,
+        )
+    legacy_excluded_accessions = set()
     if table_exists(conn, "excluded_accessions"):
         excluded_cols = get_table_columns(conn, "excluded_accessions")
         excluded_col = find_first_present(excluded_cols, [accession_column, "primary_accession", "accession"])
         if excluded_col:
-            excluded_accessions = fetch_distinct_values(conn, "excluded_accessions", excluded_col)
+            legacy_excluded_accessions = fetch_distinct_values(conn, "excluded_accessions", excluded_col)
 
-    expected = raw_expected - excluded_accessions
+    expected = raw_expected - legacy_excluded_accessions
     total_rows = fetch_count(conn, "meta_data")
     nonexcluded_rows = fetch_count(conn, "meta_data", where_sql=where_sql, params=params) if where_sql else total_rows
     accepted_accessions = set(expected)
-    filtered_accessions = set(excluded_accessions)
+    filtered_accessions = set(meta_excluded_accessions) | set(legacy_excluded_accessions)
 
     return {
         "expected_accessions": expected,
@@ -211,7 +228,7 @@ def get_expected_accessions(conn, accession_column="primary_accession", exclusio
         "meta_total_rows": total_rows,
         "meta_nonexcluded_rows": nonexcluded_rows,
         "meta_has_exclusion": exclusion_column in meta_cols,
-        "excluded_accessions": excluded_accessions,
+        "excluded_accessions": filtered_accessions,
         "meta_columns": meta_cols,
     }
 
@@ -948,7 +965,7 @@ def main(argv=None):
             report.write(f"Accepted distinct accessions: {len(accepted_accessions)}\n")
             report.write(f"Filtered distinct accessions: {len(filtered_accessions)}\n")
             report.write(f"Accepted + filtered distinct accessions: {len(accepted_filtered_union)}\n")
-            report.write(f"Excluded accessions table rows considered: {len(excluded_accessions)}\n")
+            report.write(f"Excluded accessions considered: {len(excluded_accessions)}\n")
             report.write(f"Expected distinct accessions (from meta_data.{args.accession_column}): {len(expected_meta_set)}\n")
             report.write("\n")
 

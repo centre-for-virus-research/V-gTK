@@ -103,6 +103,12 @@ class GenBankParser:
 
 			cursor.execute("SELECT primary_accession FROM meta_data WHERE primary_accession IS NOT NULL AND TRIM(primary_accession) != ''")
 			existing.update([row[0].strip() for row in cursor.fetchall() if row[0]])
+			if 'exclusion_status' in meta_cols:
+				cursor.execute(
+					"SELECT primary_accession FROM meta_data WHERE primary_accession IS NOT NULL AND TRIM(primary_accession) != '' "
+					"AND LOWER(TRIM(COALESCE(CAST(exclusion_status AS TEXT), ''))) NOT IN ('', '0', 'false', 'no', 'na', 'none', 'nan')"
+				)
+				existing.update([row[0].strip() for row in cursor.fetchall() if row[0]])
 
 			cursor.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='excluded_accessions' LIMIT 1")
 			if cursor.fetchone() is not None:

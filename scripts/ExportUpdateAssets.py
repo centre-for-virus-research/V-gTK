@@ -61,9 +61,17 @@ def main(args):
 	excluded_ids = set()
 	conn_excl = sqlite3.connect(args.db)
 	try:
+		meta_cols = {row[1] for row in conn_excl.execute("PRAGMA table_info(meta_data)").fetchall()}
+		if "exclusion_status" in meta_cols:
+			df_excl_meta = pd.read_sql_query(
+				"SELECT primary_accession FROM meta_data WHERE primary_accession IS NOT NULL AND TRIM(primary_accession) <> '' "
+				"AND LOWER(TRIM(COALESCE(CAST(exclusion_status AS TEXT), ''))) NOT IN ('', '0', 'false', 'no', 'na', 'none', 'nan')",
+				conn_excl,
+			)
+			excluded_ids.update(df_excl_meta["primary_accession"].fillna("").astype(str).str.strip().tolist())
 		if _table_exists(conn_excl, "excluded_accessions"):
 			df_excl = pd.read_sql_query("SELECT primary_accession FROM excluded_accessions", conn_excl)
-			excluded_ids = set(df_excl["primary_accession"].fillna("").astype(str).str.strip().tolist())
+			excluded_ids.update(df_excl["primary_accession"].fillna("").astype(str).str.strip().tolist())
 	finally:
 		conn_excl.close()
 

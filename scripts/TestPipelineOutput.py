@@ -5,6 +5,7 @@ import csv
 import os
 import sqlite3
 import sys
+from collections import Counter
 from typing import List, Optional, Sequence, Tuple
 
 
@@ -67,34 +68,61 @@ def _truncate(text: str, limit: int = 140) -> str:
     return value
 
 
-def _fetch_missing_alignment_examples(
-    cur: sqlite3.Cursor, segmented: bool, limit: int = 10
-) -> List[str]:
-    segment_select = ", COALESCE(NULLIF(TRIM(m.segment), ''), '-')" if segmented else ""
-    cur.execute(
-        f"""
-        SELECT DISTINCT m.primary_accession{segment_select}
-        FROM meta_data m
-        WHERE m.primary_accession IS NOT NULL
-          AND TRIM(m.primary_accession) <> ''
-          AND NOT EXISTS (
-              SELECT 1 FROM sequence_alignment s
-              WHERE s.sequence_id = m.primary_accession
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM excluded_accessions e
-              WHERE e.primary_accession = m.primary_accession
-          )
-        ORDER BY m.primary_accession
-        LIMIT ?
-        """,
-        (limit,),
-    )
-    rows = cur.fetchall()
+FALSE_EXCLUSION_VALUES = {"", "0", "false", "no", "na", "none", "nan"}
 
-    if segmented:
-        return [f"{accession} (segment={segment})" for accession, segment in rows]
-    return [accession for (accession,) in rows]
+
+def _is_excluded_status(value: object) -> bool:
+    return str(value or "").strip().lower() not in FALSE_EXCLUSION_VALUES
+
+
+def _load_excluded_rows(cur: sqlite3.Cursor) -> List[Tuple[str, str]]:
+    meta_cols = _table_columns(cur, "meta_data")
+    if {"primary_accession", "exclusion_status", "exclusion_criteria"}.issubset(meta_cols):
+        extra_reason_col = "exclusion" if "exclusion" in meta_cols else None
+        select_cols = ["primary_accession", "exclusion_status", "exclusion_criteria"]
+        if extra_reason_col:
+            select_cols.append(extra_reason_col)
+        cur.execute(
+            f"SELECT {', '.join(select_cols)} FROM meta_data WHERE primary_accession IS NOT NULL AND TRIM(primary_accession) <> ''"
+        )
+        rows = []
+        for row in cur.fetchall():
+            accession = str(row[0] or "").strip()
+            status = row[1]
+            if not accession or not _is_excluded_status(status):
+                continue
+            reason = str(row[2] or "").strip()
+            if not reason and extra_reason_col:
+                reason = str(row[3] or "").strip()
+            rows.append((accession, reason or "metadata_exclusion"))
+        return rows
+
+    if "excluded_accessions" in {row[0] for row in cur.execute("SELECT name FROM sqlite_master WHERE type='table'")}:
+        excluded_cols = _table_columns(cur, "excluded_accessions")
+        if {"primary_accession", "reason"}.issubset(excluded_cols):
+            cur.execute(
+                "SELECT primary_accession, COALESCE(reason, '') FROM excluded_accessions WHERE primary_accession IS NOT NULL AND TRIM(primary_accession) <> ''"
+            )
+            return [(str(acc).strip(), str(reason or "").strip()) for acc, reason in cur.fetchall() if acc]
+
+    return []
+
+
+def _fetch_missing_alignment_examples(meta_rows, missing_accessions, segmented: bool, limit: int = 10) -> List[str]:
+    examples = []
+    missing = {str(acc).strip() for acc in missing_accessions if str(acc).strip()}
+    for row in meta_rows:
+        accession = str(row[0] or "").strip()
+        if accession not in missing:
+            continue
+        if segmented:
+            segment = str(row[1] or "").strip() or "-"
+            examples.append(f"{accession} (segment={segment})")
+        else:
+            examples.append(accession)
+        if len(examples) >= limit:
+            break
+    return examples
 
 
 def _fetch_duplicate_alignment_examples(cur: sqlite3.Cursor, limit: int = 10) -> List[str]:
@@ -134,7 +162,7 @@ def validate_db_schema(cur: sqlite3.Cursor, segmented: bool) -> None:
     cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
     tables = {row[0] for row in cur.fetchall()}
 
-    required_tables = {"meta_data", "sequence_alignment", "excluded_accessions"}
+    required_tables = {"meta_data", "sequence_alignment"}
     missing_tables = sorted(required_tables - tables)
     if missing_tables:
         raise ValidationError(
@@ -144,9 +172,8 @@ def validate_db_schema(cur: sqlite3.Cursor, segmented: bool) -> None:
         )
 
     required_columns = {
-        "meta_data": {"primary_accession"},
+        "meta_data": {"primary_accession", "exclusion_status", "exclusion_criteria"},
         "sequence_alignment": {"sequence_id", "alignment_name"},
-        "excluded_accessions": {"primary_accession", "reason"},
     }
     if segmented:
         required_columns["meta_data"].add("segment")
@@ -180,45 +207,36 @@ def db_checks(db_path: str, segmented: bool) -> Tuple[List[str], List[str]]:
     alignment_rows = scalar(cur, "SELECT COUNT(*) FROM sequence_alignment")
     distinct_seq_ids = scalar(cur, "SELECT COUNT(DISTINCT sequence_id) FROM sequence_alignment")
     meta_rows = scalar(cur, "SELECT COUNT(*) FROM meta_data")
-    excluded_rows = scalar(cur, "SELECT COUNT(*) FROM excluded_accessions")
-
-    excluded_unprojectable = scalar(
-        cur,
-        """
-        SELECT COUNT(*)
-        FROM excluded_accessions
-        WHERE LOWER(COALESCE(reason, '')) LIKE '%cannot be projected into merged segment alignment%'
-        """,
+    excluded_row_data = _load_excluded_rows(cur)
+    excluded_rows = len(excluded_row_data)
+    excluded_reasons = [reason for _, reason in excluded_row_data]
+    excluded_unprojectable = sum(
+        1 for reason in excluded_reasons if "cannot be projected into merged segment alignment" in reason.lower()
     )
-
-    excluded_not_enough_matches = scalar(
-        cur,
-        """
-        SELECT COUNT(*)
-        FROM excluded_accessions
-        WHERE LOWER(COALESCE(reason, '')) LIKE '%unable to align: not enough matches%'
-        """,
+    excluded_not_enough_matches = sum(
+        1 for reason in excluded_reasons if "unable to align: not enough matches" in reason.lower()
     )
-
     excluded_other = excluded_rows - excluded_unprojectable - excluded_not_enough_matches
 
-    missing_from_alignment = scalar(
-        cur,
-        """
-        SELECT COUNT(*) FROM meta_data m
-        WHERE m.primary_accession IS NOT NULL
-          AND TRIM(m.primary_accession) <> ''
-          AND NOT EXISTS (
-              SELECT 1 FROM sequence_alignment s
-              WHERE s.sequence_id = m.primary_accession
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM excluded_accessions e
-              WHERE e.primary_accession = m.primary_accession
-          )
-        """,
+    meta_select = "primary_accession, segment" if segmented else "primary_accession"
+    cur.execute(
+        f"SELECT {meta_select} FROM meta_data WHERE primary_accession IS NOT NULL AND TRIM(primary_accession) <> '' ORDER BY primary_accession"
     )
-    missing_alignment_examples = _fetch_missing_alignment_examples(cur, segmented)
+    meta_accession_rows = cur.fetchall()
+    excluded_accessions = {accession for accession, _ in excluded_row_data}
+    accepted_accessions = {
+        str(row[0]).strip()
+        for row in meta_accession_rows
+        if row and str(row[0]).strip() and str(row[0]).strip() not in excluded_accessions
+    }
+    cur.execute(
+        "SELECT DISTINCT sequence_id FROM sequence_alignment WHERE sequence_id IS NOT NULL AND TRIM(sequence_id) <> ''"
+    )
+    alignment_accessions = {str(row[0]).strip() for row in cur.fetchall() if row and row[0]}
+
+    missing_accessions = sorted(accepted_accessions - alignment_accessions)
+    missing_from_alignment = len(missing_accessions)
+    missing_alignment_examples = _fetch_missing_alignment_examples(meta_accession_rows, missing_accessions, segmented)
 
     missing_alignment_ref_meta = scalar(
         cur,
@@ -237,7 +255,7 @@ def db_checks(db_path: str, segmented: bool) -> Tuple[List[str], List[str]]:
     lines.append(f"  - unique aligned sequence_id values: {distinct_seq_ids}")
     lines.append(f"  - duplicated aligned sequence_id values: {max(alignment_rows - distinct_seq_ids, 0)}")
     lines.append(f"  - meta_data rows: {meta_rows}")
-    lines.append(f"  - excluded_accessions rows: {excluded_rows}")
+    lines.append(f"  - excluded meta_data rows: {excluded_rows}")
     lines.append(f"    - excluded: unprojectable reference projection: {excluded_unprojectable}")
     lines.append(f"    - excluded: nextalign not-enough-matches: {excluded_not_enough_matches}")
     lines.append(f"    - excluded: other reasons: {excluded_other}")
@@ -268,16 +286,7 @@ def db_checks(db_path: str, segmented: bool) -> Tuple[List[str], List[str]]:
         )
         lines.append(f"  - segment mismatches (query vs alignment_name): {segment_mismatch}")
 
-    cur.execute(
-        """
-        SELECT reason, COUNT(*)
-        FROM excluded_accessions
-        GROUP BY reason
-        ORDER BY COUNT(*) DESC
-        LIMIT 5
-        """
-    )
-    top_reasons = cur.fetchall()
+    top_reasons = Counter(excluded_reasons).most_common(5)
     if top_reasons:
         lines.append("  - top exclusion reasons (count | reason):")
         for reason, count in top_reasons:

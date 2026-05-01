@@ -324,10 +324,18 @@ class GenBankFetcher:
 				raise ValueError('SQLite DB must contain table: meta_data')
 
 			acc_col = self._detect_meta_data_acc_col(conn, preferred=meta_acc_col)
+			cursor.execute("PRAGMA table_info(meta_data)")
+			meta_cols = {row[1] for row in cursor.fetchall()}
 			cursor.execute(f"SELECT {acc_col} FROM meta_data WHERE {acc_col} IS NOT NULL")
 			meta_accessions = [row[0] for row in cursor.fetchall() if row[0]]
 
 			excluded_primary = set()
+			if 'exclusion_status' in meta_cols:
+				cursor.execute(
+					f"SELECT {acc_col} FROM meta_data WHERE {acc_col} IS NOT NULL "
+					"AND LOWER(TRIM(COALESCE(CAST(exclusion_status AS TEXT), ''))) NOT IN ('', '0', 'false', 'no', 'na', 'none', 'nan')"
+				)
+				excluded_primary.update({row[0].strip() for row in cursor.fetchall() if row[0]})
 			cursor.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='excluded_accessions' LIMIT 1")
 			if cursor.fetchone() is not None:
 				cursor.execute("PRAGMA table_info(excluded_accessions)")

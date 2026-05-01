@@ -577,6 +577,14 @@ class CreateSqliteDB:
 				excluded_records.append({"primary_accession": fid, "reason": filtered_details.get(fid, "alignment_filtering")})
 
 		df_meta_data = self._read_tsv_required(self.meta_data, ["primary_accession"], "meta_data", dtype=str)
+		if "exclusion_status" not in df_meta_data.columns:
+			df_meta_data["exclusion_status"] = ""
+		if "exclusion_criteria" not in df_meta_data.columns:
+			df_meta_data["exclusion_criteria"] = ""
+		if "exclusion" in df_meta_data.columns:
+			raw_exclusion = df_meta_data["exclusion"].fillna("").astype(str).str.strip()
+			existing_criteria = df_meta_data["exclusion_criteria"].fillna("").astype(str).str.strip()
+			df_meta_data["exclusion_criteria"] = existing_criteria.mask(existing_criteria == "", raw_exclusion)
 		acc_type_col = "accession_type" if "accession_type" in df_meta_data.columns else None
 		if acc_type_col:
 			acc_type_norm = df_meta_data[acc_type_col].fillna("").str.strip().str.lower()
@@ -584,22 +592,18 @@ class CreateSqliteDB:
 		else:
 			is_ref_or_master = pd.Series(False, index=df_meta_data.index)
 		if filtered_ids and "primary_accession" in df_meta_data.columns:
-			before_count = len(df_meta_data)
-			remove_mask = df_meta_data["primary_accession"].isin(filtered_ids) & (~is_ref_or_master)
-			df_meta_data = df_meta_data[~remove_mask]
-			after_count = len(df_meta_data)
-			if before_count != after_count:
-				print(f"[CreateSqliteDB] Removed {before_count - after_count} filtered non-reference sequences from meta_data")
-			if acc_type_col:
-				ref_or_master_ids = set(
-					df_meta_data[
-						df_meta_data[acc_type_col].fillna("").str.strip().str.lower().isin(["master", "reference"])
-					]["primary_accession"].astype(str).str.strip().tolist()
+			filtered_mask = df_meta_data["primary_accession"].astype(str).str.strip().isin(filtered_ids) & (~is_ref_or_master)
+			if filtered_mask.any():
+				filtered_acc = df_meta_data.loc[filtered_mask, "primary_accession"].astype(str).str.strip()
+				reason_map = filtered_acc.map(lambda acc: str(filtered_details.get(acc, "alignment_filtering")).strip())
+				reason_map = reason_map.mask(reason_map == "", "alignment_filtering")
+				existing_criteria = df_meta_data.loc[filtered_mask, "exclusion_criteria"].fillna("").astype(str).str.strip()
+				df_meta_data.loc[filtered_mask, "exclusion_criteria"] = existing_criteria.where(
+					existing_criteria != "",
+					reason_map,
 				)
-				excluded_records = [
-					r for r in excluded_records
-					if str(r.get("primary_accession", "")).strip() not in ref_or_master_ids
-				]
+				df_meta_data.loc[filtered_mask, "exclusion_status"] = "1"
+				print(f"[CreateSqliteDB] Marked {int(filtered_mask.sum())} filtered non-reference sequences as excluded in meta_data")
 		is_ref_or_master = is_ref_or_master.reindex(df_meta_data.index, fill_value=False)
 		exclusion_reason = pd.Series("", index=df_meta_data.index, dtype=str)
 		for col in ["exclusion", "exclusion_criteria"]:
@@ -613,6 +617,9 @@ class CreateSqliteDB:
 			status_mask = ~status_values.str.lower().isin(["", "0", "false", "no", "na", "none", "nan"])
 			fallback_reason = "metadata_exclusion"
 			exclusion_reason = exclusion_reason.mask((exclusion_reason == "") & status_mask, fallback_reason)
+		df_meta_data.loc[status_mask, "exclusion_status"] = "1"
+		df_meta_data.loc[(exclusion_reason != "") & (~status_mask), "exclusion_status"] = "1"
+		df_meta_data.loc[df_meta_data["exclusion_criteria"].fillna("").astype(str).str.strip() == "", "exclusion_criteria"] = exclusion_reason
 
 		exclusion_mask = exclusion_reason.astype(str).str.strip() != ""
 		excluded_rows = df_meta_data[exclusion_mask]
@@ -623,18 +630,20 @@ class CreateSqliteDB:
 				reason = str(exclusion_reason.loc[idx]).strip()
 				if acc:
 					excluded_records.append({"primary_accession": acc, "reason": reason})
-			remove_mask = exclusion_mask & (~is_ref_or_master)
-			df_meta_data = df_meta_data[~remove_mask]
-			retained_refs = (exclusion_mask & is_ref_or_master).sum()
-			if retained_refs:
-				print(f"[CreateSqliteDB] Retained {retained_refs} reference/master rows despite exclusion flags")
 
 		df_aln = self._read_tsv_required(self.pad_aln, [], "pad_aln")
 		df_aln = self._normalize_alignment_columns(df_aln, "pad_aln")
 
 		df_meta_data = self._add_cluster_column(df_meta_data)
 		df_meta_data = self._add_reference_columns(df_meta_data, df_aln)
-		valid_accessions = set(df_meta_data["primary_accession"].dropna().astype(str).str.strip()) if "primary_accession" in df_meta_data.columns else set()
+		valid_accessions = set()
+		if "primary_accession" in df_meta_data.columns:
+			valid_accessions = set(
+				df_meta_data.loc[(~exclusion_mask) | is_ref_or_master, "primary_accession"]
+				.dropna()
+				.astype(str)
+				.str.strip()
+			)
 
 		df_features = self._read_tsv_required(self.features, [], "features")
 		if valid_accessions and "accession" in df_features.columns:
@@ -676,9 +685,9 @@ class CreateSqliteDB:
 		conn = sqlite3.connect(db_path)
 		cursor = conn.cursor()
 		cursor.execute("PRAGMA foreign_keys = ON;")
+		cursor.execute("DROP TABLE IF EXISTS excluded_accessions;")
 		cursor.execute("CREATE TABLE IF NOT EXISTS trees (name TEXT, source TEXT, segment_key TEXT, segment TEXT, newick TEXT, created_at TEXT);")
 		cursor.execute("CREATE TABLE IF NOT EXISTS info (creation_type TEXT, date TEXT);")
-		cursor.execute("CREATE TABLE IF NOT EXISTS excluded_accessions (primary_accession TEXT, reason TEXT);")
 		cursor.execute("CREATE TABLE IF NOT EXISTS update_exclusions (batch_id TEXT, table_name TEXT, key TEXT, reason TEXT, date TEXT);")
 		cursor.execute("CREATE TABLE IF NOT EXISTS update_batches (batch_id TEXT PRIMARY KEY, started_at TEXT, finished_at TEXT, update_db TEXT, mode TEXT);")
 		cursor.execute("CREATE TABLE IF NOT EXISTS update_table_deltas (batch_id TEXT, table_name TEXT, before_count INTEGER, after_count INTEGER, delta INTEGER);")
@@ -732,12 +741,7 @@ class CreateSqliteDB:
 			summary_path = os.path.join(self.base_dir, self.output_dir, "db_summary.txt")
 			with open(summary_path, "w", encoding="utf-8") as sf:
 				sf.write(summary_str)
-
-			if self.update and self._table_exists(conn, "excluded_accessions"):
-				df_excluded[['primary_accession', 'reason']].to_sql("excluded_accessions", conn, if_exists="append", index=False)
-			else:
-				df_excluded[['primary_accession', 'reason']].to_sql("excluded_accessions", conn, if_exists="replace", index=False)
-			print(f"[CreateSqliteDB] excluded_accessions now has >= {len(df_excluded)} newly added records")
+			print(f"[CreateSqliteDB] Marked {len(df_excluded)} excluded accessions directly on meta_data")
 
 		if update_exclusions:
 			pd.DataFrame(update_exclusions).to_sql("update_exclusions", conn, if_exists="append", index=False)

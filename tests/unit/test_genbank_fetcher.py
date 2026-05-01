@@ -27,15 +27,14 @@ def _write_db(path: Path, meta_col: str, meta_values, excluded_values=None):
     conn = sqlite3.connect(str(path))
     try:
         cur = conn.cursor()
-        cur.execute(f"CREATE TABLE meta_data ({meta_col} TEXT)")
+        cur.execute(f"CREATE TABLE meta_data ({meta_col} TEXT, exclusion_status TEXT, exclusion_criteria TEXT)")
         cur.executemany(
-            f"INSERT INTO meta_data({meta_col}) VALUES (?)",
+            f"INSERT INTO meta_data({meta_col}, exclusion_status, exclusion_criteria) VALUES (?, '', '')",
             [(v,) for v in meta_values],
         )
-        cur.execute("CREATE TABLE excluded_accessions (primary_accession TEXT, reason TEXT)")
         cur.executemany(
-            "INSERT INTO excluded_accessions(primary_accession, reason) VALUES (?, ?)",
-            [(v, "excluded") for v in excluded_values],
+            f"INSERT INTO meta_data({meta_col}, exclusion_status, exclusion_criteria) VALUES (?, '1', 'excluded')",
+            [(v,) for v in excluded_values],
         )
         conn.commit()
     finally:

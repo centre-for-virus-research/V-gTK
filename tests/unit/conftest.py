@@ -10,18 +10,18 @@ def basic_update_db(tmp_path: Path) -> Path:
     conn = sqlite3.connect(str(db_path))
     try:
         cur = conn.cursor()
-        cur.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT, segment TEXT, host_taxa_id TEXT)")
+        cur.execute(
+            "CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT, segment TEXT, host_taxa_id TEXT, exclusion_status TEXT, exclusion_criteria TEXT)"
+        )
         cur.executemany(
-            "INSERT INTO meta_data(primary_accession, accession_type, segment, host_taxa_id) VALUES (?, ?, ?, ?)",
+            "INSERT INTO meta_data(primary_accession, accession_type, segment, host_taxa_id, exclusion_status, exclusion_criteria) VALUES (?, ?, ?, ?, ?, ?)",
             [
-                ("REF1", "master", "1", "111"),
-                ("REF2", "reference", "2", "222"),
-                ("Q_OLD", "query", "1", "111"),
+                ("REF1", "master", "1", "111", "", ""),
+                ("REF2", "reference", "2", "222", "", ""),
+                ("Q_OLD", "query", "1", "111", "", ""),
+                ("Q_EXCL", "query", "1", "111", "1", "manual"),
             ],
         )
-
-        cur.execute("CREATE TABLE excluded_accessions (primary_accession TEXT, reason TEXT)")
-        cur.execute("INSERT INTO excluded_accessions(primary_accession, reason) VALUES ('Q_EXCL', 'manual')")
 
         cur.execute(
             "CREATE TABLE sequence_alignment (primary_accession TEXT, alignment_name TEXT, alignment TEXT, segment TEXT)"

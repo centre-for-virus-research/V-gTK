@@ -144,14 +144,16 @@ def _create_segmented_subsample_db(db_path: Path):
     conn = sqlite3.connect(str(db_path))
     try:
         cur = conn.cursor()
-        cur.execute("CREATE TABLE meta_data (primary_accession TEXT, segment TEXT)")
+        cur.execute(
+            "CREATE TABLE meta_data (primary_accession TEXT, segment TEXT, exclusion_status TEXT, exclusion_criteria TEXT)"
+        )
         cur.executemany(
-            "INSERT INTO meta_data(primary_accession, segment) VALUES (?, ?)",
+            "INSERT INTO meta_data(primary_accession, segment, exclusion_status, exclusion_criteria) VALUES (?, ?, ?, ?)",
             [
-                ("SEG1_A", "1"),
-                ("SEG1_B", "1"),
-                ("SEG2_A", "2"),
-                ("SEG2_B", "2"),
+                ("SEG1_A", "1", "", ""),
+                ("SEG1_B", "1", "", ""),
+                ("SEG2_A", "2", "", ""),
+                ("SEG2_B", "2", "", ""),
             ],
         )
         cur.execute("CREATE TABLE sequences (header TEXT, sequence TEXT)")
@@ -179,7 +181,6 @@ def _create_segmented_subsample_db(db_path: Path):
                 ("usher_seg2", "usher", "(SEG2_A:0.1);", "2", "refset_2"),
             ],
         )
-        cur.execute("CREATE TABLE excluded_accessions (primary_accession TEXT, reason TEXT)")
         cur.execute("CREATE TABLE update_batches (batch_id TEXT, mode TEXT, started_at TEXT, finished_at TEXT)")
         cur.execute("INSERT INTO update_batches(batch_id, mode, started_at, finished_at) VALUES ('b1', 'update', '2026-01-01', '2026-01-01')")
         cur.execute("CREATE TABLE update_table_deltas (batch_id TEXT, table_name TEXT, before_count INTEGER, after_count INTEGER, delta INTEGER)")
@@ -425,13 +426,15 @@ def test_validate_db_tree_update_integrity_ignores_placeholder_cluster_assignmen
     conn = sqlite3.connect(str(db_path))
     try:
         cur = conn.cursor()
-        cur.execute("CREATE TABLE meta_data (primary_accession TEXT, cluster_98pct TEXT, segment TEXT)")
+        cur.execute(
+            "CREATE TABLE meta_data (primary_accession TEXT, cluster_98pct TEXT, segment TEXT, exclusion_status TEXT, exclusion_criteria TEXT)"
+        )
         cur.executemany(
-            "INSERT INTO meta_data(primary_accession, cluster_98pct, segment) VALUES (?, ?, ?)",
+            "INSERT INTO meta_data(primary_accession, cluster_98pct, segment, exclusion_status, exclusion_criteria) VALUES (?, ?, ?, ?, ?)",
             [
-                ("REF1", "REF1", ""),
-                ("Q_PLACEABLE", "REF1", ""),
-                ("Q_UNPLACED", "NA- see tree", ""),
+                ("REF1", "REF1", "", "", ""),
+                ("Q_PLACEABLE", "REF1", "", "", ""),
+                ("Q_UNPLACED", "NA- see tree", "", "", ""),
             ],
         )
         cur.execute("CREATE TABLE sequences (header TEXT, sequence TEXT)")
@@ -451,11 +454,7 @@ def test_validate_db_tree_update_integrity_ignores_placeholder_cluster_assignmen
             "INSERT INTO trees(name, source, newick, segment, segment_key) VALUES (?, ?, ?, ?, ?)",
             ("usher", "usher", "(REF1:0.1,Q_PLACEABLE:0.2);", "", None),
         )
-        cur.execute("CREATE TABLE excluded_accessions (primary_accession TEXT, reason TEXT)")
-        cur.execute(
-            "INSERT INTO excluded_accessions(primary_accession, reason) VALUES (?, ?)",
-            ("Q_UNPLACED", "alignment_filtering"),
-        )
+        cur.execute("UPDATE meta_data SET exclusion_status='1', exclusion_criteria='alignment_filtering' WHERE primary_accession='Q_UNPLACED'")
         cur.execute("CREATE TABLE update_batches (batch_id TEXT, mode TEXT, started_at TEXT, finished_at TEXT)")
         cur.execute("INSERT INTO update_batches(batch_id, mode, started_at, finished_at) VALUES ('b1', 'update', '2026-01-01', '2026-01-01')")
         cur.execute("CREATE TABLE update_table_deltas (batch_id TEXT, table_name TEXT, before_count INTEGER, after_count INTEGER, delta INTEGER)")
@@ -572,10 +571,12 @@ def test_validate_db_tree_prefers_largest_usher_tree_row(tmp_path: Path):
     conn = sqlite3.connect(str(db_path))
     try:
         cur = conn.cursor()
-        cur.execute("CREATE TABLE meta_data (primary_accession TEXT, cluster_95pct TEXT)")
+        cur.execute(
+            "CREATE TABLE meta_data (primary_accession TEXT, cluster_95pct TEXT, exclusion_status TEXT, exclusion_criteria TEXT)"
+        )
         cur.executemany(
-            "INSERT INTO meta_data(primary_accession, cluster_95pct) VALUES (?, ?)",
-            [("A", "A"), ("B", "B"), ("C", "C")],
+            "INSERT INTO meta_data(primary_accession, cluster_95pct, exclusion_status, exclusion_criteria) VALUES (?, ?, ?, ?)",
+            [("A", "A", "", ""), ("B", "B", "", ""), ("C", "C", "", "")],
         )
         cur.execute("CREATE TABLE sequences (header TEXT, sequence TEXT)")
         cur.executemany(
@@ -598,7 +599,6 @@ def test_validate_db_tree_prefers_largest_usher_tree_row(tmp_path: Path):
                 ("iqtree_large", "iqtree", "(A:0.1,B:0.2,C:0.3,D:0.4);", "", None),
             ],
         )
-        cur.execute("CREATE TABLE excluded_accessions (primary_accession TEXT, reason TEXT)")
         cur.execute("CREATE TABLE insertions (primary_accession TEXT)")
         cur.executemany("INSERT INTO insertions(primary_accession) VALUES (?)", [("A",), ("B",), ("C",)])
         cur.execute("CREATE TABLE host_taxa (primary_accession TEXT)")

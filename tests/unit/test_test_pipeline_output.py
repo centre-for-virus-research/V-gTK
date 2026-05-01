@@ -17,12 +17,13 @@ def _write_tsv(path: Path, header: str, rows: List[str]) -> None:
 def _create_valid_db(path: Path) -> None:
     con = sqlite3.connect(path)
     cur = con.cursor()
-    cur.execute("CREATE TABLE meta_data (primary_accession TEXT, segment TEXT)")
+    cur.execute(
+        "CREATE TABLE meta_data (primary_accession TEXT, segment TEXT, exclusion_status TEXT, exclusion_criteria TEXT)"
+    )
     cur.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, alignment_name TEXT)")
-    cur.execute("CREATE TABLE excluded_accessions (primary_accession TEXT, reason TEXT)")
-    cur.execute("INSERT INTO meta_data VALUES ('A1', '1')")
+    cur.execute("INSERT INTO meta_data VALUES ('A1', '1', '', '')")
     cur.execute("INSERT INTO sequence_alignment VALUES ('A1', 'REF1')")
-    cur.execute("INSERT INTO meta_data VALUES ('REF1', '1')")
+    cur.execute("INSERT INTO meta_data VALUES ('REF1', '1', '', '')")
     con.commit()
     con.close()
 
@@ -80,7 +81,6 @@ def test_non_segmented_missing_required_table_fails_informatively(tmp_path: Path
     assert result.returncode == 2
     assert "missing required table" in result.stderr.lower()
     assert "sequence_alignment" in result.stderr
-    assert "excluded_accessions" in result.stderr
     assert "traceback" not in result.stderr.lower()
 
 
@@ -90,7 +90,6 @@ def test_non_segmented_missing_required_column_fails_informatively(tmp_path: Pat
     cur = con.cursor()
     cur.execute("CREATE TABLE meta_data (primary_accession TEXT)")
     cur.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, alignment_name TEXT)")
-    cur.execute("CREATE TABLE excluded_accessions (accession TEXT, reason TEXT)")
     con.commit()
     con.close()
 
@@ -98,7 +97,7 @@ def test_non_segmented_missing_required_column_fails_informatively(tmp_path: Pat
 
     assert result.returncode == 2
     assert "missing required column" in result.stderr.lower()
-    assert "excluded_accessions: primary_accession" in result.stderr
+    assert "meta_data: exclusion_criteria, exclusion_status" in result.stderr
     assert "traceback" not in result.stderr.lower()
 
 
@@ -117,11 +116,12 @@ def test_non_segmented_empty_blast_file_warns_but_does_not_fail(tmp_path: Path):
     db = tmp_path / "ok.db"
     con = sqlite3.connect(db)
     cur = con.cursor()
-    cur.execute("CREATE TABLE meta_data (primary_accession TEXT, segment TEXT)")
+    cur.execute(
+        "CREATE TABLE meta_data (primary_accession TEXT, segment TEXT, exclusion_status TEXT, exclusion_criteria TEXT)"
+    )
     cur.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, alignment_name TEXT)")
-    cur.execute("CREATE TABLE excluded_accessions (primary_accession TEXT, reason TEXT)")
-    cur.execute("INSERT INTO meta_data VALUES ('A1', '1')")
-    cur.execute("INSERT INTO meta_data VALUES ('REF1', '1')")
+    cur.execute("INSERT INTO meta_data VALUES ('A1', '1', '1', 'deliberately excluded')")
+    cur.execute("INSERT INTO meta_data VALUES ('REF1', '1', '', '')")
     cur.execute("INSERT INTO sequence_alignment VALUES ('A1', 'REF1')")
     cur.execute("INSERT INTO sequence_alignment VALUES ('REF1', 'REF1')")
     con.commit()
@@ -161,11 +161,12 @@ def test_non_segmented_missing_alignment_reports_examples_and_duplicates(tmp_pat
     db = tmp_path / "diagnostic.db"
     con = sqlite3.connect(db)
     cur = con.cursor()
-    cur.execute("CREATE TABLE meta_data (primary_accession TEXT, segment TEXT)")
+    cur.execute(
+        "CREATE TABLE meta_data (primary_accession TEXT, segment TEXT, exclusion_status TEXT, exclusion_criteria TEXT)"
+    )
     cur.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, alignment_name TEXT)")
-    cur.execute("CREATE TABLE excluded_accessions (primary_accession TEXT, reason TEXT)")
-    cur.execute("INSERT INTO meta_data VALUES ('A1', '1')")
-    cur.execute("INSERT INTO meta_data VALUES ('A2', '1')")
+    cur.execute("INSERT INTO meta_data VALUES ('A1', '1', '', '')")
+    cur.execute("INSERT INTO meta_data VALUES ('A2', '1', '', '')")
     cur.execute("INSERT INTO sequence_alignment VALUES ('A1', 'A1')")
     cur.execute("INSERT INTO sequence_alignment VALUES ('A1', 'A1')")
     con.commit()

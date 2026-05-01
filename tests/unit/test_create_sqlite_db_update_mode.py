@@ -239,13 +239,14 @@ def test_create_sqlite_db_filtered_ids_do_not_exclude_reference_rows(tmp_path: P
     conn = sqlite3.connect(str(tmp_path / "SqliteDB" / "upd_db.db"))
     try:
         cur = conn.cursor()
-        cur.execute("SELECT primary_accession FROM meta_data ORDER BY primary_accession")
-        kept = [row[0] for row in cur.fetchall()]
-        assert kept == ["REF1"]
-
-        cur.execute("SELECT primary_accession, reason FROM excluded_accessions ORDER BY primary_accession")
-        excluded = cur.fetchall()
-        assert excluded == [("Q1", "alignment_filtering")]
+        cur.execute(
+            "SELECT primary_accession, exclusion_status, exclusion_criteria FROM meta_data ORDER BY primary_accession"
+        )
+        kept = cur.fetchall()
+        assert kept == [
+            ("Q1", "1", "alignment_filtering"),
+            ("REF1", "", ""),
+        ]
     finally:
         conn.close()
 
@@ -430,13 +431,18 @@ def test_update_mode_filtered_ids_keeps_real_master_even_when_listed(tmp_path: P
         cur.execute("SELECT COUNT(*) FROM meta_data WHERE primary_accession=?", (master_acc,))
         assert cur.fetchone()[0] >= 1
 
-        cur.execute("SELECT reason FROM excluded_accessions WHERE primary_accession='Q_REAL_FILTER' ORDER BY rowid DESC LIMIT 1")
+        cur.execute(
+            "SELECT exclusion_status, exclusion_criteria FROM meta_data WHERE primary_accession='Q_REAL_FILTER' ORDER BY rowid DESC LIMIT 1"
+        )
         q_row = cur.fetchone()
         assert q_row is not None
-        assert q_row[0] == "alignment_filtering"
+        assert q_row == ("1", "alignment_filtering")
 
-        cur.execute("SELECT COUNT(*) FROM excluded_accessions WHERE primary_accession=?", (master_acc,))
-        assert cur.fetchone()[0] == 0
+        cur.execute(
+            "SELECT exclusion_status FROM meta_data WHERE primary_accession=? ORDER BY rowid DESC LIMIT 1",
+            (master_acc,),
+        )
+        assert cur.fetchone()[0] in ("", None)
     finally:
         conn.close()
 
@@ -639,12 +645,11 @@ def test_update_mode_uses_meta_exclusion_criteria_when_filtered_files_are_empty(
     conn = sqlite3.connect(str(out_db))
     try:
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM meta_data WHERE primary_accession='Q_MISSING'")
-        assert cur.fetchone()[0] == 0
-
-        cur.execute("SELECT reason FROM excluded_accessions WHERE primary_accession='Q_MISSING' ORDER BY rowid DESC LIMIT 1")
+        cur.execute(
+            "SELECT exclusion_status, exclusion_criteria FROM meta_data WHERE primary_accession='Q_MISSING' ORDER BY rowid DESC LIMIT 1"
+        )
         row = cur.fetchone()
         assert row is not None
-        assert row[0] == "Unable to align during update"
+        assert row == ("1", "Unable to align during update")
     finally:
         conn.close()

@@ -117,6 +117,14 @@ class GISAIDTidy:
                 except Exception:
                     pass
                 try:
+                    cursor.execute(
+                        "SELECT primary_accession FROM meta_data WHERE primary_accession IS NOT NULL AND TRIM(primary_accession) <> '' "
+                        "AND LOWER(TRIM(COALESCE(CAST(exclusion_status AS TEXT), ''))) NOT IN ('', '0', 'false', 'no', 'na', 'none', 'nan')"
+                    )
+                    existing_accessions.update(row[0] for row in cursor.fetchall() if row[0])
+                except Exception:
+                    pass
+                try:
                     cursor.execute("SELECT primary_accession FROM excluded_accessions")
                     existing_accessions.update(row[0] for row in cursor.fetchall() if row[0])
                 except Exception:

@@ -76,24 +76,23 @@ def _write_xml(path: Path, gbseq_blocks):
 
 
 def _write_update_db(path: Path, existing_accessions=None, excluded_accessions=None):
-  existing_accessions = existing_accessions or []
-  excluded_accessions = excluded_accessions or []
-  conn = sqlite3.connect(str(path))
-  try:
-    cur = conn.cursor()
-    cur.execute("CREATE TABLE meta_data (primary_accession TEXT)")
-    cur.executemany(
-      "INSERT INTO meta_data(primary_accession) VALUES (?)",
-      [(acc,) for acc in existing_accessions],
-    )
-    cur.execute("CREATE TABLE excluded_accessions (primary_accession TEXT, reason TEXT)")
-    cur.executemany(
-      "INSERT INTO excluded_accessions(primary_accession, reason) VALUES (?, ?)",
-      [(acc, "excluded") for acc in excluded_accessions],
-    )
-    conn.commit()
-  finally:
-    conn.close()
+    existing_accessions = existing_accessions or []
+    excluded_accessions = excluded_accessions or []
+    conn = sqlite3.connect(str(path))
+    try:
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE meta_data (primary_accession TEXT, exclusion_status TEXT, exclusion_criteria TEXT)")
+        cur.executemany(
+            "INSERT INTO meta_data(primary_accession, exclusion_status, exclusion_criteria) VALUES (?, '', '')",
+            [(acc,) for acc in existing_accessions],
+        )
+        cur.executemany(
+            "INSERT INTO meta_data(primary_accession, exclusion_status, exclusion_criteria) VALUES (?, '1', 'excluded')",
+            [(acc,) for acc in excluded_accessions],
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def test_load_ref_list_supports_two_and_three_column_lines(tmp_path: Path):
