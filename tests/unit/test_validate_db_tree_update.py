@@ -295,6 +295,90 @@ def test_validate_db_tree_fails_when_features_do_not_match_expected_accessions(t
     assert "DB consistency checks failed for features vs meta_data" in result.stderr
 
 
+def test_validate_db_tree_fails_without_trees_by_default(tmp_path: Path, basic_update_db: Path):
+    _add_required_alignment_tables(basic_update_db)
+    conn = sqlite3.connect(str(basic_update_db))
+    try:
+        conn.execute("DELETE FROM trees")
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--db",
+            str(basic_update_db),
+            "--outdir",
+            str(tmp_path / "out"),
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "No tree found in DB (trees table is empty)" in result.stderr
+
+
+def test_validate_db_tree_allows_tree_free_db_with_flag(tmp_path: Path, basic_update_db: Path):
+    _add_required_alignment_tables(basic_update_db)
+    conn = sqlite3.connect(str(basic_update_db))
+    try:
+        conn.execute("DELETE FROM trees")
+        conn.commit()
+    finally:
+        conn.close()
+
+    outdir = tmp_path / "out"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--db",
+            str(basic_update_db),
+            "--outdir",
+            str(outdir),
+            "--allow-no-trees",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0
+    report = (outdir / "db_tree_validation.txt").read_text(encoding="utf-8")
+    assert "Tree status: not present (allowed by --allow-no-trees)" in report
+    assert (outdir / "db_tree.png").exists()
+
+
+def test_validate_db_tree_tree_free_mode_still_checks_consistency(tmp_path: Path, basic_update_db: Path):
+    _add_required_alignment_tables(basic_update_db)
+    conn = sqlite3.connect(str(basic_update_db))
+    try:
+        conn.execute("DELETE FROM trees")
+        conn.execute("DELETE FROM features WHERE accession='REF2'")
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--db",
+            str(basic_update_db),
+            "--outdir",
+            str(tmp_path / "out"),
+            "--allow-no-trees",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "DB consistency checks failed for features vs meta_data" in result.stderr
+
+
 def test_validate_db_tree_update_integrity_fails_without_audit_tables(tmp_path: Path, basic_update_db: Path):
     _add_required_alignment_tables(basic_update_db)
     conn = sqlite3.connect(str(basic_update_db))

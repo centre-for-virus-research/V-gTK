@@ -181,6 +181,8 @@ def test_create_sqlite_db_uses_filtered_details_reason(tmp_path: Path):
         "SELECT primary_accession, exclusion_status, exclusion_criteria FROM meta_data WHERE primary_accession='B'"
     )
     rows = cur.fetchall()
+    cur.execute("SELECT COUNT(*) FROM trees")
+    tree_count = cur.fetchone()[0]
     conn.close()
 
     assert rows == [
@@ -190,6 +192,7 @@ def test_create_sqlite_db_uses_filtered_details_reason(tmp_path: Path):
             "alignment_filtering: reference not present in master-projected reference_aln; query cannot be projected into merged segment alignment",
         )
     ]
+    assert tree_count == 0
 
 
 def test_create_sqlite_db_maps_tree_manifest_segment_from_refset_key(tmp_path: Path):

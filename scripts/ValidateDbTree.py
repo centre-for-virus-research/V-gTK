@@ -766,6 +766,11 @@ def main(argv=None):
         help="Validate update audit tables and update-mode integrity constraints",
     )
     parser.add_argument(
+        "--allow-no-trees",
+        action="store_true",
+        help="Allow validation to pass when the DB intentionally contains no trees",
+    )
+    parser.add_argument(
         "--accession-column",
         default="primary_accession",
         help="Accession column in meta_data used as the expected accession set",
@@ -797,11 +802,15 @@ def main(argv=None):
         where_sql, where_params = get_meta_nonexcluded_filter(meta_columns, args.exclusion_column, args.exclude_value)
 
         tree_name, tree_source, newick = fetch_tree_newick(conn)
-        if not newick:
+        if not newick and not args.allow_no_trees:
             raise SystemExit("No tree found in DB (trees table is empty)")
 
-        tree = Phylo.read(StringIO(newick), "newick")
-        tree_terminals = {t.name for t in tree.get_terminals() if t.name}
+        tree_available = bool(newick)
+        tree = None
+        tree_terminals = set()
+        if tree_available:
+            tree = Phylo.read(StringIO(newick), "newick")
+            tree_terminals = {t.name for t in tree.get_terminals() if t.name}
 
         meta_accessions = [x for x in fetch_table_column(conn, "meta_data", args.accession_column) if x]
         seq_headers = [x for x in fetch_table_column(conn, "sequences", "header") if x]
@@ -814,7 +823,7 @@ def main(argv=None):
         accepted_filtered_union = set(meta_info["accepted_filtered_union"])
         expected_meta_set = set(expected_accessions)
         missing_in_sequences = sorted(expected_meta_set - seq_set)
-        missing_in_meta = sorted(tree_terminals - meta_set)
+        missing_in_meta = sorted(tree_terminals - meta_set) if tree_available else []
 
         cluster_col = find_cluster_column(meta_columns)
         centroid_set = set()
@@ -829,10 +838,11 @@ def main(argv=None):
                 for _, cluster_val in cluster_rows
                 if not is_cluster_placeholder(cluster_val)
             }
-            missing_centroids_in_tree = sorted(centroid_set - tree_terminals)
-            extra_in_tree = sorted(tree_terminals - centroid_set)
+            if tree_available:
+                missing_centroids_in_tree = sorted(centroid_set - tree_terminals)
+                extra_in_tree = sorted(tree_terminals - centroid_set)
 
-        missing_in_tree = sorted(expected_meta_set - tree_terminals)
+        missing_in_tree = sorted(expected_meta_set - tree_terminals) if tree_available else []
 
         consistency_results = {
             "sequence_alignment vs meta_data": validate_accession_table(
@@ -875,7 +885,7 @@ def main(argv=None):
             segment_count = len(set(segment_values))
 
         segmented_validation_ok = False
-        if args.expect_segment_trees and segment_count is not None and segment_count > 1:
+        if tree_available and args.expect_segment_trees and segment_count is not None and segment_count > 1:
             usher_trees = fetch_trees(conn, source="usher")
 
             cursor.execute(f"SELECT {args.accession_column}, segment FROM meta_data")
@@ -974,8 +984,12 @@ def main(argv=None):
                 report.write("\n\n")
 
             report.write("=== Tree Validation Summary ===\n")
-            report.write(f"Tree source: {tree_source or tree_name}\n")
-            report.write(f"Tree name: {tree_name or ''}\n")
+            if tree_available:
+                report.write(f"Tree status: present\n")
+                report.write(f"Tree source: {tree_source or tree_name}\n")
+                report.write(f"Tree name: {tree_name or ''}\n")
+            else:
+                report.write("Tree status: not present (allowed by --allow-no-trees)\n")
             report.write(f"Meta rows: {meta_count}\n")
             report.write(f"Sequence rows: {seq_count}\n")
             report.write(f"Tree terminals: {len(tree_terminals)}\n")
@@ -1024,10 +1038,15 @@ def main(argv=None):
                     report.write(f"- {table_name}: no accession-like columns found\n")
                     continue
                 values = collect_table_values(conn, table_name, acc_cols)
-                missing_from_table = sorted(tree_terminals - values)
-                report.write(
-                    f"- {table_name}: columns={','.join(acc_cols)} values={len(values)} missing_from_table={len(missing_from_table)}\n"
-                )
+                if tree_available:
+                    missing_from_table = sorted(tree_terminals - values)
+                    report.write(
+                        f"- {table_name}: columns={','.join(acc_cols)} values={len(values)} missing_from_table={len(missing_from_table)}\n"
+                    )
+                else:
+                    report.write(
+                        f"- {table_name}: columns={','.join(acc_cols)} values={len(values)} tree_coverage_skipped=1\n"
+                    )
 
             if args.check_update_integrity:
                 report.write("\nUpdate integrity checks:\n")
@@ -1087,8 +1106,11 @@ def main(argv=None):
             with open(extra_in_tree_path, "w", encoding="utf-8") as handle:
                 handle.write("\n".join(extra_in_tree) + "\n")
 
-        print(f"[info] Tree source: {tree_source or tree_name}")
-        print(f"[info] Tree name: {tree_name or ''}")
+        if tree_available:
+            print(f"[info] Tree source: {tree_source or tree_name}")
+            print(f"[info] Tree name: {tree_name or ''}")
+        else:
+            print("[info] Tree status: not present (allowed by --allow-no-trees)")
         print(f"[info] Accepted distinct accessions: {len(accepted_accessions)}")
         print(f"[info] Filtered distinct accessions: {len(filtered_accessions)}")
         print(f"[info] Accepted + filtered distinct accessions: {len(accepted_filtered_union)}")
@@ -1137,7 +1159,11 @@ def main(argv=None):
 
         fig = plt.figure(figsize=(12, 18))
         ax = fig.add_subplot(1, 1, 1)
-        Phylo.draw(tree, do_show=False, axes=ax)
+        if tree_available:
+            Phylo.draw(tree, do_show=False, axes=ax)
+        else:
+            ax.text(0.5, 0.5, "No tree present in DB", ha="center", va="center", fontsize=16)
+            ax.set_axis_off()
         plot_path = os.path.join(args.outdir, "db_tree.png")
         plt.tight_layout()
         fig.savefig(plot_path, dpi=150)
@@ -1152,7 +1178,7 @@ def main(argv=None):
             )
             return
 
-        if args.expect_segment_trees and segment_count is not None and segment_count > 1 and not segmented_validation_ok:
+        if tree_available and args.expect_segment_trees and segment_count is not None and segment_count > 1 and not segmented_validation_ok:
             if usher_tree_count < segment_count:
                 raise SystemExit(
                     "Validation failed: segmented run expects at least one UShER tree per segment "
@@ -1192,6 +1218,9 @@ def main(argv=None):
                 raise SystemExit(
                     "Validation failed: DB consistency checks failed for " + ", ".join(failed_consistency_checks + failed_mutation_checks)
                 )
+
+        if not tree_available:
+            return
 
         if tree_source == "usher":
             if segmented_validation_ok:

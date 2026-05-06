@@ -48,8 +48,12 @@ def test_workflow_update_glue_contains_skip_and_guard():
     text = workflow_path.read_text(encoding="utf-8")
 
     assert "def UPDATE_MODE = params.update_db" in text
+    assert "def TREE_FREE_MODE = params.tree_free.toString().toBoolean()" in text
+    assert "params.tree_free is currently only supported for fresh DB builds" in text
     assert "update DB path matches output DB path" in text
     assert "if( UPDATE_MODE )" in text and "USHER_PLACEMENT(usher_input_ch)" in text
+    assert "if( TREE_FREE_MODE )" in text
+    assert 'EXTRA_ARGS="${EXTRA_ARGS} --allow-no-trees"' in text
     assert "MMSEQS_CLUSTERING(cluster_input_ch)" in text
     assert "REF_FASTA_FROM_UPDATE_DB" not in text
     assert "REF_LIST_FROM_UPDATE_DB" not in text
@@ -81,3 +85,4 @@ def test_nextflow_config_defines_mutation_defaults():
 
     assert "mutation_catalog  = null" in text
     assert "mutation_virus    = null" in text
+    assert "tree_free       = false" in text

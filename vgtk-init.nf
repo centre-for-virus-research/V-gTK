@@ -99,7 +99,7 @@ def scriptDefinedParams = [
     "xml_dir", "update", "update_file", "update_db",
     "mmseqs_min_seq_id", "mmseqs_trim_cds_file","mutation_catalog", "mutation_virus",
     "gisaid_dir", "previous_db", "conda_path", "test_max_cluster_seqs", "max_threads", "ref_set_aligned",
-    "min_seq_length_ratio", "max_aln_gap_proportion"
+    "min_seq_length_ratio", "max_aln_gap_proportion", "tree_free"
     // Add all parameter names defined above
 ]
 
@@ -1035,6 +1035,9 @@ process TEST_DB_VALIDATION {
     if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
         EXTRA_ARGS="${EXTRA_ARGS} --check-update-integrity"
     fi
+    if [ "!{params.tree_free}" = "true" ]; then
+        EXTRA_ARGS="${EXTRA_ARGS} --allow-no-trees"
+    fi
 
     # Merged DB validation: table consistency + tree/update integrity checks
     python !{scripts_dir}/ValidateDbTree.py \
@@ -1174,6 +1177,11 @@ workflow {
     }
     
     def UPDATE_MODE = params.update_db && params.update_db != 'null'
+    def TREE_FREE_MODE = params.tree_free.toString().toBoolean()
+    if( TREE_FREE_MODE && UPDATE_MODE ){
+        error("ERROR: params.tree_free is currently only supported for fresh DB builds and cannot be combined with params.update_db")
+    }
+
     if( UPDATE_MODE ){
         def updateDbFile = file(params.update_db)
         if( !updateDbFile.exists() || !updateDbFile.isFile() ){
@@ -1308,73 +1316,81 @@ workflow {
             }
     } else {
         MMSEQS_CLUSTERING(cluster_input_ch)
-        VERY_FAST_TREE(MMSEQS_CLUSTERING.out.mmseq_clusters)
-
-        mmseq_tree_input_ch = MMSEQS_CLUSTERING.out.mmseq_clusters
-            .map { dir ->
-                def key = dir.name
-                    .replaceFirst(/^MMseqClusters_/, '')
-                    .replaceFirst(/_dedup$/, '')
-                    .tokenize('.')[0]
-                [key, dir]
-            }
-            .join(
-                VERY_FAST_TREE.out.guide_tree_out
-                    .map { dir ->
-                        def key = dir.name
-                            .replaceFirst(/^VeryFastTree_MMseqClusters_/, '')
-                            .replaceFirst(/_dedup$/, '')
-                            .tokenize('.')[0]
-                        [key, dir]
-                    }
-            )
-            .map { key, mmseq_dir, guide_tree_dir ->
-                tuple(mmseq_dir, guide_tree_dir)
-            }
-
-        IQ_TREE(mmseq_tree_input_ch)
-        
-        // Join the channels by segment name for USHER_PLACEMENT
-        // Create tuples of (basename, file) for proper matching
-        mmseq_with_key = MMSEQS_CLUSTERING.out.mmseq_clusters
-            .map { dir ->
-                def key = dir.name
-                    .replaceFirst(/^MMseqClusters_/, '')
-                    .replaceFirst(/_dedup$/, '')
-                    .tokenize('.')[0]
-                [key, dir]
-            }
-        iqtree_with_key = IQ_TREE.out.iqtree_out
-            .map { dir ->
-                def key = dir.name
-                    .replaceFirst(/^IQTree_MMseqClusters_/, '')
-                    .replaceFirst(/_dedup$/, '')
-                    .tokenize('.')[0]
-                [key, dir]
-            }
-        dedup_with_key = cluster_input_ch
-            .map { fasta ->
-                def key = fasta.name
-                    .replaceFirst(/_dedup\.fasta$/, '')
-                    .tokenize('.')[0]
-                [key, fasta]
-            }
-        
-        // Join the three channels by their segment key
-        usher_input_ch = mmseq_with_key
-            .join(iqtree_with_key)
-            .join(dedup_with_key)
-            .map { key, mmseq_dir, iqtree_dir, dedup_fasta -> 
-                tuple(mmseq_dir.toString(), iqtree_dir.toString(), dedup_fasta, "Usher_${mmseq_dir.name}")
-            }
-
-        iqtree_collected = IQ_TREE.out.iqtree_out.collect()
         mmseq_collected = MMSEQS_CLUSTERING.out.mmseq_clusters.collect()
+
+        if( TREE_FREE_MODE ){
+            iqtree_collected = Channel.value([])
+            usher_collected = Channel.value([])
+        } else {
+            VERY_FAST_TREE(MMSEQS_CLUSTERING.out.mmseq_clusters)
+            mmseq_tree_input_ch = MMSEQS_CLUSTERING.out.mmseq_clusters
+                .map { dir ->
+                    def key = dir.name
+                        .replaceFirst(/^MMseqClusters_/, '')
+                        .replaceFirst(/_dedup$/, '')
+                        .tokenize('.')[0]
+                    [key, dir]
+                }
+                .join(
+                    VERY_FAST_TREE.out.guide_tree_out
+                        .map { dir ->
+                            def key = dir.name
+                                .replaceFirst(/^VeryFastTree_MMseqClusters_/, '')
+                                .replaceFirst(/_dedup$/, '')
+                                .tokenize('.')[0]
+                            [key, dir]
+                        }
+                )
+                .map { key, mmseq_dir, guide_tree_dir ->
+                    tuple(mmseq_dir, guide_tree_dir)
+                }
+
+            IQ_TREE(mmseq_tree_input_ch)
+            
+            // Join the channels by segment name for USHER_PLACEMENT
+            // Create tuples of (basename, file) for proper matching
+            mmseq_with_key = MMSEQS_CLUSTERING.out.mmseq_clusters
+                .map { dir ->
+                    def key = dir.name
+                        .replaceFirst(/^MMseqClusters_/, '')
+                        .replaceFirst(/_dedup$/, '')
+                        .tokenize('.')[0]
+                    [key, dir]
+                }
+                
+            iqtree_with_key = IQ_TREE.out.iqtree_out
+                .map { dir ->
+                    def key = dir.name
+                        .replaceFirst(/^IQTree_MMseqClusters_/, '')
+                        .replaceFirst(/_dedup$/, '')
+                        .tokenize('.')[0]
+                    [key, dir]
+                }
+            dedup_with_key = cluster_input_ch
+                .map { fasta ->
+                    def key = fasta.name
+                        .replaceFirst(/_dedup\.fasta$/, '')
+                        .tokenize('.')[0]
+                    [key, fasta]
+                }
+            
+            // Join the three channels by their segment key
+            usher_input_ch = mmseq_with_key
+                .join(iqtree_with_key)
+                .join(dedup_with_key)
+                .map { key, mmseq_dir, iqtree_dir, dedup_fasta -> 
+                    tuple(mmseq_dir.toString(), iqtree_dir.toString(), dedup_fasta, "Usher_${mmseq_dir.name}")
+                }
+
+            iqtree_collected = IQ_TREE.out.iqtree_out.collect()
+            USHER_PLACEMENT(usher_input_ch)
+            usher_collected = USHER_PLACEMENT.out.usher_out.collect()
+        }
     }
 
-    USHER_PLACEMENT(usher_input_ch)
-    usher_collected = USHER_PLACEMENT.out.usher_out.collect()
     if( UPDATE_MODE ){
+        USHER_PLACEMENT(usher_input_ch)
+        usher_collected = USHER_PLACEMENT.out.usher_out.collect()
         iqtree_collected = usher_collected
         mmseq_collected = usher_collected
     }
