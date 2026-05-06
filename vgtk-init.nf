@@ -755,7 +755,7 @@ process IQ_TREE{
         fi
 
         mkdir -p IQTree_!{mmseq_cluster_dir.baseName}
-        "$IQTREE_BIN" -s "$CLUSTER_REP" -t "$GUIDE_TREE" -ntmax !{task.cpus} -m GTR -pre IQTree_!{mmseq_cluster_dir.baseName}/iqtree -mem 100G
+        "$IQTREE_BIN" -s "$CLUSTER_REP" -t "$GUIDE_TREE" -T !{task.cpus} -m GTR -pre IQTree_!{mmseq_cluster_dir.baseName}/iqtree -mem 100G
     '''
 }
 
