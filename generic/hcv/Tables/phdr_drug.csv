@@ -1,0 +1,13 @@
+id,abbreviation,drug_category,producer,research_code,phdr_alignment_drug_id
+daclatasvir,DCV,NS5A inhibitors,Bristol-Myers Squibb ,BMS-790052,AL_7:daclatasvir
+dasabuvir,DSV,NS5B RNA polymerase inhibitors,Abbvie,ABT-333,AL_7:dasabuvir
+elbasvir,EBR,NS5A inhibitors,Merck,MK-8742,AL_7:elbasvir
+glecaprevir,GLE,NS3/4A protease inhibitors,Abbvie,ABT-493,AL_7:glecaprevir
+grazoprevir,GZR,NS3/4A protease inhibitors,Merck,MK-5172,AL_7:grazoprevir
+ledipasvir,LDV,NS5A inhibitors,Gilead Sciences,GS-5885,AL_7:ledipasvir
+ombitasvir,OBV,NS5A inhibitors,Abbvie,ABT-267,AL_7:ombitasvir
+paritaprevir,PTV,NS3/4A protease inhibitors,Abbvie,ABT-450,AL_7:paritaprevir
+pibrentasvir,PIB,NS5A inhibitors,Abbvie,ABT-530,AL_7:pibrentasvir
+sofosbuvir,SOF,NS5B RNA polymerase inhibitors,Gilead Sciences,GS-7977,AL_7:sofosbuvir
+velpatasvir,VEL,NS5A inhibitors,Gilead Sciences,GS-5816,AL_7:velpatasvir
+voxilaprevir,VOX,NS3/4A protease inhibitors,Gilead Sciences,GS-9857,AL_7:voxilaprevir
