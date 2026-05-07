@@ -235,8 +235,56 @@ def test_validate_db_tree_update_integrity_passes_on_seed_db(tmp_path: Path, bas
     assert "Filtered distinct accessions:" in report
     assert "Update integrity checks:" in report
     assert "last_batch_id:" in report
+    assert "[feature projection integrity]" in report
     assert "[sequence_mutations integrity]" in report
     assert "[sequence_drug_resistance integrity]" in report
+
+
+def test_validate_db_tree_update_integrity_fails_for_out_of_span_feature_projection(tmp_path: Path, basic_update_db: Path):
+    _add_required_alignment_tables(basic_update_db)
+
+    conn = sqlite3.connect(str(basic_update_db))
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM features WHERE accession='REF1'")
+        cur.execute("DELETE FROM features WHERE accession='Q_OLD'")
+        cur.executemany(
+            "INSERT INTO features(accession, master_ref_accession, reference_accession, aln_start, aln_end, cds_start, cds_end, product, segment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("REF1", "REF1", "REF1", "1", "4", "1", "2", "P1", "1"),
+                ("REF1", "REF1", "REF1", "1", "4", "3", "4", "P2", "1"),
+                ("Q_OLD", "REF1", "REF1", "1", "2", "1", "2", "P1", "1"),
+                ("Q_OLD", "REF1", "REF1", "1", "2", "2", "2", "P2", "1"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    outdir = tmp_path / "out"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--db",
+            str(basic_update_db),
+            "--outdir",
+            str(outdir),
+            "--check-update-integrity",
+            "--expect-segment-trees",
+            "--test-mode",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "feature projection integrity check failed" in result.stderr
+
+    report = (outdir / "db_tree_validation.txt").read_text(encoding="utf-8")
+    assert "[feature projection integrity]" in report
+    assert "offending_rows: 1" in report
+    assert "accession=Q_OLD product=P2" in report
 
 
 def test_validate_db_tree_update_integrity_passes_with_compact_mutation_tables(tmp_path: Path, basic_update_db: Path):

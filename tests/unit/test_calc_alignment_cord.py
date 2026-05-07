@@ -144,6 +144,60 @@ def test_find_gaps_in_fasta_preserves_projected_product_identity(tmp_path: Path)
     ]
 
 
+def test_find_gaps_in_fasta_skips_features_outside_partial_sequence_span(tmp_path: Path):
+    alignment_dir = tmp_path / "padded_alignment"
+    alignment_dir.mkdir()
+    (alignment_dir / "MASTERX.aligned_merged_MSA.fasta").write_text(
+        ">MASTERX\n"
+        "ATGCCGTAA\n"
+        ">Q_PARTIAL\n"
+        "ATG------\n",
+        encoding="utf-8",
+    )
+
+    gff_path = tmp_path / "MASTERX.gff3"
+    gff_path.write_text(
+        "##gff-version 3\n"
+        "MASTERX\tRefSeq\tCDS\t1\t4\t.\t+\t0\tID=cds1;product=P1\n"
+        "MASTERX\tRefSeq\tCDS\t5\t9\t.\t+\t0\tID=cds2;product=P2\n",
+        encoding="utf-8",
+    )
+
+    master_list = tmp_path / "master_list.tsv"
+    master_list.write_text("MASTERX\n", encoding="utf-8")
+
+    blast_hits = tmp_path / "query_uniq_tophits.tsv"
+    blast_hits.write_text("Q_PARTIAL\tREF_PARTIAL\t99.0\tplus\n", encoding="utf-8")
+
+    processor = CalculateAlignmentCoordinates(
+        paded_alignment=str(alignment_dir),
+        master_gff=[str(gff_path)],
+        tmp_dir=str(tmp_path),
+        output_dir="Tables",
+        output_file="features.tsv",
+        master_accession=str(master_list),
+        blast_uniq_hits=str(blast_hits),
+    )
+
+    processor.find_gaps_in_fasta()
+
+    rows = read_tsv_as_dicts(tmp_path / "Tables" / "features.tsv")
+    q_partial_rows = [row for row in rows if row["accession"] == "Q_PARTIAL"]
+
+    assert q_partial_rows == [
+        {
+            "accession": "Q_PARTIAL",
+            "master_ref_accession": "MASTERX",
+            "reference_accession": "REF_PARTIAL",
+            "aln_start": "1",
+            "aln_end": "3",
+            "cds_start": "1",
+            "cds_end": "3",
+            "product": "P1",
+        }
+    ]
+
+
 def test_cli_generates_expected_features(tmp_path: Path):
     subprocess.run(
         [

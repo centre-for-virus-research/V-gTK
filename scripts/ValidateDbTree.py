@@ -712,6 +712,103 @@ def validate_mutation_tables(conn, expected_accessions):
     return results
 
 
+def _try_parse_int(value):
+    text = str(value).strip() if value is not None else ""
+    if text in NA_SET:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def validate_feature_projection_integrity(conn):
+    title = "feature projection integrity"
+    if not table_exists(conn, "features"):
+        return {
+            "title": title,
+            "ok": True,
+            "skipped": True,
+            "reason": "Table 'features' not present in DB.",
+        }
+
+    feature_cols = get_table_columns(conn, "features")
+    required_cols = ["accession", "master_ref_accession", "product", "aln_start", "aln_end", "cds_start", "cds_end"]
+    missing_cols = [col for col in required_cols if col not in feature_cols]
+    if missing_cols:
+        return {
+            "title": title,
+            "ok": True,
+            "skipped": True,
+            "reason": (
+                "features table does not contain projection-detail columns needed for this check: "
+                f"missing {missing_cols}"
+            ),
+        }
+
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT accession, master_ref_accession, product, aln_start, aln_end, cds_start, cds_end FROM features"
+    )
+    feature_rows = cursor.fetchall()
+
+    master_spans = {}
+    for accession, _, product, _, _, cds_start, cds_end in feature_rows:
+        accession_text = str(accession).strip() if accession is not None else ""
+        product_text = str(product).strip() if product is not None else ""
+        start = _try_parse_int(cds_start)
+        end = _try_parse_int(cds_end)
+        if not accession_text or not product_text or start is None or end is None:
+            continue
+        master_spans.setdefault((accession_text, product_text), []).append((start, end))
+
+    offending_rows = []
+    unresolved_master_rows = 0
+    invalid_aln_rows = 0
+    for accession, master_ref_accession, product, aln_start, aln_end, _, _ in feature_rows:
+        accession_text = str(accession).strip() if accession is not None else ""
+        master_text = str(master_ref_accession).strip() if master_ref_accession is not None else ""
+        product_text = str(product).strip() if product is not None else ""
+        if not accession_text or not master_text or not product_text or accession_text == master_text:
+            continue
+
+        aln_start_int = _try_parse_int(aln_start)
+        aln_end_int = _try_parse_int(aln_end)
+        if aln_start_int is None or aln_end_int is None:
+            invalid_aln_rows += 1
+            continue
+
+        master_product_spans = master_spans.get((master_text, product_text))
+        if not master_product_spans:
+            unresolved_master_rows += 1
+            continue
+
+        overlaps_master_feature = any(
+            aln_end_int >= master_start and aln_start_int <= master_end
+            for master_start, master_end in master_product_spans
+        )
+        if not overlaps_master_feature:
+            offending_rows.append(
+                {
+                    "accession": accession_text,
+                    "master_ref_accession": master_text,
+                    "product": product_text,
+                    "aln_start": str(aln_start),
+                    "aln_end": str(aln_end),
+                }
+            )
+
+    return {
+        "title": title,
+        "ok": len(offending_rows) == 0 and invalid_aln_rows == 0,
+        "table": "features",
+        "offending_rows": len(offending_rows),
+        "invalid_aln_rows": invalid_aln_rows,
+        "unresolved_master_rows": unresolved_master_rows,
+        "examples": offending_rows[:25],
+    }
+
+
 def format_mutation_integrity_result(result, show_n=25):
     lines = [f"[{result['title']}]"]
     if result.get("skipped"):
@@ -743,6 +840,35 @@ def format_mutation_integrity_result(result, show_n=25):
         lines.append(f"  Orphan accession examples (up to {show_n}):")
         for value in orphan_accessions[:show_n]:
             lines.append(f"    - {value}")
+    return "\n".join(lines)
+
+
+def format_feature_integrity_result(result, show_n=25):
+    lines = [f"[{result['title']}]"]
+    if result.get("skipped"):
+        lines.append("  OK: True (skipped)")
+        lines.append(f"  Reason: {result.get('reason', 'not provided')}")
+        return "\n".join(lines)
+    if "error" in result:
+        lines.append("  OK: False")
+        lines.append(f"  ERROR: {result['error']}")
+        return "\n".join(lines)
+
+    lines.append(f"  OK: {result.get('ok')}")
+    if result.get("table"):
+        lines.append(f"  Table: {result['table']}")
+    lines.append(f"  offending_rows: {result.get('offending_rows', 0)}")
+    lines.append(f"  invalid_aln_rows: {result.get('invalid_aln_rows', 0)}")
+    lines.append(f"  unresolved_master_rows: {result.get('unresolved_master_rows', 0)}")
+    examples = result.get("examples", [])
+    if examples:
+        lines.append(f"  Offending examples (up to {show_n}):")
+        for example in examples[:show_n]:
+            lines.append(
+                "    - accession={accession} product={product} master_ref_accession={master_ref_accession} aln_start={aln_start} aln_end={aln_end}".format(
+                    **example
+                )
+            )
     return "\n".join(lines)
 
 
@@ -867,6 +993,12 @@ def main(argv=None):
             ),
         }
         mutation_integrity_results = validate_mutation_tables(conn, expected_meta_set)
+        feature_integrity_result = validate_feature_projection_integrity(conn) if args.check_update_integrity else {
+            "title": "feature projection integrity",
+            "ok": True,
+            "skipped": True,
+            "reason": "Update integrity checks not requested.",
+        }
 
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM meta_data")
@@ -1082,6 +1214,8 @@ def main(argv=None):
                         )
                         seg_mismatch_count = cursor.fetchone()[0]
                         report.write(f"- feature_segment_mismatch: {seg_mismatch_count}\n")
+                    report.write(format_feature_integrity_result(feature_integrity_result))
+                    report.write("\n")
 
             if mutation_integrity_results:
                 report.write("\nMutation integrity checks:\n")
@@ -1138,6 +1272,18 @@ def main(argv=None):
                     f"blank_required_rows={result.get('blank_required_rows', 0)} "
                     f"duplicate_keys={result.get('duplicate_keys', 0)} "
                     f"orphan_accessions={len(result.get('orphan_accessions', []))}"
+                )
+        if args.check_update_integrity:
+            if feature_integrity_result.get("skipped"):
+                print(f"[info] {feature_integrity_result['title']}: skipped ({feature_integrity_result.get('reason')})")
+            elif "error" in feature_integrity_result:
+                print(f"[info] {feature_integrity_result['title']}: ERROR: {feature_integrity_result['error']}")
+            else:
+                print(
+                    f"[info] {feature_integrity_result['title']}: ok={feature_integrity_result.get('ok')} "
+                    f"offending_rows={feature_integrity_result.get('offending_rows', 0)} "
+                    f"invalid_aln_rows={feature_integrity_result.get('invalid_aln_rows', 0)} "
+                    f"unresolved_master_rows={feature_integrity_result.get('unresolved_master_rows', 0)}"
                 )
         if cluster_col:
             print(f"[info] Cluster column: {cluster_col}, Centroid count: {len(centroid_set)}")
@@ -1208,6 +1354,8 @@ def main(argv=None):
                     )
                     if cursor.fetchone()[0] > 0:
                         raise SystemExit("Validation failed: segment contamination detected in features table")
+            if result_failed(feature_integrity_result):
+                raise SystemExit("Validation failed: feature projection integrity check failed")
 
         failed_consistency_checks = [title for title, result in consistency_results.items() if result_failed(result)]
         failed_mutation_checks = [result["title"] for result in mutation_integrity_results if result_failed(result)]

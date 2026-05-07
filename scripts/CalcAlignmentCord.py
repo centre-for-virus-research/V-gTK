@@ -109,21 +109,39 @@ class CalculateAlignmentCoordinates:
 		return count
 
 	def recalculate_cds_coordinates(self, sequence_id, gap_ranges, cds_list, start_offset):
+		return self.recalculate_cds_coordinates_with_span(
+			sequence_id,
+			gap_ranges,
+			cds_list,
+			start_offset,
+			genome_cord_start=None,
+			genome_cord_end=None,
+		)
+
+	def recalculate_cds_coordinates_with_span(self, sequence_id, gap_ranges, cds_list, start_offset, genome_cord_start=None, genome_cord_end=None):
 		adjusted_coords = []
+		clamp_to_span = genome_cord_start not in (None, "NA") and genome_cord_end not in (None, "NA")
+		if clamp_to_span:
+			genome_cord_start = int(genome_cord_start)
+			genome_cord_end = int(genome_cord_end)
 
 		for cds in cds_list:
 			cds_start = int(cds['start'])
 			cds_end = int(cds['end'])
+			if clamp_to_span:
+				overlap_start = max(cds_start, genome_cord_start)
+				overlap_end = min(cds_end, genome_cord_end)
+				if overlap_start > overlap_end:
+					continue
+			else:
+				overlap_start = cds_start
+				overlap_end = cds_end
 
+			gaps_before_start = self.count_gaps_before_position(gap_ranges, overlap_start)
+			gaps_before_end = self.count_gaps_before_position(gap_ranges, overlap_end)
 
-			gaps_before_start = self.count_gaps_before_position(gap_ranges, cds_start)
-			gaps_before_end = self.count_gaps_before_position(gap_ranges, cds_end)
-
-			adj_start = cds_start - gaps_before_start
-			adj_end = cds_end - gaps_before_end
-
-			adj_start = cds_start - gaps_before_start + (start_offset - 1)
-			adj_end = cds_end - gaps_before_end + (start_offset - 1)
+			adj_start = overlap_start - gaps_before_start + (start_offset - 1)
+			adj_end = overlap_end - gaps_before_end + (start_offset - 1)
 			adjusted_entry = {
 				'start': adj_start,
 				'end': adj_end,
@@ -131,9 +149,6 @@ class CalculateAlignmentCoordinates:
 			}
 			if adjusted_entry not in adjusted_coords:
 				adjusted_coords.append(adjusted_entry)
-
-		if not adjusted_coords and cds_list:
-			adjusted_coords.append({'start': 0, 'end': 0, 'product': cds_list[0]['product']})
 
 		return adjusted_coords
 
@@ -228,6 +243,12 @@ class CalculateAlignmentCoordinates:
 					if existing_feature_accessions and record.id in existing_feature_accessions:
 						continue
 
+					if record.id in genome_coords:
+						master_acc, genome_cord_start, genome_cord_end = genome_coords[record.id]
+					else:
+						# Fallback if record not in genome_coords (should not happen if calc worked)
+						genome_cord_start, genome_cord_end = "NA", "NA"
+
 					sequence = str(record.seq)
 					gaps = self.get_gap_ranges(sequence)
 					aligned_length = len(sequence.replace('-', ''))
@@ -238,15 +259,17 @@ class CalculateAlignmentCoordinates:
 					else:
 						start_offset = 1
 
-					adjusted = self.recalculate_cds_coordinates(record.id, gaps, cds_list, start_offset)
+					adjusted = self.recalculate_cds_coordinates_with_span(
+						record.id,
+						gaps,
+						cds_list,
+						start_offset,
+						genome_cord_start=genome_cord_start,
+						genome_cord_end=genome_cord_end,
+					)
 
 					#print(f">{record.id}", adjusted)
 					for each_cords in adjusted:
-						if record.id in genome_coords:
-							master_acc, genome_cord_start, genome_cord_end = genome_coords[record.id]
-						else:
-							# Fallback if record not in genome_coords (should not happen if calc worked)
-							genome_cord_start, genome_cord_end = "NA", "NA"
 						reference_acc = blast_dict[record.id] if record.id in blast_dict else current_master
 						if segment_map:
 							record_segment = segment_map.get(record.id, "")
