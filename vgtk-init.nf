@@ -1178,9 +1178,6 @@ workflow {
     
     def UPDATE_MODE = params.update_db && params.update_db != 'null'
     def TREE_FREE_MODE = params.tree_free.toString().toBoolean()
-    if( TREE_FREE_MODE && UPDATE_MODE ){
-        error("ERROR: params.tree_free is currently only supported for fresh DB builds and cannot be combined with params.update_db")
-    }
 
     if( UPDATE_MODE ){
         def updateDbFile = file(params.update_db)
@@ -1310,10 +1307,17 @@ workflow {
     def usher_input_ch
 
     if( UPDATE_MODE ){
-        usher_input_ch = cluster_input_ch
-            .map { fasta ->
-                tuple('UNSET', 'UNSET', fasta, "UsherUpdate_${fasta.baseName}")
-            }
+        if( TREE_FREE_MODE ){
+            log.warn("params.tree_free=true with params.update_db: skipping tree placement and retaining any existing trees already stored in the update DB")
+            iqtree_collected = Channel.value([])
+            mmseq_collected = Channel.value([])
+            usher_collected = Channel.value([])
+        } else {
+            usher_input_ch = cluster_input_ch
+                .map { fasta ->
+                    tuple('UNSET', 'UNSET', fasta, "UsherUpdate_${fasta.baseName}")
+                }
+        }
     } else {
         MMSEQS_CLUSTERING(cluster_input_ch)
         mmseq_collected = MMSEQS_CLUSTERING.out.mmseq_clusters.collect()
@@ -1388,7 +1392,7 @@ workflow {
         }
     }
 
-    if( UPDATE_MODE ){
+    if( UPDATE_MODE && !TREE_FREE_MODE ){
         USHER_PLACEMENT(usher_input_ch)
         usher_collected = USHER_PLACEMENT.out.usher_out.collect()
         iqtree_collected = usher_collected
