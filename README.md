@@ -15,3 +15,27 @@ Once the environment is created, activate it using:
 conda activate vgtk
 ```
 
+## Working with a Real-Time RABV Example
+
+V-gTK includes a real-time rabies virus example workflow for building and using a local RABV genomic database. This workflow is organised inside the `rabv-gdb_build` directory and provides the files and scripts required to construct a database from curated RABV reference sequences and their associated metadata.
+
+The RABV database acts as the core reference resource for downstream V-gTK analyses. Once created, it can be used to compare newly generated or custom RABV sequences against existing reference data, prepare combined datasets, generate alignments, and support phylogenetic or clade-assignment workflows.
+
+### Required input files
+
+Before running the database build workflow, the required input files should be available inside `rabv-gdb_build`. These may include:
+
+- curated RABV reference sequences in FASTA format
+- sequence metadata files
+- accession or GenBank record information
+- clade, lineage, or designation files
+- configuration files used by the database-building scripts
+
+These files are used to link each sequence with its corresponding metadata and classification information. The database-building scripts then organise the input data into a structured local database that can be used by the rest of the V-gTK framework.
+
+### Building the RABV database
+
+To build the RABV database, navigate to the `rabv-gdb_build` directory and run the provided database construction scripts.
+
+```shell
+cd rabv-gdb_build
