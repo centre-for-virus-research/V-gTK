@@ -51,7 +51,7 @@ The following steps describe how to prepare and run V-gTK to generate the RABV g
 First, clone the V-gTK repository and move into the project directory.
 
 ```shell
-git clone <V-gTK-repository-url>
+git clone https://github.com/centre-for-virus-research/V-gTK
 cd V-gTK
 ```
 
