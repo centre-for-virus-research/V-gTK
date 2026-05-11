@@ -107,5 +107,36 @@ Once created, the RABV database can be used by V-gTK for downstream analysis tas
 The same database can also be updated and curated later using the available V-gTK scripts, allowing users to maintain a flexible and reusable RABV genomic database without rebuilding the entire workflow from scratch.
 
 
+## Updating the Existing Database
 
+Once the RABV database has been generated using the build script, updating the existing database is a straightforward process. Instead of creating a completely new database from the beginning, V-gTK allows users to update an already generated SQLite database by providing the existing database file path and enabling the update option in the bash script.
 
+To update an existing database, open the RABV database build script and modify the database update parameters. In the example below, the required changes are made to the `db_file` and `is_update` variables.
+
+```shell
+# parameters
+TAX_ID=${1:-11292} # RABV
+
+scripts_dir="$(dirname "$0")/scripts"
+generic_dir="$(dirname "$0")/generic/rabv"
+db_name="rabv-jul0425"
+
+db_file="tmp/SqliteDB/yourDB.db"      # set this if updating an existing db, e.g. "rabv-gDB_Dec022025.db"
+is_update=0                          # 1 for update and 0 for not update
+
+```
+To enable database updating, set the db_file variable to the path of the existing SQLite database that you want to update. Then change is_update=0 to is_update=1
+
+For Example:
+```shell
+db_file="tmp/SqliteDB/rabv-gDB_Dec022025.db"
+is_update=1
+```
+Here, db_file points to the existing RABV database, and is_update=1 tells the script to run in update mode.
+After making these changes, run the bash script again:
+
+After making these changes, run the bash script again:
+
+```shell
+bash rabv_gDB-build.sh
+```
