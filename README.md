@@ -17,7 +17,9 @@ conda activate vgtk
 
 ## Working with a Real-Time RABV Example
 
-V-gTK includes a real-time rabies virus example workflow for building and using a local RABV genomic database. This workflow is organised inside the `rabv-gdb_build` repo and provides the files required to construct a database from curated RABV reference sequences.
+This section demonstrates the execution of a fully functional RABV example workflow using V-gTK. The example shows how V-gTK can be used to build a rabies virus genomic database, organise RABV-specific reference files, generate a local SQLite database, and prepare the database for downstream genomic analysis. 
+
+The RABV workflow is organised inside the `rabv-gdb_build` repo and provides the files, scripts and pipelines required to construct a database from curated RABV reference sequences.
 
 Once the RABV database has been created, the same database can be maintained, updated, curated, and modified as required. V-gTK provides a set of easy-to-use scripts that allow users to manage the database without needing to rebuild the entire workflow from the beginning each time.
 
