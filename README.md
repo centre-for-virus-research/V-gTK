@@ -86,7 +86,7 @@ V-gTK/
 └── other V-gTK files and directories
 ```
 
-### 4. Run the RABV database build dcript
+### 4. Run the RABV database build script
 Once the required files are in place, run the build script from inside the V-gTK directory:
 ```shell
 bash rabv_gDB-build.sh
