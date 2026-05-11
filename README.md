@@ -27,7 +27,7 @@ The framework is designed to keep the database flexible and reusable. Users can 
 
 In this way, V-gTK separates the initial database-building step from the ongoing database management process. After the first build, users can continue to refine and extend the same database through simple scripted operations, making it easier to support long-term virus specific genomic analysis and surveillance.
 
-### Required input files
+### Existing RABV specific input files
 
 Before running the database build workflow, the required input files should be available inside `rabv-gdb_build`. These may include:
 
@@ -38,13 +38,13 @@ Before running the database build workflow, the required input files should be a
 
 These files are used to link each sequence with its corresponding metadata and classification information. The database-building scripts then organise the input data into a structured local database that can be used by the rest of the V-gTK framework.
 
-## Building the RABV Database
+## Building the RABV database
 
 Building the RABV database using V-gTK is a straightforward process. The workflow is designed so that users can prepare the required RABV-specific files, run a single build script, and generate a local SQLite database that can be used for downstream V-gTK analyses.
 
 The following steps describe how to prepare and run V-gTK to generate the RABV genomic database.
 
-### 1. Clone the V-gTK Repository
+### 1. Clone the V-gTK repository
 
 First, clone the V-gTK repository and move into the project directory.
 
@@ -62,7 +62,7 @@ git clone https://github.com/RAGE-toolkit/RABV-gDB-build
 ```
 
 After cloning, the RABV-gDB-build directory will contain RABV-specific input files, configuration files, and the database build script required for generating the RABV database.
-### 3. Move the RABV-Specific Files into the V-gTK Directory
+### 3. Move the RABV-Specific files into the V-gTK firectory
 Next, move the required files from RABV-gDB-build into the main V-gTK directory.
 ```shell
 mv RABV-gDB-build/generic .
@@ -86,21 +86,21 @@ V-gTK/
 └── other V-gTK files and directories
 ```
 
-### 4. Run the RABV Database Build Script
+### 4. Run the RABV database build dcript
 Once the required files are in place, run the build script from inside the V-gTK directory:
 ```shell
 bash rabv_gDB-build.sh
 ```
 This script will process the RABV-specific input files, organise the sequence and metadata information, and generate a local SQLite database.
 
-### 5. Output Database
+### 5. Output database
 After the build process completes successfully, the generated SQLite database will be available inside the following directory:
 tmp/SqliteDB/
 The resulting database can be opened and inspected using DB Browser for SQLite:
 https://sqlitebrowser.org
 This allows users to view the database tables, inspect sequence records, check metadata fields, and confirm that the RABV database has been generated correctly.
 
-### 6. Using the Generated Database
+### 6. Using the generated database
 Once created, the RABV database can be used by V-gTK for downstream analysis tasks, including sequence management, custom sequence addition, metadata curation, alignment preparation, and phylogenetic or clade-assignment workflows.
 The same database can also be updated and curated later using the available V-gTK scripts, allowing users to maintain a flexible and reusable RABV genomic database without rebuilding the entire workflow from scratch.
 
