@@ -17,17 +17,22 @@ conda activate vgtk
 
 ## Working with a Real-Time RABV Example
 
-V-gTK includes a real-time rabies virus example workflow for building and using a local RABV genomic database. This workflow is organised inside the `rabv-gdb_build` directory and provides the files and scripts required to construct a database from curated RABV reference sequences and their associated metadata.
+V-gTK includes a real-time rabies virus example workflow for building and using a local RABV genomic database. This workflow is organised inside the `rabv-gdb_build` repo and provides the files required to construct a database from curated RABV reference sequences.
 
-The RABV database acts as the core reference resource for downstream V-gTK analyses. Once created, it can be used to compare newly generated or custom RABV sequences against existing reference data, prepare combined datasets, generate alignments, and support phylogenetic or clade-assignment workflows.
+Once the RABV database has been created, the same database can be maintained, updated, curated, and modified as required. V-gTK provides a set of easy-to-use scripts that allow users to manage the database without needing to rebuild the entire workflow from the beginning each time.
+
+These scripts support routine database maintenance tasks such as adding new RABV sequences, updating existing metadata, correcting sequence records, modifying clade or lineage annotations, and removing or replacing outdated entries. This makes the database suitable for real-time genomic surveillance, where new sequences and updated information may need to be incorporated regularly.
+
+The framework is designed to keep the database flexible and reusable. Users can curate the reference dataset as new information becomes available, apply manual corrections where needed, and regenerate analysis-ready files for downstream workflows. By providing dedicated scripts for database updates and curation, V-gTK helps ensure that the RABV genomic database remains consistent, reproducible, and up to date.
+
+In this way, V-gTK separates the initial database-building step from the ongoing database management process. After the first build, users can continue to refine and extend the same database through simple scripted operations, making it easier to support long-term virus specific genomic analysis and surveillance.
 
 ### Required input files
 
 Before running the database build workflow, the required input files should be available inside `rabv-gdb_build`. These may include:
 
-- curated RABV reference sequences in FASTA format
-- sequence metadata files
-- accession or GenBank record information
+- curated RABV reference accessions
+- reference tree with meta data
 - clade, lineage, or designation files
 - configuration files used by the database-building scripts
 
