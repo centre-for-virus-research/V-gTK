@@ -72,12 +72,17 @@ mv RABV-gDB-build/rabv_gDB-build.sh .
 After this step, the main V-gTK directory should contain the generic directory and the rabv_gDB-build.sh script.
 Your V-gTK directory should now look similar to the example shown below:
 
+```text
 V-gTK/
 ├── generic/
+│   ├── config/
+│   ├── data/
+│   └── scripts/
 ├── rabv_gDB-build.sh
 ├── environment.yml
 ├── README.md
 ├── tmp/
+│   └── SqliteDB/
 └── other V-gTK files and directories
 
 ### 4. Run the RABV Database Build Script
