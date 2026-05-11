@@ -78,15 +78,17 @@ Your V-gTK directory should now look similar to the example shown below:
 ```text
 V-gTK/
 ├── generic/
-│   ├── config/
-│   ├── data/
-│   └── scripts/
+│   ├── RABV
+│         ├── references/
+│         ├─ curation/
+│         ├ curation/
+│         └── tree/
+│          ........
 ├── rabv_gDB-build.sh
 ├── environment.yml
 ├── README.md
-├── tmp/
-│   └── SqliteDB/
-└── other V-gTK files and directories
+├── LICENSE
+└── ....
 ```
 
 ### 4. Run the RABV database build script
