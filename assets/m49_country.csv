@@ -1,0 +1,251 @@
+"id","m49_code","display_name","full_name","is_ldc","is_lldc","is_sids","development_status","m49_region_id","m49_sub_region_id","m49_intermediate_region_id"
+"ABW","533","Aruba","Aruba","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"AFG","4","Afghanistan","Afghanistan","1","1","0","developing","asia","southern_asia",NULL
+"AGO","24","Angola","Angola","1","0","0","developing","africa","sub_saharan_africa","middle_africa"
+"AIA","660","Anguilla","Anguilla","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"ALA","248","Åland Islands","Åland Islands","0","0","0","developed","europe","northern_europe",NULL
+"ALB","8","Albania","Albania","0","0","0","developed","europe","southern_europe",NULL
+"AND","20","Andorra","Andorra","0","0","0","developed","europe","southern_europe",NULL
+"ARE","784","United Arab Emirates","United Arab Emirates","0","0","0","developing","asia","western_asia",NULL
+"ARG","32","Argentina","Argentina","0","0","0","developing","americas","latin_america_and_the_caribbean","south_america"
+"ARM","51","Armenia","Armenia","0","1","0","developing","asia","western_asia",NULL
+"ASM","16","American Samoa","American Samoa","0","0","1","developing","oceania","polynesia",NULL
+"ATA","10","Antarctica","Antarctica","0","0","0",NULL,NULL,NULL,NULL
+"ATF","260","French Southern Territories","French Southern Territories","0","0","0","developing","africa","sub_saharan_africa","eastern_africa"
+"ATG","28","Antigua and Barbuda","Antigua and Barbuda","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"AUS","36","Australia","Australia","0","0","0","developed","oceania","australia_and_new_zealand",NULL
+"AUT","40","Austria","Austria","0","0","0","developed","europe","western_europe",NULL
+"AZE","31","Azerbaijan","Azerbaijan","0","1","0","developing","asia","western_asia",NULL
+"BDI","108","Burundi","Burundi","1","1","0","developing","africa","sub_saharan_africa","eastern_africa"
+"BEL","56","Belgium","Belgium","0","0","0","developed","europe","western_europe",NULL
+"BEN","204","Benin","Benin","1","0","0","developing","africa","sub_saharan_africa","western_africa"
+"BES","535","Bonaire, Sint Eustatius and Saba","Bonaire, Sint Eustatius and Saba","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"BFA","854","Burkina Faso","Burkina Faso","1","1","0","developing","africa","sub_saharan_africa","western_africa"
+"BGD","50","Bangladesh","Bangladesh","1","0","0","developing","asia","southern_asia",NULL
+"BGR","100","Bulgaria","Bulgaria","0","0","0","developed","europe","eastern_europe",NULL
+"BHR","48","Bahrain","Bahrain","0","0","0","developing","asia","western_asia",NULL
+"BHS","44","Bahamas","Bahamas","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"BIH","70","Bosnia and Herzegovina","Bosnia and Herzegovina","0","0","0","developed","europe","southern_europe",NULL
+"BLM","652","Saint-Barthélemy","Saint-Barthélemy","0","0","0","developing","americas","latin_america_and_the_caribbean","caribbean"
+"BLR","112","Belarus","Belarus","0","0","0","developed","europe","eastern_europe",NULL
+"BLZ","84","Belize","Belize","0","0","1","developing","americas","latin_america_and_the_caribbean","central_america"
+"BMU","60","Bermuda","Bermuda","0","0","0","developed","americas","northern_america",NULL
+"BOL","68","Bolivia","Bolivia (Plurinational State of)","0","1","0","developing","americas","latin_america_and_the_caribbean","south_america"
+"BRA","76","Brazil","Brazil","0","0","0","developing","americas","latin_america_and_the_caribbean","south_america"
+"BRB","52","Barbados","Barbados","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"BRN","96","Brunei Darussalam","Brunei Darussalam","0","0","0","developing","asia","south_eastern_asia",NULL
+"BTN","64","Bhutan","Bhutan","1","1","0","developing","asia","southern_asia",NULL
+"BVT","74","Bouvet Island","Bouvet Island","0","0","0","developing","americas","latin_america_and_the_caribbean","south_america"
+"BWA","72","Botswana","Botswana","0","1","0","developing","africa","sub_saharan_africa","southern_africa"
+"CAF","140","Central African Republic","Central African Republic","1","1","0","developing","africa","sub_saharan_africa","middle_africa"
+"CAN","124","Canada","Canada","0","0","0","developed","americas","northern_america",NULL
+"CCK","166","Cocos (Keeling) Islands","Cocos (Keeling) Islands","0","0","0","developed","oceania","australia_and_new_zealand",NULL
+"CHE","756","Switzerland","Switzerland","0","0","0","developed","europe","western_europe",NULL
+"CHL","152","Chile","Chile","0","0","0","developing","americas","latin_america_and_the_caribbean","south_america"
+"CHN","156","China","China","0","0","0","developing","asia","eastern_asia",NULL
+"CIV","384","Côte d'Ivoire","Côte d'Ivoire","0","0","0","developing","africa","sub_saharan_africa","western_africa"
+"CMR","120","Cameroon","Cameroon","0","0","0","developing","africa","sub_saharan_africa","middle_africa"
+"COD","180","Democratic Republic of the Congo","Democratic Republic of the Congo","1","0","0","developing","africa","sub_saharan_africa","middle_africa"
+"COG","178","Congo (Brazzaville)","Congo","0","0","0","developing","africa","sub_saharan_africa","middle_africa"
+"COK","184","Cook Islands","Cook Islands","0","0","1","developing","oceania","polynesia",NULL
+"COL","170","Colombia","Colombia","0","0","0","developing","americas","latin_america_and_the_caribbean","south_america"
+"COM","174","Comoros","Comoros","1","0","1","developing","africa","sub_saharan_africa","eastern_africa"
+"CPV","132","Cape Verde","Cabo Verde","0","0","1","developing","africa","sub_saharan_africa","western_africa"
+"CRI","188","Costa Rica","Costa Rica","0","0","0","developing","americas","latin_america_and_the_caribbean","central_america"
+"CUB","192","Cuba","Cuba","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"CUW","531","Curaçao","Curaí_ao","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"CXR","162","Christmas Island","Christmas Island","0","0","0","developed","oceania","australia_and_new_zealand",NULL
+"CYM","136","Cayman Islands","Cayman Islands","0","0","0","developing","americas","latin_america_and_the_caribbean","caribbean"
+"CYP","196","Cyprus","Cyprus","0","0","0","developing","asia","western_asia",NULL
+"CZE","203","Czechia","Czechia","0","0","0","developed","europe","eastern_europe",NULL
+"DEU","276","Germany","Germany","0","0","0","developed","europe","western_europe",NULL
+"DJI","262","Djibouti","Djibouti","1","0","0","developing","africa","sub_saharan_africa","eastern_africa"
+"DMA","212","Dominica","Dominica","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"DNK","208","Denmark","Denmark","0","0","0","developed","europe","northern_europe",NULL
+"DOM","214","Dominican Republic","Dominican Republic","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"DZA","12","Algeria","Algeria","0","0","0","developing","africa","northern_africa",NULL
+"ECU","218","Ecuador","Ecuador","0","0","0","developing","americas","latin_america_and_the_caribbean","south_america"
+"EGY","818","Egypt","Egypt","0","0","0","developing","africa","northern_africa",NULL
+"ERI","232","Eritrea","Eritrea","1","0","0","developing","africa","sub_saharan_africa","eastern_africa"
+"ESH","732","Western Sahara","Western Sahara","0","0","0","developing","africa","northern_africa",NULL
+"ESP","724","Spain","Spain","0","0","0","developed","europe","southern_europe",NULL
+"EST","233","Estonia","Estonia","0","0","0","developed","europe","northern_europe",NULL
+"ETH","231","Ethiopia","Ethiopia","1","1","0","developing","africa","sub_saharan_africa","eastern_africa"
+"FIN","246","Finland","Finland","0","0","0","developed","europe","northern_europe",NULL
+"FJI","242","Fiji","Fiji","0","0","1","developing","oceania","melanesia",NULL
+"FLK","238","Falkland Islands","Falkland Islands (Malvinas)","0","0","0","developing","americas","latin_america_and_the_caribbean","south_america"
+"FRA","250","France","France","0","0","0","developed","europe","western_europe",NULL
+"FRO","234","Faroe Islands","Faroe Islands","0","0","0","developed","europe","northern_europe",NULL
+"FSM","583","Micronesia","Micronesia (Federated States of)","0","0","1","developing","oceania","micronesia",NULL
+"GAB","266","Gabon","Gabon","0","0","0","developing","africa","sub_saharan_africa","middle_africa"
+"GBR","826","United Kingdom","United Kingdom of Great Britain and Northern Ireland","0","0","0","developed","europe","northern_europe",NULL
+"GEO","268","Georgia","Georgia","0","0","0","developing","asia","western_asia",NULL
+"GGY","831","Guernsey","Guernsey","0","0","0","developed","europe","northern_europe","channel_islands"
+"GHA","288","Ghana","Ghana","0","0","0","developing","africa","sub_saharan_africa","western_africa"
+"GIB","292","Gibraltar","Gibraltar","0","0","0","developed","europe","southern_europe",NULL
+"GIN","324","Guinea","Guinea","1","0","0","developing","africa","sub_saharan_africa","western_africa"
+"GLP","312","Guadeloupe","Guadeloupe","0","0","0","developing","americas","latin_america_and_the_caribbean","caribbean"
+"GMB","270","Gambia","Gambia","1","0","0","developing","africa","sub_saharan_africa","western_africa"
+"GNB","624","Guinea-Bissau","Guinea-Bissau","1","0","1","developing","africa","sub_saharan_africa","western_africa"
+"GNQ","226","Equatorial Guinea","Equatorial Guinea","1","0","0","developing","africa","sub_saharan_africa","middle_africa"
+"GRC","300","Greece","Greece","0","0","0","developed","europe","southern_europe",NULL
+"GRD","308","Grenada","Grenada","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"GRL","304","Greenland","Greenland","0","0","0","developed","americas","northern_america",NULL
+"GTM","320","Guatemala","Guatemala","0","0","0","developing","americas","latin_america_and_the_caribbean","central_america"
+"GUF","254","French Guiana","French Guiana","0","0","0","developing","americas","latin_america_and_the_caribbean","south_america"
+"GUM","316","Guam","Guam","0","0","1","developing","oceania","micronesia",NULL
+"GUY","328","Guyana","Guyana","0","0","1","developing","americas","latin_america_and_the_caribbean","south_america"
+"HKG","344","Hong Kong","China, Hong Kong Special Administrative Region","0","0","0","developing","asia","eastern_asia",NULL
+"HMD","334","Heard Island and Mcdonald Islands","Heard Island and McDonald Islands","0","0","0","developed","oceania","australia_and_new_zealand",NULL
+"HND","340","Honduras","Honduras","0","0","0","developing","americas","latin_america_and_the_caribbean","central_america"
+"HRV","191","Croatia","Croatia","0","0","0","developed","europe","southern_europe",NULL
+"HTI","332","Haiti","Haiti","1","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"HUN","348","Hungary","Hungary","0","0","0","developed","europe","eastern_europe",NULL
+"IDN","360","Indonesia","Indonesia","0","0","0","developing","asia","south_eastern_asia",NULL
+"IMN","833","Isle of Man","Isle of Man","0","0","0","developed","europe","northern_europe",NULL
+"IND","356","India","India","0","0","0","developing","asia","southern_asia",NULL
+"IOT","86","British Indian Ocean Territory","British Indian Ocean Territory","0","0","0","developing","africa","sub_saharan_africa","eastern_africa"
+"IRL","372","Ireland","Ireland","0","0","0","developed","europe","northern_europe",NULL
+"IRN","364","Iran","Iran (Islamic Republic of)","0","0","0","developing","asia","southern_asia",NULL
+"IRQ","368","Iraq","Iraq","0","0","0","developing","asia","western_asia",NULL
+"ISL","352","Iceland","Iceland","0","0","0","developed","europe","northern_europe",NULL
+"ISR","376","Israel","Israel","0","0","0","developing","asia","western_asia",NULL
+"ITA","380","Italy","Italy","0","0","0","developed","europe","southern_europe",NULL
+"JAM","388","Jamaica","Jamaica","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"JEY","832","Jersey","Jersey","0","0","0","developed","europe","northern_europe","channel_islands"
+"JOR","400","Jordan","Jordan","0","0","0","developing","asia","western_asia",NULL
+"JPN","392","Japan","Japan","0","0","0","developed","asia","eastern_asia",NULL
+"KAZ","398","Kazakhstan","Kazakhstan","0","1","0","developing","asia","central_asia",NULL
+"KEN","404","Kenya","Kenya","0","0","0","developing","africa","sub_saharan_africa","eastern_africa"
+"KGZ","417","Kyrgyzstan","Kyrgyzstan","0","1","0","developing","asia","central_asia",NULL
+"KHM","116","Cambodia","Cambodia","1","0","0","developing","asia","south_eastern_asia",NULL
+"KIR","296","Kiribati","Kiribati","1","0","1","developing","oceania","micronesia",NULL
+"KNA","659","Saint Kitts and Nevis","Saint Kitts and Nevis","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"KOR","410","South Korea","Republic of Korea","0","0","0","developing","asia","eastern_asia",NULL
+"KWT","414","Kuwait","Kuwait","0","0","0","developing","asia","western_asia",NULL
+"LAO","418","Lao","Lao People's Democratic Republic","1","1","0","developing","asia","south_eastern_asia",NULL
+"LBN","422","Lebanon","Lebanon","0","0","0","developing","asia","western_asia",NULL
+"LBR","430","Liberia","Liberia","1","0","0","developing","africa","sub_saharan_africa","western_africa"
+"LBY","434","Libya","Libya","0","0","0","developing","africa","northern_africa",NULL
+"LCA","662","Saint Lucia","Saint Lucia","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"LIE","438","Liechtenstein","Liechtenstein","0","0","0","developed","europe","western_europe",NULL
+"LKA","144","Sri Lanka","Sri Lanka","0","0","0","developing","asia","southern_asia",NULL
+"LSO","426","Lesotho","Lesotho","1","1","0","developing","africa","sub_saharan_africa","southern_africa"
+"LTU","440","Lithuania","Lithuania","0","0","0","developed","europe","northern_europe",NULL
+"LUX","442","Luxembourg","Luxembourg","0","0","0","developed","europe","western_europe",NULL
+"LVA","428","Latvia","Latvia","0","0","0","developed","europe","northern_europe",NULL
+"MAC","446","Macao","China, Macao Special Administrative Region","0","0","0","developing","asia","eastern_asia",NULL
+"MAF","663","Saint-Martin (French part)","Saint Martin (French Part)","0","0","0","developing","americas","latin_america_and_the_caribbean","caribbean"
+"MAR","504","Morocco","Morocco","0","0","0","developing","africa","northern_africa",NULL
+"MCO","492","Monaco","Monaco","0","0","0","developed","europe","western_europe",NULL
+"MDA","498","Moldova","Republic of Moldova","0","1","0","developed","europe","eastern_europe",NULL
+"MDG","450","Madagascar","Madagascar","1","0","0","developing","africa","sub_saharan_africa","eastern_africa"
+"MDV","462","Maldives","Maldives","0","0","1","developing","asia","southern_asia",NULL
+"MEX","484","Mexico","Mexico","0","0","0","developing","americas","latin_america_and_the_caribbean","central_america"
+"MHL","584","Marshall Islands","Marshall Islands","0","0","1","developing","oceania","micronesia",NULL
+"MKD","807","Republic of Macedonia","The former Yugoslav Republic of Macedonia","0","1","0","developed","europe","southern_europe",NULL
+"MLI","466","Mali","Mali","1","1","0","developing","africa","sub_saharan_africa","western_africa"
+"MLT","470","Malta","Malta","0","0","0","developed","europe","southern_europe",NULL
+"MMR","104","Myanmar","Myanmar","1","0","0","developing","asia","south_eastern_asia",NULL
+"MNE","499","Montenegro","Montenegro","0","0","0","developed","europe","southern_europe",NULL
+"MNG","496","Mongolia","Mongolia","0","1","0","developing","asia","eastern_asia",NULL
+"MNP","580","Northern Mariana Islands","Northern Mariana Islands","0","0","1","developing","oceania","micronesia",NULL
+"MOZ","508","Mozambique","Mozambique","1","0","0","developing","africa","sub_saharan_africa","eastern_africa"
+"MRT","478","Mauritania","Mauritania","1","0","0","developing","africa","sub_saharan_africa","western_africa"
+"MSR","500","Montserrat","Montserrat","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"MTQ","474","Martinique","Martinique","0","0","0","developing","americas","latin_america_and_the_caribbean","caribbean"
+"MUS","480","Mauritius","Mauritius","0","0","1","developing","africa","sub_saharan_africa","eastern_africa"
+"MWI","454","Malawi","Malawi","1","1","0","developing","africa","sub_saharan_africa","eastern_africa"
+"MYS","458","Malaysia","Malaysia","0","0","0","developing","asia","south_eastern_asia",NULL
+"MYT","175","Mayotte","Mayotte","0","0","0","developing","africa","sub_saharan_africa","eastern_africa"
+"NAM","516","Namibia","Namibia","0","0","0","developing","africa","sub_saharan_africa","southern_africa"
+"NCL","540","New Caledonia","New Caledonia","0","0","1","developing","oceania","melanesia",NULL
+"NER","562","Niger","Niger","1","1","0","developing","africa","sub_saharan_africa","western_africa"
+"NFK","574","Norfolk Island","Norfolk Island","0","0","0","developed","oceania","australia_and_new_zealand",NULL
+"NGA","566","Nigeria","Nigeria","0","0","0","developing","africa","sub_saharan_africa","western_africa"
+"NIC","558","Nicaragua","Nicaragua","0","0","0","developing","americas","latin_america_and_the_caribbean","central_america"
+"NIU","570","Niue","Niue","0","0","1","developing","oceania","polynesia",NULL
+"NLD","528","Netherlands","Netherlands","0","0","0","developed","europe","western_europe",NULL
+"NOR","578","Norway","Norway","0","0","0","developed","europe","northern_europe",NULL
+"NPL","524","Nepal","Nepal","1","1","0","developing","asia","southern_asia",NULL
+"NRU","520","Nauru","Nauru","0","0","1","developing","oceania","micronesia",NULL
+"NZL","554","New Zealand","New Zealand","0","0","0","developed","oceania","australia_and_new_zealand",NULL
+"OMN","512","Oman","Oman","0","0","0","developing","asia","western_asia",NULL
+"PAK","586","Pakistan","Pakistan","0","0","0","developing","asia","southern_asia",NULL
+"PAN","591","Panama","Panama","0","0","0","developing","americas","latin_america_and_the_caribbean","central_america"
+"PCN","612","Pitcairn","Pitcairn","0","0","0","developing","oceania","polynesia",NULL
+"PER","604","Peru","Peru","0","0","0","developing","americas","latin_america_and_the_caribbean","south_america"
+"PHL","608","Philippines","Philippines","0","0","0","developing","asia","south_eastern_asia",NULL
+"PLW","585","Palau","Palau","0","0","1","developing","oceania","micronesia",NULL
+"PNG","598","Papua New Guinea","Papua New Guinea","0","0","1","developing","oceania","melanesia",NULL
+"POL","616","Poland","Poland","0","0","0","developed","europe","eastern_europe",NULL
+"PRI","630","Puerto Rico","Puerto Rico","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"PRK","408","North Korea","Democratic People's Republic of Korea","0","0","0","developing","asia","eastern_asia",NULL
+"PRT","620","Portugal","Portugal","0","0","0","developed","europe","southern_europe",NULL
+"PRY","600","Paraguay","Paraguay","0","1","0","developing","americas","latin_america_and_the_caribbean","south_america"
+"PSE","275","Palestinian Territory","State of Palestine","0","0","0","developing","asia","western_asia",NULL
+"PYF","258","French Polynesia","French Polynesia","0","0","1","developing","oceania","polynesia",NULL
+"QAT","634","Qatar","Qatar","0","0","0","developing","asia","western_asia",NULL
+"REU","638","Réunion","Réunion","0","0","0","developing","africa","sub_saharan_africa","eastern_africa"
+"ROU","642","Romania","Romania","0","0","0","developed","europe","eastern_europe",NULL
+"RUS","643","Russia","Russian Federation","0","0","0","developed","europe","eastern_europe",NULL
+"RWA","646","Rwanda","Rwanda","1","1","0","developing","africa","sub_saharan_africa","eastern_africa"
+"SAU","682","Saudi Arabia","Saudi Arabia","0","0","0","developing","asia","western_asia",NULL
+"SDN","729","Sudan","Sudan","1","0","0","developing","africa","northern_africa",NULL
+"SEN","686","Senegal","Senegal","1","0","0","developing","africa","sub_saharan_africa","western_africa"
+"SGP","702","Singapore","Singapore","0","0","1","developing","asia","south_eastern_asia",NULL
+"SGS","239","South Georgia and the South Sandwich Islands","South Georgia and the South Sandwich Islands","0","0","0","developing","americas","latin_america_and_the_caribbean","south_america"
+"SHN","654","Saint Helena","Saint Helena","0","0","0","developing","africa","sub_saharan_africa","western_africa"
+"SJM","744","Svalbard and Jan Mayen Islands","Svalbard and Jan Mayen Islands","0","0","0","developed","europe","northern_europe",NULL
+"SLB","90","Solomon Islands","Solomon Islands","1","0","1","developing","oceania","melanesia",NULL
+"SLE","694","Sierra Leone","Sierra Leone","1","0","0","developing","africa","sub_saharan_africa","western_africa"
+"SLV","222","El Salvador","El Salvador","0","0","0","developing","americas","latin_america_and_the_caribbean","central_america"
+"SMR","674","San Marino","San Marino","0","0","0","developed","europe","southern_europe",NULL
+"SOM","706","Somalia","Somalia","1","0","0","developing","africa","sub_saharan_africa","eastern_africa"
+"SPM","666","Saint Pierre and Miquelon","Saint Pierre and Miquelon","0","0","0","developed","americas","northern_america",NULL
+"SRB","688","Serbia","Serbia","0","0","0","developed","europe","southern_europe",NULL
+"SSD","728","South Sudan","South Sudan","1","1","0","developing","africa","sub_saharan_africa","eastern_africa"
+"STP","678","Sao Tome and Principe","Sao Tome and Principe","1","0","1","developing","africa","sub_saharan_africa","middle_africa"
+"SUR","740","Suriname","Suriname","0","0","1","developing","americas","latin_america_and_the_caribbean","south_america"
+"SVK","703","Slovakia","Slovakia","0","0","0","developed","europe","eastern_europe",NULL
+"SVN","705","Slovenia","Slovenia","0","0","0","developed","europe","southern_europe",NULL
+"SWE","752","Sweden","Sweden","0","0","0","developed","europe","northern_europe",NULL
+"SWZ","748","Swaziland","Swaziland","0","1","0","developing","africa","sub_saharan_africa","southern_africa"
+"SXM","534","Sint Maarten (Dutch part)","Sint Maarten (Dutch part)","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"SYC","690","Seychelles","Seychelles","0","0","1","developing","africa","sub_saharan_africa","eastern_africa"
+"SYR","760","Syria","Syrian Arab Republic","0","0","0","developing","asia","western_asia",NULL
+"TCA","796","Turks and Caicos Islands","Turks and Caicos Islands","0","0","0","developing","americas","latin_america_and_the_caribbean","caribbean"
+"TCD","148","Chad","Chad","1","1","0","developing","africa","sub_saharan_africa","middle_africa"
+"TGO","768","Togo","Togo","1","0","0","developing","africa","sub_saharan_africa","western_africa"
+"THA","764","Thailand","Thailand","0","0","0","developing","asia","south_eastern_asia",NULL
+"TJK","762","Tajikistan","Tajikistan","0","1","0","developing","asia","central_asia",NULL
+"TKL","772","Tokelau","Tokelau","0","0","0","developing","oceania","polynesia",NULL
+"TKM","795","Turkmenistan","Turkmenistan","0","1","0","developing","asia","central_asia",NULL
+"TLS","626","Timor-Leste","Timor-Leste","1","0","1","developing","asia","south_eastern_asia",NULL
+"TON","776","Tonga","Tonga","0","0","1","developing","oceania","polynesia",NULL
+"TTO","780","Trinidad and Tobago","Trinidad and Tobago","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"TUN","788","Tunisia","Tunisia","0","0","0","developing","africa","northern_africa",NULL
+"TUR","792","Turkey","Turkey","0","0","0","developing","asia","western_asia",NULL
+"TUV","798","Tuvalu","Tuvalu","1","0","1","developing","oceania","polynesia",NULL
+"TWN",158,"Taiwan","Taiwan","0","0","0","developed","asia","eastern_asia",NULL
+"TZA","834","Tanzania","United Republic of Tanzania","1","0","0","developing","africa","sub_saharan_africa","eastern_africa"
+"UGA","800","Uganda","Uganda","1","1","0","developing","africa","sub_saharan_africa","eastern_africa"
+"UKR","804","Ukraine","Ukraine","0","0","0","developed","europe","eastern_europe",NULL
+"UMI","581","United States Minor Outlying Islands","United States Minor Outlying Islands","0","0","0","developing","oceania","micronesia",NULL
+"URY","858","Uruguay","Uruguay","0","0","0","developing","americas","latin_america_and_the_caribbean","south_america"
+"USA","840","United States","United States of America","0","0","0","developed","americas","northern_america",NULL
+"UZB","860","Uzbekistan","Uzbekistan","0","1","0","developing","asia","central_asia",NULL
+"VAT","336","Holy See (Vatican City State)","Holy See","0","0","0","developed","europe","southern_europe",NULL
+"VCT","670","Saint Vincent and Grenadines","Saint Vincent and the Grenadines","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"VEN","862","Venezuela","Venezuela (Bolivarian Republic of)","0","0","0","developing","americas","latin_america_and_the_caribbean","south_america"
+"VGB","92","British Virgin Islands","British Virgin Islands","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"VIR","850","Virgin Islands, US","United States Virgin Islands","0","0","1","developing","americas","latin_america_and_the_caribbean","caribbean"
+"VNM","704","Vietnam","Viet Nam","0","0","0","developing","asia","south_eastern_asia",NULL
+"VUT","548","Vanuatu","Vanuatu","1","0","1","developing","oceania","melanesia",NULL
+"WLF","876","Wallis and Futuna Islands","Wallis and Futuna Islands","0","0","0","developing","oceania","polynesia",NULL
+"WSM","882","Samoa","Samoa","0","0","1","developing","oceania","polynesia",NULL
+"XKX",NULL,"Kosovo","Kosovo","0","0","0","developed","europe","southern_europe",NULL
+"YEM","887","Yemen","Yemen","1","0","0","developing","asia","western_asia",NULL
+"ZAF","710","South Africa","South Africa","0","0","0","developing","africa","sub_saharan_africa","southern_africa"
+"ZMB","894","Zambia","Zambia","1","1","0","developing","africa","sub_saharan_africa","eastern_africa"
+"ZWE","716","Zimbabwe","Zimbabwe","0","1","0","developing","africa","sub_saharan_africa","eastern_africa"
