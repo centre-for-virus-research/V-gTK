@@ -53,7 +53,7 @@ git clone <V-gTK-repository-url>
 cd V-gTK
 ```
 
-### 2. Clone the RABV-gDB-build Repository
+### 2. Clone the RABV-gDB-build repository
 The RABV-gDB-build repository contains additional files and scripts that are specific to building the rabies virus genomic database.
 From inside the V-gTK directory, clone the RABV-gDB-build repository:
 
@@ -62,7 +62,7 @@ git clone https://github.com/RAGE-toolkit/RABV-gDB-build
 ```
 
 After cloning, the RABV-gDB-build directory will contain RABV-specific input files, configuration files, and the database build script required for generating the RABV database.
-### 3. Move the RABV-Specific files into the V-gTK firectory
+### 3. Move the RABV-Specific files into the V-gTK directory
 Next, move the required files from RABV-gDB-build into the main V-gTK directory.
 ```shell
 mv RABV-gDB-build/generic .
