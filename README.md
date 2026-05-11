@@ -84,6 +84,7 @@ V-gTK/
 ├── tmp/
 │   └── SqliteDB/
 └── other V-gTK files and directories
+```
 
 ### 4. Run the RABV Database Build Script
 Once the required files are in place, run the build script from inside the V-gTK directory:
