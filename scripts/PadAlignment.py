@@ -1,0 +1,383 @@
+import os
+import shutil
+import argparse
+import re
+import pandas as pd
+from os.path import join
+from Bio import SeqIO
+from Bio.Seq import Seq
+
+class PadAlignment:
+	def __init__(self, reference_alignment, input_dir, base_dir, output_dir, keep_intermediate_files, new_outputfile=False):
+		self.reference_alignment = reference_alignment
+		self.input_dir = input_dir
+		self.base_dir = base_dir
+		self.output_dir = output_dir
+		self.keep_intermediate_files = keep_intermediate_files
+		self.new_outputfile = new_outputfile
+
+	def get_master_list(self, master_acc):
+		if os.path.isfile(master_acc):
+			try:
+				df = pd.read_csv(master_acc, sep='\t', header=None, dtype=str)
+				if df.shape[1] >= 2:
+					# Filter for master if available
+					if df[1].str.lower().eq('master').any():
+						masters = df[df[1].str.lower() == 'master']
+						return masters[0].tolist()
+						
+					# If no explicit master, exclude exclusion_list entries
+					df = df[df[1].str.lower() != 'exclusion_list']
+						
+				return df[0].tolist()
+			except:
+				return []
+		else:
+			return [x.strip() for x in master_acc.split(',') if x.strip()]
+
+	def get_master_segment_map(self, master_acc):
+		master_segment = {}
+		if not os.path.isfile(master_acc):
+			return master_segment
+		try:
+			df = pd.read_csv(master_acc, sep='\t', header=None, dtype=str)
+		except Exception:
+			return master_segment
+
+		if df.shape[1] < 3:
+			return master_segment
+
+		df[0] = df[0].astype(str).str.strip()
+		df[1] = df[1].astype(str).str.strip().str.lower()
+		df[2] = df[2].astype(str).str.strip()
+
+		masters = df[df[1] == 'master']
+		for _, row in masters.iterrows():
+			master_segment[row[0]] = row[2]
+		return master_segment
+
+	@staticmethod
+	def _normalize_segment(segment_value):
+		if segment_value is None:
+			return None
+		segment_str = str(segment_value).strip()
+		if not segment_str:
+			return None
+		match = re.search(r"(\d+)", segment_str)
+		return match.group(1) if match else None
+
+	def find_precomputed_reference_alignment(self, precomputed_ref_dir, segment_value):
+		"""
+		Find a precomputed segment alignment file in precomputed_ref_dir.
+		Expected canonical naming is refset_<segment>_aln.fasta, with a
+		numeric-segment fallback for custom naming.
+		"""
+		if not precomputed_ref_dir or not os.path.isdir(precomputed_ref_dir):
+			return None
+
+		segment = self._normalize_segment(segment_value)
+		if not segment:
+			return None
+
+		preferred = os.path.join(precomputed_ref_dir, f"refset_{segment}_aln.fasta")
+		if os.path.exists(preferred):
+			return preferred
+
+		fallback_matches = []
+		for fname in os.listdir(precomputed_ref_dir):
+			if not fname.lower().endswith((".fasta", ".fa")):
+				continue
+			seg_match = re.search(r"(\d+)", fname)
+			if seg_match and seg_match.group(1) == segment:
+				fallback_matches.append(os.path.join(precomputed_ref_dir, fname))
+
+		if len(fallback_matches) == 1:
+			return fallback_matches[0]
+		if len(fallback_matches) > 1:
+			print(
+				f"[warn] Multiple precomputed alignment files matched segment {segment}: "
+				f"{', '.join(os.path.basename(x) for x in sorted(fallback_matches))}. "
+				f"Using {os.path.basename(sorted(fallback_matches)[0])}."
+			)
+			return sorted(fallback_matches)[0]
+
+		return None
+
+	def process_all_masters(self, master_list, nextalign_dir, master_segment_map=None, precomputed_ref_dir=None):
+		for master in master_list:
+			ref_aln_file = None
+			if precomputed_ref_dir and os.path.isdir(precomputed_ref_dir):
+				segment_val = (master_segment_map or {}).get(master)
+				precomputed_ref = self.find_precomputed_reference_alignment(precomputed_ref_dir, segment_val)
+				if precomputed_ref:
+					ref_aln_file = precomputed_ref
+					print(
+						f"Using precomputed segment alignment for master {master} "
+						f"(segment {segment_val}): {ref_aln_file}"
+					)
+				else:
+					print(
+						f"[warn] No precomputed segment alignment found for master {master} "
+						f"(segment {segment_val}). Falling back to nextalign reference output."
+					)
+
+			if not ref_aln_file:
+				ref_aln_file = join(nextalign_dir, "reference_aln", master, f"{master}.aligned.fasta")
+
+			if os.path.exists(ref_aln_file):
+				print(f"Processing master {master}...")
+				self.process_master_alignment(ref_aln_file, self.input_dir, self.base_dir, self.output_dir, self.keep_intermediate_files)
+			else:
+				print(f"Reference alignment for {master} not found at {ref_aln_file}")
+
+	def insert_gaps(self, reference_aligned, subalignment_seqs):
+		ref_with_gaps_list = list(reference_aligned)
+		updated_sequences = []
+		for seq_record in subalignment_seqs:
+			sequence = list(str(seq_record.seq))
+			gapped_sequence = []
+			seq_idx = 0
+			for char in ref_with_gaps_list:
+				if char == '-':
+					gapped_sequence.append('-')
+				else:
+					if seq_idx < len(sequence):
+						gapped_sequence.append(sequence[seq_idx])
+						seq_idx += 1
+					else:
+						gapped_sequence.append('-')
+			gapped_seq_str = ''.join(gapped_sequence)
+			seq_record.seq = Seq(gapped_seq_str)
+			updated_sequences.append(seq_record)
+		return updated_sequences
+
+	@staticmethod
+	def _read_fasta_headers(fasta_path):
+		headers = []
+		if not os.path.exists(fasta_path):
+			return headers
+		for record in SeqIO.parse(fasta_path, "fasta"):
+			headers.append(record.id.split('.')[0])
+		return headers
+
+	def find_orphan_query_references(self, reference_alignment_file, input_dir):
+		"""
+		Find query_aln reference directories that cannot be projected because their
+		reference is absent from the master-projected reference alignment file.
+
+		Returns a dict:
+			{ref_id: [query_accession_1, query_accession_2, ...]}
+		"""
+		master_alignment = SeqIO.to_dict(SeqIO.parse(reference_alignment_file, "fasta"))
+		projectable_refs = {ref_id.split('.')[0] for ref_id in master_alignment.keys()}
+
+		orphans = {}
+		if not os.path.isdir(input_dir):
+			return orphans
+
+		for ref_id in os.listdir(input_dir):
+			ref_path = os.path.join(input_dir, ref_id)
+			if not os.path.isdir(ref_path):
+				continue
+			if ref_id in projectable_refs:
+				continue
+			aln_file = os.path.join(ref_path, f"{ref_id}.aligned.fasta")
+			query_ids = [q for q in self._read_fasta_headers(aln_file) if q != ref_id]
+			if query_ids:
+				orphans[ref_id] = query_ids
+
+		return orphans
+
+	def process_master_alignment(self, reference_alignment_file, input_dir, base_dir, output_dir, keep_intermediate_files=False):
+		master_alignment = SeqIO.to_dict(SeqIO.parse(reference_alignment_file, "fasta"))
+		merged_sequences = []
+		for ref_id, ref_record in master_alignment.items():
+			ref_aligned = ref_record.seq
+			ref_id = ref_id.split('.')[0]
+			subalignment_file = os.path.join(input_dir, f"{ref_id}/{ref_id}.aligned.fasta")
+			if os.path.exists(subalignment_file):
+				print(f"Processing subalignment for {ref_id} using {subalignment_file}")
+				subalignment_seqs = list(SeqIO.parse(subalignment_file, "fasta"))
+				updated_seqs = self.insert_gaps(ref_aligned, subalignment_seqs)
+				
+				# Add the reference sequence to the list of sequences
+				updated_seqs.insert(0, ref_record)
+
+				os.makedirs(join(output_dir), exist_ok=True)
+				output_file = os.path.join(output_dir, f"{ref_id}_aligned_padded.fasta")
+				with open(join(output_file), "w") as output_handle:
+					SeqIO.write(updated_seqs, output_handle, "fasta")
+					print(f"Saved updated alignment to {output_file}")
+				merged_sequences.extend(updated_seqs)
+			else:
+				print(f"Subalignment file {subalignment_file} not found. Adding reference only for {ref_id}.")
+				# Even if no subalignment exists (no queries hit this ref), we must include the ref itself
+				# so it appears in the final merged output.
+				updated_seqs = [ref_record]
+				
+				os.makedirs(join(output_dir), exist_ok=True)
+				output_file = os.path.join(output_dir, f"{ref_id}_aligned_padded.fasta")
+				with open(join(output_file), "w") as output_handle:
+					SeqIO.write(updated_seqs, output_handle, "fasta")
+					print(f"Saved reference-only alignment to {output_file}")
+				merged_sequences.extend(updated_seqs)
+
+		if merged_sequences:
+			merged_output_file = os.path.join(base_dir, output_dir, os.path.basename(reference_alignment_file).replace(".fasta", "_merged_MSA.fasta"))
+			os.makedirs(join(base_dir, output_dir), exist_ok=True)
+			with open(merged_output_file, "w") as merged_output_handle:
+				SeqIO.write(merged_sequences, merged_output_handle, "fasta")
+				print(f"Saved merged alignment to {merged_output_file}")
+		else:
+			print(f"No sequences found for {reference_alignment_file}, skipping merged file creation.")
+
+		orphan_refs = self.find_orphan_query_references(reference_alignment_file, input_dir)
+		if orphan_refs:
+			orphan_query_count = sum(len(v) for v in orphan_refs.values())
+			preview_refs = ', '.join(sorted(orphan_refs.keys())[:10])
+			print(
+				f"[warn] {len(orphan_refs)} query_aln reference(s) are not present in master-projected alignment "
+				f"and were skipped ({orphan_query_count} query sequence(s))."
+			)
+			print(f"[warn] Skipped reference examples: {preview_refs}")
+
+		if not keep_intermediate_files:
+			for ref_id in master_alignment:
+				padded_file = os.path.join(output_dir, f"{ref_id.split('.')[0]}_aligned_padded.fasta")
+				if os.path.exists(padded_file):
+					os.remove(padded_file)
+					print(f"Deleted intermediate file {padded_file}")
+			shutil.rmtree(output_dir)
+
+	def find_fasta_file(self, input_dir,new_outputfile=False):
+		directory = join(self.base_dir, self.output_dir)
+		if not os.path.exists(directory):
+			return None
+		if new_outputfile:
+			return os.path.join(directory, "new_output.fasta")
+		else:
+			for file in os.listdir(directory):
+				if file.endswith(".fasta") or file.endswith(".fa"):
+					return os.path.join(directory, file)
+			return None
+
+	def remove_redundant_sequences(self):
+		
+		input_file = self.find_fasta_file(join(self.base_dir, self.output_dir),self.new_outputfile) 
+		if not input_file:
+			print(f"No fasta file found in {join(self.base_dir, self.output_dir)} to remove redundant sequences from.")
+			return
+
+		unique_records = {}
+		try:
+			for record in SeqIO.parse(input_file, "fasta"):
+				accession = record.id.split('|')[0] if '|' in record.id else record.id
+				if accession not in unique_records:
+					unique_records[accession] = record
+			with open(input_file, "w") as output_handle:
+				SeqIO.write(unique_records.values(), output_handle, "fasta")
+		except Exception as e:
+			print(f"Error removing redundant sequences: {e}")
+
+if __name__ == "__main__":
+	parser = argparse.ArgumentParser(description="Insert gaps from master alignment into corresponding subalignments.")
+	parser.add_argument("-r", "--reference_alignment", help="Path to master alignment file (FASTA format).")
+	parser.add_argument("-i", "--input_dir", help="Directory containing subalignment files (Nextalign output).", default="tmp/Nextalign/query_aln")
+	parser.add_argument("-d", "--base_dir", help="Base directory.", default="tmp")
+	parser.add_argument("-o", "--output_dir", help="Directory to save padded subalignments and merged files.", default="Pad-alignment")
+	parser.add_argument("--keep_intermediate_files", action="store_true", help="Keep intermediate files (padded subalignment). Default: disabled (files will be removed).")
+	parser.add_argument("-n","--new_outputfile", action="store_true", help="New output file name for the final merged alignment.")
+	parser.add_argument("-m", "--master_acc", help="Path to ref_list file (TSV with columns: accession, type, segment) OR comma-separated master accession IDs. For segmented viruses, the script extracts all 'master' entries to process each segment separately.")
+	parser.add_argument("-nd", "--nextalign_dir", help="Path to Nextalign output directory containing reference_aln/ and query_aln/ subdirectories.")
+	parser.add_argument("--precomputed_ref_dir", default=None, help="Optional directory containing precomputed segment alignments (e.g. refset_<segment>_aln.fasta). If absent or unmatched, falls back to nextalign reference_aln outputs.")
+ 
+	args = parser.parse_args()
+
+	processor = PadAlignment(args.reference_alignment, args.input_dir, args.base_dir, args.output_dir, args.keep_intermediate_files, args.new_outputfile)
+
+	if args.master_acc and args.nextalign_dir:
+		masters = processor.get_master_list(args.master_acc)
+		master_segment_map = processor.get_master_segment_map(args.master_acc)
+		processor.process_all_masters(
+			masters,
+			args.nextalign_dir,
+			master_segment_map=master_segment_map,
+			precomputed_ref_dir=args.precomputed_ref_dir,
+		)
+	elif args.reference_alignment:
+		processor.process_master_alignment(
+			reference_alignment_file=args.reference_alignment,
+			input_dir=args.input_dir,
+			base_dir=args.base_dir,
+			output_dir=args.output_dir,
+			keep_intermediate_files=args.keep_intermediate_files
+		)
+	else:
+		print("Error: Either -r (reference alignment) or both -m (master acc) and -nd (nextalign dir) must be provided.")
+
+	processor.remove_redundant_sequences()
+
+# -----------------------------------------------------------------------------
+# UPDATE-MODE PLAN FOR PADALIGNMENT (COMMENT ONLY)
+# Goal: project incoming partial/new sequences onto an existing DB-consistent
+# alignment backbone, while preserving historical insertion structure.
+#
+# 1) Inputs required for robust update mode:
+#    - Existing DB-derived per-segment backbone alignments (or equivalent files
+#      exported from sequence_alignment) as primary projection targets.
+#    - Incoming nextalign query_aln outputs for newly fetched/changed accessions.
+#    - Master list + segment mapping from ref_list/metadata.
+#
+# 2) Segment-first processing contract:
+#    - Partition all operations by segment before padding.
+#    - Build one work unit per segment: {segment_key, masters, references,
+#      incoming query alignments, existing backbone alignment}.
+#    - Unsegmented viruses run as a single segment bucket.
+#    - Never allow cross-segment projection (segment N query -> segment M
+#      backbone is invalid and should be rejected).
+#
+# 3) Backbone selection order per segment:
+#    - Preferred: existing DB backbone for that segment (preserves historic
+#      insertion columns and coordinate compatibility).
+#    - Fallback 1: precomputed segment reference alignment
+#      (e.g., refset_<segment>_aln.fasta).
+#    - Fallback 2: nextalign reference_aln output.
+#    - If no segment-specific backbone exists, fail that segment explicitly
+#      (do not silently reuse another segment's backbone).
+#
+# 4) Gap projection behavior per segment:
+#    - For each reference subalignment in the segment, insert gaps according to
+#      the segment backbone reference alignment.
+#    - Preserve existing columns from historic backbone exactly.
+#    - If incoming data introduces genuinely novel insertion columns, append them
+#      in a deterministic segment-local manner (stable ordering), without
+#      removing historical columns.
+#
+# 5) Merging outputs:
+#    - Produce segment-scoped merged MSA outputs first.
+#    - Optional global merged output is a concatenation of segment outputs only
+#      when downstream expects a combined file; otherwise keep per-segment files
+#      as canonical update artifacts.
+#    - Keep mapping manifest: accession -> segment -> output file.
+#
+# 6) Orphans and unresolved references:
+#    - Keep current orphan detection, but report per segment.
+#    - Distinguish:
+#      * orphan due to missing reference in segment backbone
+#      * orphan due to unknown/missing segment assignment
+#    - Route unresolved records to exclusion/quarantine list for DB audit tables.
+#
+# 7) Idempotency and determinism requirements:
+#    - Rerunning same update batch with same inputs yields byte-stable segment
+#      outputs (or equivalent sequence+coordinate content).
+#    - Deduplication should be segment-aware if accession reuse across segments
+#      is possible (key by accession+segment where required).
+#
+# 8) Hand-off to CalcAlignmentCord and DB update:
+#    - Emit explicit segment metadata alongside padded outputs (filename
+#      convention or manifest TSV) so coordinate calculation selects the correct
+#      master GFF per segment.
+#    - Ensure only update-scope accessions are forwarded for feature recalculation
+#      and DB upsert.
+# -----------------------------------------------------------------------------
+
