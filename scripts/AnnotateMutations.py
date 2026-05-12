@@ -32,7 +32,7 @@ REQUIRED_MUTATION_CATALOG_COLUMNS = [
 ]
 
 CATALOG_COLUMN_PROFILES = {
-    'HCV': ['resistance_category', 'drug','drug_category','drug_producer','pubmed_id','DOI'],
+    'HCV': ['resistance_category', 'drug','drug_category','drug_producer','pubmed_id','DOI','any_in_vitro_evidence','in_vitro_max_ec50_midpoint','any_in_vivo_evidence','in_vivo_baseline','in_vivo_treatment_emergent'],
     'influenza': ['serotypes_tested'],
     'all_columns': None,
 }
