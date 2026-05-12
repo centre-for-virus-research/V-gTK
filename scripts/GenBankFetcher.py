@@ -182,6 +182,59 @@ class GenBankFetcher:
 		print(f"[fetch_accs] total accs fetched: {len(all_accs):,} in {time.time() - start_all:.1f}s")
 		return all_accs
 
+	def iter_accs(self):
+		t0 = time.time()
+		hist_url = (
+			f"{self.base_url}esearch.fcgi?db=nucleotide"
+			f"&term=txid{self.taxid}[Organism:exp]"
+			f"&retmax=0&idtype=acc"
+			f"&usehistory=y&email={self.email}&retmode=json"
+		)
+		resp = requests.get(hist_url)
+		resp.raise_for_status()
+		hist = resp.json()["esearchresult"]
+
+		count = int(hist["count"])
+		print(f"[fetch_accs] ESearch history → count={count:,} took {time.time() - t0:.1f}s")
+
+		if count == 0:
+			return
+
+		webenv = hist["webenv"]
+		querykey = hist["querykey"]
+
+		for start in range(0, count, self.batch_size):
+			t1 = time.time()
+			page_url = (
+				f"{self.base_url}esearch.fcgi?db=nucleotide"
+				f"&WebEnv={webenv}&query_key={querykey}"
+				f"&retstart={start}&retmax={self.batch_size}"
+				f"&idtype=acc&retmode=json"
+			)
+
+			max_retries = 5
+			for attempt in range(max_retries):
+				try:
+					page_resp = requests.get(page_url)
+					page_resp.raise_for_status()
+					data = page_resp.json()
+					if "esearchresult" not in data:
+						raise ValueError("Incomplete JSON response: missing 'esearchresult'")
+					page = data["esearchresult"]["idlist"]
+					break
+				except (requests.exceptions.JSONDecodeError, requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError, requests.exceptions.HTTPError, ValueError) as e:
+					if attempt == max_retries - 1:
+						print(f"Failed to fetch accession versions for chunk starting at {start} after {max_retries} attempts.")
+						raise e
+
+					is_429 = isinstance(e, requests.exceptions.HTTPError) and e.response.status_code == 429
+					wait_time = (self.sleep_time * (attempt + 1)) + (10 if is_429 else 0)
+					print(f"Error fetching accession versions ({type(e).__name__}) for chunk starting at {start}. Retrying in {wait_time}s... (Attempt {attempt+1}/{max_retries})")
+					sleep(wait_time)
+
+			print(f"[fetch_accs] chunk {start:,}-{min(start+self.batch_size, count):,} ({len(page):,} records) took {time.time() - t1:.1f}s")
+			yield page
+
 
 	def fetch_genbank_data(self, ids):
 		# Use a separate internal batch size just for efetch
@@ -426,10 +479,27 @@ class GenBankFetcher:
 	def update(self, db_path, meta_acc_col='accession_version'):
 		meta_accessions, excluded_primary = self._load_db_accession_context(db_path, meta_acc_col=meta_acc_col)
 		print(f"Found {len(meta_accessions)} local accessions (from DB)")
-		ids = self.fetch_accs()
-		print("first 10 IDs in NCBI:", ids[:10])
 
-		missing_ids, updated_versions, new_accessions = self._compute_missing_ids(ids, meta_accessions, excluded_primary)
+		if self.test_run:
+			ids = []
+			updated_versions = []
+			new_accessions = []
+			missing_ids = []
+			limit = 100
+			for page in self.iter_accs():
+				ids.extend(page)
+				page_missing, page_updates, page_new = self._compute_missing_ids(page, meta_accessions, excluded_primary)
+				updated_versions.extend(page_updates)
+				new_accessions.extend(page_new)
+				missing_ids.extend(page_missing)
+				if len(missing_ids) >= limit:
+					missing_ids = missing_ids[:limit]
+					break
+		else:
+			ids = self.fetch_accs()
+			missing_ids, updated_versions, new_accessions = self._compute_missing_ids(ids, meta_accessions, excluded_primary)
+
+		print("first 10 IDs in NCBI:", ids[:10])
 
 		# Update mode is DB-backed for references: do not pull reference/master accessions from GenBank.
 		if self.ref_list:
@@ -446,13 +516,11 @@ class GenBankFetcher:
 
 		if self.test_run and missing_ids:
 			if new_accessions:
-				test_pool = sorted(set(new_accessions))
-				missing_ids = random.sample(test_pool, k=min(50, len(test_pool)))
-				print(f"[update][test_run] sampled {len(missing_ids)} brand-new accessions not present in DB")
+				missing_ids = list(dict.fromkeys(new_accessions))[:100]
+				print(f"[update][test_run] selected {len(missing_ids)} brand-new accessions not present in DB")
 			else:
-				test_pool = sorted(set(missing_ids))
-				missing_ids = random.sample(test_pool, k=min(50, len(test_pool)))
-				print(f"[update][test_run] no brand-new accessions found; sampled {len(missing_ids)} update candidates")
+				missing_ids = list(dict.fromkeys(missing_ids))[:100]
+				print(f"[update][test_run] no brand-new accessions found; selected {len(missing_ids)} update candidates")
 
 		self._write_update_log(updated_versions, new_accessions)
 		if missing_ids:

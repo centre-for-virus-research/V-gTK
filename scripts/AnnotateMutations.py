@@ -732,7 +732,18 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
 
     return mutations_found, diagnostics, resolved_maps
 def write_mutation_tables(conn, catalog, mutations_found, catalog_column_profile):
-    df_mut = pd.DataFrame(mutations_found)
+    df_mut = pd.DataFrame(
+        mutations_found,
+        columns=[
+            'primary_accession',
+            'mutation_id',
+            'protein_name',
+            'segment',
+            'aa_position',
+            'alt_residue',
+            'combination_id',
+        ],
+    )
     if not df_mut.empty:
         df_mut = df_mut.drop_duplicates(
             subset=['primary_accession', 'mutation_id', 'protein_name', 'segment', 'aa_position', 'alt_residue', 'combination_id']

@@ -608,24 +608,57 @@ def test_update_test_run_samples_brand_new_accessions_first(tmp_path: Path, monk
         test_run=True,
     )
 
-    monkeypatch.setattr(fetcher, "fetch_accs", lambda: ["A.2", "NEW1.1", "NEW2.1", "NEW3.1"])
-
-    sampled_inputs = []
-
-    def fake_sample(population, k):
-        sampled_inputs.append(list(population))
-        return list(population)[:k]
-
-    monkeypatch.setattr(gb_module.random, "sample", fake_sample)
+    monkeypatch.setattr(fetcher, "iter_accs", lambda: iter([["A.2", "NEW1.1", "NEW2.1", "NEW3.1"]]))
 
     captured = {}
     monkeypatch.setattr(fetcher, "fetch_genbank_data", lambda ids: captured.setdefault("ids", ids))
 
     fetcher.update(str(db_path))
 
-    # Should sample only from brand-new primary accessions, excluding A.2 update candidate
-    assert set(sampled_inputs[0]) == {"NEW1.1", "NEW2.1", "NEW3.1"}
+    # Should select only brand-new primary accessions, excluding A.2 update candidate
     assert set(captured["ids"]) == {"NEW1.1", "NEW2.1", "NEW3.1"}
+
+
+def test_update_test_run_stops_after_first_100_missing_accessions(tmp_path: Path, monkeypatch):
+    db_path = tmp_path / "prev_test_update.db"
+    _write_db(
+        db_path,
+        meta_col="accession_version",
+        meta_values=["OLD.1"],
+        excluded_values=[],
+    )
+
+    fetcher = GenBankFetcher(
+        taxid="11292",
+        base_url="https://example/",
+        email="x@y.com",
+        output_dir=str(tmp_path),
+        batch_size=50,
+        sleep_time=0,
+        base_dir="GenBank-XML",
+        update_file=str(db_path),
+        test_run=True,
+    )
+
+    pages_seen = []
+
+    def fake_iter_accs():
+        for page_idx in range(3):
+            page = [f"NEW{page_idx}_{i}.1" for i in range(50)]
+            pages_seen.append(page_idx)
+            yield page
+
+    monkeypatch.setattr(fetcher, "iter_accs", fake_iter_accs)
+
+    captured = {}
+    monkeypatch.setattr(fetcher, "fetch_genbank_data", lambda ids: captured.setdefault("ids", ids))
+
+    fetcher.update(str(db_path))
+
+    assert pages_seen == [0, 1]
+    assert len(captured["ids"]) == 100
+    assert captured["ids"][0] == "NEW0_0.1"
+    assert captured["ids"][-1] == "NEW1_49.1"
 
 
 def test_fetch_genbank_data_does_not_test_sample_when_update_mode(tmp_path: Path, monkeypatch):

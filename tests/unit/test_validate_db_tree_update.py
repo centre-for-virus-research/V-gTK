@@ -618,7 +618,45 @@ def test_validate_db_tree_update_integrity_ignores_placeholder_cluster_assignmen
     assert result.returncode == 0
     report = (outdir / "db_tree_validation.txt").read_text(encoding="utf-8")
     assert "Missing centroids in tree: 0" in report
+    assert "Non-centroid UShER leaves: 1" in report
     assert "Missing in tree (meta_data -> tree): 0" in report
+
+
+def test_validate_db_tree_update_integrity_fails_when_latest_batch_is_noop(tmp_path: Path, basic_update_db: Path):
+    _add_required_alignment_tables(basic_update_db)
+    conn = sqlite3.connect(str(basic_update_db))
+    try:
+        conn.execute("DELETE FROM update_table_deltas WHERE batch_id='batch_seed'")
+        conn.executemany(
+            "INSERT INTO update_table_deltas(batch_id, table_name, before_count, after_count, delta) VALUES (?, ?, ?, ?, ?)",
+            [
+                ("batch_seed", "meta_data", 3, 3, 0),
+                ("batch_seed", "sequences", 3, 3, 0),
+                ("batch_seed", "sequence_alignment", 3, 3, 0),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--db",
+            str(basic_update_db),
+            "--outdir",
+            str(tmp_path / "out"),
+            "--check-update-integrity",
+            "--expect-segment-trees",
+            "--test-mode",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "latest update batch made no DB changes" in result.stderr
 
 
 def test_validate_db_tree_segmented_test_mode_allows_subsampled_trees(tmp_path: Path):

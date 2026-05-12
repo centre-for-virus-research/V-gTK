@@ -843,6 +843,7 @@ def format_mutation_integrity_result(result, show_n=25):
     return "\n".join(lines)
 
 
+<<<<<<< HEAD
 def format_feature_integrity_result(result, show_n=25):
     lines = [f"[{result['title']}]"]
     if result.get("skipped"):
@@ -870,6 +871,12 @@ def format_feature_integrity_result(result, show_n=25):
                 )
             )
     return "\n".join(lines)
+=======
+def get_extra_tree_label(tree_source):
+    if tree_source == "usher":
+        return "Non-centroid UShER leaves"
+    return "Extra nodes in tree"
+>>>>>>> fad6b34 (better file updating (still having some segment misnaming issue))
 
 
 def main(argv=None):
@@ -1092,6 +1099,7 @@ def main(argv=None):
         missing_meta_path = os.path.join(args.outdir, "missing_in_meta.txt")
         missing_centroids_path = os.path.join(args.outdir, "missing_centroids_in_tree.txt")
         extra_in_tree_path = os.path.join(args.outdir, "extra_in_tree.txt")
+        extra_tree_label = get_extra_tree_label(tree_source)
 
         with open(report_path, "w", encoding="utf-8") as report:
             report.write("=== ValidateDB Summary ===\n")
@@ -1132,7 +1140,7 @@ def main(argv=None):
                 report.write(f"Cluster column: {cluster_col}\n")
                 report.write(f"Centroid count: {len(centroid_set)}\n")
                 report.write(f"Missing centroids in tree: {len(missing_centroids_in_tree)}\n")
-                report.write(f"Extra nodes in tree: {len(extra_in_tree)}\n")
+                report.write(f"{extra_tree_label}: {len(extra_in_tree)}\n")
             report.write(f"Missing in tree (meta_data -> tree): {len(missing_in_tree)}\n")
             report.write(f"Missing in sequences (meta_data -> sequences): {len(missing_in_sequences)}\n")
             report.write(f"Missing in meta_data (tree -> meta_data): {len(missing_in_meta)}\n")
@@ -1151,7 +1159,7 @@ def main(argv=None):
                 report.write("\nMissing centroids in tree (first 50):\n")
                 report.write("\n".join(missing_centroids_in_tree[:50]) + "\n")
             if cluster_col and extra_in_tree:
-                report.write("\nExtra nodes in tree (first 50):\n")
+                report.write(f"\n{extra_tree_label} (first 50):\n")
                 report.write("\n".join(extra_in_tree[:50]) + "\n")
 
             report.write("\nTable-level accession coverage:\n")
@@ -1196,6 +1204,10 @@ def main(argv=None):
                             (batch_id,),
                         )
                         rows = cursor.fetchall()
+                        changed_rows = [row for row in rows if int(row[3]) != 0]
+                        meta_delta = next((int(delta) for table_name, _before, _after, delta in rows if table_name == "meta_data"), 0)
+                        report.write(f"- changed_tables: {len(changed_rows)}\n")
+                        report.write(f"- sequences_added_to_db: {meta_delta}\n")
                         for table_name, before_count, after_count, delta in rows:
                             report.write(f"  - {table_name}: before={before_count} after={after_count} delta={delta}\n")
                 else:
@@ -1288,7 +1300,7 @@ def main(argv=None):
         if cluster_col:
             print(f"[info] Cluster column: {cluster_col}, Centroid count: {len(centroid_set)}")
             print(f"[info] Missing centroids in tree: {len(missing_centroids_in_tree)}")
-            print(f"[info] Extra nodes in tree: {len(extra_in_tree)}")
+            print(f"[info] {extra_tree_label}: {len(extra_in_tree)}")
         print(f"[info] Missing in tree: {len(missing_in_tree)}")
         print(f"[info] Missing in sequences: {len(missing_in_sequences)}")
         print(f"[info] Missing in meta_data: {len(missing_in_meta)}")
@@ -1301,7 +1313,7 @@ def main(argv=None):
         if cluster_col and missing_centroids_in_tree:
             print(f"[info] Missing centroids in tree (first 10): {', '.join(missing_centroids_in_tree[:10])}")
         if cluster_col and extra_in_tree:
-            print(f"[info] Extra nodes in tree (first 10): {', '.join(extra_in_tree[:10])}")
+            print(f"[info] {extra_tree_label} (first 10): {', '.join(extra_in_tree[:10])}")
 
         fig = plt.figure(figsize=(12, 18))
         ax = fig.add_subplot(1, 1, 1)
@@ -1338,9 +1350,12 @@ def main(argv=None):
             row = cursor.fetchone()
             if row:
                 batch_id = row[0]
-                cursor.execute("SELECT COUNT(*) FROM update_table_deltas WHERE batch_id=?", (batch_id,))
-                if cursor.fetchone()[0] == 0:
+                cursor.execute("SELECT table_name, delta FROM update_table_deltas WHERE batch_id=?", (batch_id,))
+                delta_rows = cursor.fetchall()
+                if len(delta_rows) == 0:
                     raise SystemExit("Validation failed: no update_table_deltas rows found for latest batch")
+                if all(int(delta) == 0 for _table_name, delta in delta_rows):
+                    raise SystemExit("Validation failed: latest update batch made no DB changes")
             if table_exists(conn, "features") and table_exists(conn, "meta_data"):
                 feature_cols = get_table_columns(conn, "features")
                 if "segment" in feature_cols and "segment" in meta_columns and "accession" in feature_cols:
@@ -1377,8 +1392,8 @@ def main(argv=None):
                 raise SystemExit("Validation failed: UShER tree does not match accessions")
             if cluster_col and extra_in_tree:
                 print(
-                    "[info] UShER tree contains non-centroid terminals "
-                    f"({len(extra_in_tree)} extra vs centroid context); full accession coverage passed."
+                    "[info] UShER tree contains non-centroid leaves beyond the MMseqs centroid context "
+                    f"({len(extra_in_tree)} leaves); full accession coverage passed."
                 )
         elif cluster_col:
             if missing_centroids_in_tree or extra_in_tree:
