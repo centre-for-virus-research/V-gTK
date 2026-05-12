@@ -30,6 +30,8 @@ The framework is designed to keep the database flexible and reusable. Users can 
 
 In this way, V-gTK separates the initial database-building step from the ongoing database management process. After the first build, users can continue to refine and extend the same database through simple scripted operations, making it easier to support long-term virus specific genomic analysis and surveillance.
 
+![](images/V-gTK_V-gDB.png)
+
 ### Existing RABV specific input files
 
 Before running the database build workflow, the required input files should be available inside `rabv-gdb_build`. These may include:
