@@ -1,0 +1,1550 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="Python" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Functions &mdash; TING 1.0.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=8eae9801"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="prev" title="Installation" href="installation.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            TING
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="intro.html">Introduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Functions</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#genbank-xml-downloader">GenBank XML Downloader</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#usage">Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#arguments">Arguments</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#example">Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#genbank-xml-parser">GenBank XML Parser</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id1">Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id2">Arguments</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#examples">Examples</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#notes">Notes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#download-gff3-from-ncbi">Download GFF3 from NCBI</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id3">Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id4">Arguments</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id5">Examples</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#validate-genbank-matrix">Validate GenBank Matrix</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id6">Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id7">Arguments</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id8">Examples</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id9">Notes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#add-missing-data-to-genbank-matrix">Add Missing Data to GenBank Matrix</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id10">Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id11">Arguments</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id12">Examples</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id13">Notes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#filter-and-extract-sequences">Filter and Extract Sequences</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id14">Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id15">Arguments</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id16">Examples</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id17">Notes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#blast-alignment">BLAST Alignment</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id18">Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id19">Arguments</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id20">Examples</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id21">Notes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#nextalign-alignment">Nextalign Alignment</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id22">Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id23">Arguments</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id24">Examples</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id25">Notes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#pad-alignment">Pad Alignment</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id26">Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id27">Arguments</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id28">Examples</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id29">Notes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#calculate-alignment-coordinates">Calculate Alignment Coordinates</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id30">Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id31">Arguments</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id32">Examples</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id33">Notes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#software-version-checker">Software Version Checker</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id34">Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id35">Arguments</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id36">Examples</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id37">Notes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#generate-database-ready-tables">Generate Database-Ready Tables</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id38">Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id39">Arguments</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id40">Examples</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id41">Notes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#create-sqlite-database">Create SQLite Database</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id42">Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id43">Arguments</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id44">Examples</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id45">Notes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#genbank-sequence-submitter">GenBank Sequence Submitter</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#id46">Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id47">Arguments</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id48">Examples</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id49">Notes</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">TING</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Functions</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/functions.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="functions">
+<h1>Functions<a class="headerlink" href="#functions" title="Link to this heading"></a></h1>
+<section id="genbank-xml-downloader">
+<h2>GenBank XML Downloader<a class="headerlink" href="#genbank-xml-downloader" title="Link to this heading"></a></h2>
+<p>This script downloads and updates GenBank XML files for a given species.
+It supports batch downloads, update mode, and configurable directories.</p>
+<section id="usage">
+<h3>Usage<a class="headerlink" href="#usage" title="Link to this heading"></a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>script.py<span class="w"> </span>--taxid<span class="w"> </span>&lt;TAXID&gt;<span class="w"> </span><span class="o">[</span>options<span class="o">]</span>
+</pre></div>
+</div>
+</section>
+<section id="arguments">
+<h3>Arguments<a class="headerlink" href="#arguments" title="Link to this heading"></a></h3>
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-t">
+<span id="cmdoption-taxid"></span><span class="sig-name descname"><span class="pre">-t</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--taxid</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;TAXID&gt;</span></span><a class="headerlink" href="#cmdoption-t" title="Link to this definition"></a></dt>
+<dd><p><strong>(Required)</strong> Taxonomic ID of the species.
+Example: <code class="docutils literal notranslate"><span class="pre">11292</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-o">
+<span id="cmdoption-tmp_dir"></span><span class="sig-name descname"><span class="pre">-o</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--tmp_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-o" title="Link to this definition"></a></dt>
+<dd><p>Temporary output directory where XML files are stored.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-b">
+<span id="cmdoption-batch_size"></span><span class="sig-name descname"><span class="pre">-b</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--batch_size</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;N&gt;</span></span><a class="headerlink" href="#cmdoption-b" title="Link to this definition"></a></dt>
+<dd><p>Maximum number of XML files to download and merge into a single file.
+Default: <code class="docutils literal notranslate"><span class="pre">100</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-update">
+<span class="sig-name descname"><span class="pre">--update</span></span><span class="sig-prename descclassname"></span><a class="headerlink" href="#cmdoption-update" title="Link to this definition"></a></dt>
+<dd><p>Run in <em>update mode</em> to download only new sequences.
+Expects a TSV file with a column named <code class="docutils literal notranslate"><span class="pre">Accession</span> <span class="pre">Version</span></code>.</p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-u">
+<span id="cmdoption-base_url"></span><span class="sig-name descname"><span class="pre">-u</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--base_url</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;URL&gt;</span></span><a class="headerlink" href="#cmdoption-u" title="Link to this definition"></a></dt>
+<dd><p>Base URL used to download the XML files.
+Default: <code class="docutils literal notranslate"><span class="pre">https://eutils.ncbi.nlm.nih.gov/entrez/eutils/</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-e">
+<span id="cmdoption-email"></span><span class="sig-name descname"><span class="pre">-e</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--email</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;EMAIL&gt;</span></span><a class="headerlink" href="#cmdoption-e" title="Link to this definition"></a></dt>
+<dd><p>Email ID for NCBI requests.
+Default: <code class="docutils literal notranslate"><span class="pre">your_email&#64;example.com</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-s">
+<span id="cmdoption-sleep_time"></span><span class="sig-name descname"><span class="pre">-s</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--sleep_time</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;N&gt;</span></span><a class="headerlink" href="#cmdoption-s" title="Link to this definition"></a></dt>
+<dd><p>Delay (in seconds) between fetch requests.
+Default: <code class="docutils literal notranslate"><span class="pre">2</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-d">
+<span id="cmdoption-base_dir"></span><span class="sig-name descname"><span class="pre">-d</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--base_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-d" title="Link to this definition"></a></dt>
+<dd><p>Directory where all GenBank XML files are stored.
+Default: <code class="docutils literal notranslate"><span class="pre">GenBank-XML</span></code></p>
+</dd></dl>
+
+</section>
+<section id="example">
+<h3>Example<a class="headerlink" href="#example" title="Link to this heading"></a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>script.py<span class="w"> </span>--taxid<span class="w"> </span><span class="m">11292</span><span class="w"> </span>--email<span class="w"> </span>myname@domain.com<span class="w"> </span>--batch_size<span class="w"> </span><span class="m">200</span><span class="w"> </span>--update
+</pre></div>
+</div>
+</section>
+</section>
+<section id="genbank-xml-parser">
+<h2>GenBank XML Parser<a class="headerlink" href="#genbank-xml-parser" title="Link to this heading"></a></h2>
+<p>This command extracts information from GenBank XML files and writes a tab-separated table (TSV).</p>
+<section id="id1">
+<h3>Usage<a class="headerlink" href="#id1" title="Link to this heading"></a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>GenBankParser.py<span class="w"> </span>--ref_list<span class="w"> </span>&lt;REFS_TSV&gt;<span class="w"> </span><span class="o">[</span>options<span class="o">]</span>
+</pre></div>
+</div>
+</section>
+<section id="id2">
+<h3>Arguments<a class="headerlink" href="#id2" title="Link to this heading"></a></h3>
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-0">
+<span id="cmdoption-input_dir"></span><span class="sig-name descname"><span class="pre">-d</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--input_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-0" title="Link to this definition"></a></dt>
+<dd><p>Input directory containing GenBank XML files.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/GenBank-XML</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-1">
+<span id="cmdoption-2"></span><span class="sig-name descname"><span class="pre">-b</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--base_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-1" title="Link to this definition"></a></dt>
+<dd><p>Base working directory used by the extractor.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-3">
+<span id="cmdoption-output_dir"></span><span class="sig-name descname"><span class="pre">-o</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--output_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-3" title="Link to this definition"></a></dt>
+<dd><p>Output directory where TSV tables are written.
+Default: <code class="docutils literal notranslate"><span class="pre">GenBank-matrix</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-r">
+<span id="cmdoption-ref_list"></span><span class="sig-name descname"><span class="pre">-r</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--ref_list</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-r" title="Link to this definition"></a></dt>
+<dd><p><strong>(Required)</strong> File containing a set of reference accessions.</p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-4">
+<span id="cmdoption-exclusion_list"></span><span class="sig-name descname"><span class="pre">-e</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--exclusion_list</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-4" title="Link to this definition"></a></dt>
+<dd><p>Optional file with accessions to exclude from the output.</p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-5">
+<span id="cmdoption-is_segmented_virus"></span><span class="sig-name descname"><span class="pre">-s</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--is_segmented_virus</span></span><span class="sig-prename descclassname"> <span class="pre">{Y,N}</span></span><a class="headerlink" href="#cmdoption-5" title="Link to this definition"></a></dt>
+<dd><p>Whether the virus is segmented (<code class="docutils literal notranslate"><span class="pre">Y</span></code> or <code class="docutils literal notranslate"><span class="pre">N</span></code>).
+Default: <code class="docutils literal notranslate"><span class="pre">N</span></code></p>
+</dd></dl>
+
+</section>
+<section id="examples">
+<h3>Examples<a class="headerlink" href="#examples" title="Link to this heading"></a></h3>
+<p>Basic run:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>GenBankParser.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--ref_list<span class="w"> </span>refs.tsv
+</pre></div>
+</div>
+<p>Custom directories and segmented virus:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>GenBankParser.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--input_dir<span class="w"> </span>tmp/GenBank-XML<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--base_dir<span class="w"> </span>tmp<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--output_dir<span class="w"> </span>GenBank-matrix<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--ref_list<span class="w"> </span>refs.tsv<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--exclusion_list<span class="w"> </span>exclude.tsv<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--is_segmented_virus<span class="w"> </span>Y
+</pre></div>
+</div>
+</section>
+<section id="notes">
+<h3>Notes<a class="headerlink" href="#notes" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>Make sure your <code class="docutils literal notranslate"><span class="pre">--ref_list</span></code> file contains valid accession identifiers (one per line, or as expected by your parser).</p></li>
+<li><p>When <code class="docutils literal notranslate"><span class="pre">--is_segmented_virus</span> <span class="pre">Y</span></code> is used, the output may include one row per segment depending on your parsing logic.</p></li>
+</ul>
+</section>
+</section>
+<section id="download-gff3-from-ncbi">
+<h2>Download GFF3 from NCBI<a class="headerlink" href="#download-gff3-from-ncbi" title="Link to this heading"></a></h2>
+<p>The script <code class="docutils literal notranslate"><span class="pre">DownloadGFF.py</span></code> downloads <strong>GFF3 files</strong> from NCBI using <em>efetch</em>.
+It accepts one or more accession IDs and saves the results locally.</p>
+<section id="id3">
+<h3>Usage<a class="headerlink" href="#id3" title="Link to this heading"></a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>DownloadGFF.py<span class="w"> </span>--accession_ids<span class="w"> </span>&lt;ACCESSION&gt;<span class="w"> </span><span class="o">[</span>options<span class="o">]</span>
+</pre></div>
+</div>
+</section>
+<section id="id4">
+<h3>Arguments<a class="headerlink" href="#id4" title="Link to this heading"></a></h3>
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-id">
+<span id="cmdoption-accession_ids"></span><span class="sig-name descname"><span class="pre">-id</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--accession_ids</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;ID&gt;</span></span><a class="headerlink" href="#cmdoption-id" title="Link to this definition"></a></dt>
+<dd><p><strong>(Required)</strong> One or more NCBI accession IDs to download.
+Example: <code class="docutils literal notranslate"><span class="pre">NC_002645</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-6">
+<span id="cmdoption-7"></span><span class="sig-name descname"><span class="pre">-b</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--base_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-6" title="Link to this definition"></a></dt>
+<dd><p>Base working directory.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-8">
+<span id="cmdoption-9"></span><span class="sig-name descname"><span class="pre">-o</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--output_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-8" title="Link to this definition"></a></dt>
+<dd><p>Directory where the downloaded GFF3 files are saved.
+Default: <code class="docutils literal notranslate"><span class="pre">Gff</span></code></p>
+</dd></dl>
+
+</section>
+<section id="id5">
+<h3>Examples<a class="headerlink" href="#id5" title="Link to this heading"></a></h3>
+<p>Download a single accession:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>DownloadGFF.py<span class="w"> </span>--accession_ids<span class="w"> </span>NC_002645
+</pre></div>
+</div>
+<p>Download into a custom directory:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>DownloadGFF.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--accession_ids<span class="w"> </span>NC_002645<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--base_dir<span class="w"> </span>data<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--output_dir<span class="w"> </span>ncbi_gff
+</pre></div>
+</div>
+</section>
+</section>
+<section id="validate-genbank-matrix">
+<h2>Validate GenBank Matrix<a class="headerlink" href="#validate-genbank-matrix" title="Link to this heading"></a></h2>
+<p>The script <code class="docutils literal notranslate"><span class="pre">ValidateMatrix.py</span></code> validates a GenBank matrix (<code class="docutils literal notranslate"><span class="pre">gB_matrix</span></code>) using
+country, date, and host columns. It can download the NCBI taxonomy dump to
+standardize names and produces a cleaned/validated TSV.</p>
+<section id="id6">
+<h3>Usage<a class="headerlink" href="#id6" title="Link to this heading"></a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>ValidateMatrix.py<span class="w"> </span><span class="o">[</span>options<span class="o">]</span>
+</pre></div>
+</div>
+</section>
+<section id="id7">
+<h3>Arguments<a class="headerlink" href="#id7" title="Link to this heading"></a></h3>
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-10">
+<span id="cmdoption-url"></span><span class="sig-name descname"><span class="pre">-u</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--url</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;URL&gt;</span></span><a class="headerlink" href="#cmdoption-10" title="Link to this definition"></a></dt>
+<dd><p>URL to download the NCBI taxonomy dump (<code class="docutils literal notranslate"><span class="pre">taxdump.tar.gz</span></code>).
+Default: <code class="docutils literal notranslate"><span class="pre">https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-11">
+<span id="cmdoption-taxa_path"></span><span class="sig-name descname"><span class="pre">-t</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--taxa_path</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-11" title="Link to this definition"></a></dt>
+<dd><p>Directory to store unpacked taxonomy files (names, nodes, etc.).
+Default: <code class="docutils literal notranslate"><span class="pre">Taxa</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-12">
+<span id="cmdoption-13"></span><span class="sig-name descname"><span class="pre">-b</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--base_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-12" title="Link to this definition"></a></dt>
+<dd><p>Base working directory.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp-test</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-14">
+<span id="cmdoption-15"></span><span class="sig-name descname"><span class="pre">-o</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--output_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-14" title="Link to this definition"></a></dt>
+<dd><p>Output directory for validation results.
+Default: <code class="docutils literal notranslate"><span class="pre">Validate-matrix</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-g">
+<span id="cmdoption-gb_matrix"></span><span class="sig-name descname"><span class="pre">-g</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--gb_matrix</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-g" title="Link to this definition"></a></dt>
+<dd><p>Input GenBank matrix TSV file.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp-test/GenBank-matrix/gB_matrix_raw.tsv</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-c">
+<span id="cmdoption-country"></span><span class="sig-name descname"><span class="pre">-c</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--country</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-c" title="Link to this definition"></a></dt>
+<dd><p>M49 country reference CSV used for normalization/validation.
+Default: <code class="docutils literal notranslate"><span class="pre">assets/m49_country.csv</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-a">
+<span id="cmdoption-assets"></span><span class="sig-name descname"><span class="pre">-a</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--assets</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-a" title="Link to this definition"></a></dt>
+<dd><p>Directory containing auxiliary assets (e.g., reference CSVs).
+Default: <code class="docutils literal notranslate"><span class="pre">assets/</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-no-debug">
+<span class="sig-name descname"><span class="pre">--no-debug</span></span><span class="sig-prename descclassname"></span><a class="headerlink" href="#cmdoption-no-debug" title="Link to this definition"></a></dt>
+<dd><p>Disable verbose/fuzzy debug prints.
+(Debug logging is <strong>enabled by default</strong>; this flag turns it off.)</p>
+</dd></dl>
+
+</section>
+<section id="id8">
+<h3>Examples<a class="headerlink" href="#id8" title="Link to this heading"></a></h3>
+<p>Basic validation with defaults:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>ValidateMatrix.py
+</pre></div>
+</div>
+<p>Specify custom locations for inputs/outputs:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>ValidateMatrix.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--gb_matrix<span class="w"> </span>data/GenBank-matrix/gB_matrix_raw.tsv<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--country<span class="w"> </span>assets/m49_country.csv<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--base_dir<span class="w"> </span>work<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--output_dir<span class="w"> </span>Validate-matrix
+</pre></div>
+</div>
+<p>Run quietly (no fuzzy debug prints):</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>ValidateMatrix.py<span class="w"> </span>--no-debug
+</pre></div>
+</div>
+</section>
+<section id="id9">
+<h3>Notes<a class="headerlink" href="#id9" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>By default, the script enables debug messages; use <code class="docutils literal notranslate"><span class="pre">--no-debug</span></code> to suppress them.</p></li>
+<li><p>Ensure the input matrix contains the expected columns (country, collection date,
+host) so validation rules can be applied effectively.</p></li>
+<li><p>The taxonomy dump will be downloaded to <code class="docutils literal notranslate"><span class="pre">--taxa_path</span></code> if not present.</p></li>
+</ul>
+</section>
+</section>
+<section id="add-missing-data-to-genbank-matrix">
+<h2>Add Missing Data to GenBank Matrix<a class="headerlink" href="#add-missing-data-to-genbank-matrix" title="Link to this heading"></a></h2>
+<p>The script <code class="docutils literal notranslate"><span class="pre">AddMissingData.py</span></code> processes a GenBank matrix to handle missing
+values and apply bulk replacements. It can use a <em>fillup file</em> to insert
+additional information and a <em>bulk file</em> for systematic replacements.</p>
+<section id="id10">
+<h3>Usage<a class="headerlink" href="#id10" title="Link to this heading"></a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>AddMissingData.py<span class="w"> </span><span class="o">[</span>options<span class="o">]</span>
+</pre></div>
+</div>
+</section>
+<section id="id11">
+<h3>Arguments<a class="headerlink" href="#id11" title="Link to this heading"></a></h3>
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-16">
+<span id="cmdoption-17"></span><span class="sig-name descname"><span class="pre">-d</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--tmp_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-16" title="Link to this definition"></a></dt>
+<dd><p>Directory where the validated GenBank matrix is saved.
+Recommended: <code class="docutils literal notranslate"><span class="pre">tmp/AddMissingData</span></code>
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/AddMissingData</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-18">
+<span id="cmdoption-19"></span><span class="sig-name descname"><span class="pre">-g</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--gb_matrix</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-18" title="Link to this definition"></a></dt>
+<dd><p>Input GenBank matrix TSV generated by <code class="docutils literal notranslate"><span class="pre">genbank_to_tsv.py</span></code>.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/GenBank-matrix/gB_matrix_raw.tsv</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-f">
+<span id="cmdoption-fillup_file"></span><span class="sig-name descname"><span class="pre">-f</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--fillup_file</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-f" title="Link to this definition"></a></dt>
+<dd><p>TSV file containing additional metadata to fill missing values.
+The file <strong>must</strong> contain a primary accession column; other columns are optional.
+Default: <code class="docutils literal notranslate"><span class="pre">None</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-20">
+<span id="cmdoption-bulk_file"></span><span class="sig-name descname"><span class="pre">-b</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--bulk_file</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-20" title="Link to this definition"></a></dt>
+<dd><p>TSV file specifying bulk replacements with <code class="docutils literal notranslate"><span class="pre">host</span></code> and <code class="docutils literal notranslate"><span class="pre">replaced_by</span></code> columns.
+Default: <code class="docutils literal notranslate"><span class="pre">None</span></code></p>
+</dd></dl>
+
+</section>
+<section id="id12">
+<h3>Examples<a class="headerlink" href="#id12" title="Link to this heading"></a></h3>
+<p>Run with default paths:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>AddMissingData.py
+</pre></div>
+</div>
+<p>Provide a fillup file to supplement missing metadata:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>AddMissingData.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--fillup_file<span class="w"> </span>data/fillup.tsv
+</pre></div>
+</div>
+<p>Apply bulk replacements in addition to fillups:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>AddMissingData.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--gb_matrix<span class="w"> </span>data/gB_matrix_raw.tsv<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--fillup_file<span class="w"> </span>data/fillup.tsv<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--bulk_file<span class="w"> </span>data/bulk_replace.tsv<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--tmp_dir<span class="w"> </span>tmp/AddMissingData
+</pre></div>
+</div>
+</section>
+<section id="id13">
+<h3>Notes<a class="headerlink" href="#id13" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>The <strong>fillup file</strong> helps enrich the GenBank matrix with missing metadata.</p></li>
+<li><p>The <strong>bulk file</strong> allows replacing multiple values systematically.</p></li>
+<li><p>Output is written into the directory specified by <code class="docutils literal notranslate"><span class="pre">--tmp_dir</span></code>.</p></li>
+</ul>
+</section>
+</section>
+<section id="filter-and-extract-sequences">
+<h2>Filter and Extract Sequences<a class="headerlink" href="#filter-and-extract-sequences" title="Link to this heading"></a></h2>
+<p>The script <code class="docutils literal notranslate"><span class="pre">FilterAndExtractSequence.py</span></code> filters sequences from a GenBank matrix
+and prepares them for downstream BLAST alignment. It supports filtering by sequence
+length, ambiguity, GenBank divisions, and reference sets.</p>
+<section id="id14">
+<h3>Usage<a class="headerlink" href="#id14" title="Link to this heading"></a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>FilterAndExtractSequence.py<span class="w"> </span>--genbank_matrix<span class="w"> </span>&lt;FILE&gt;<span class="w"> </span>--ref_file<span class="w"> </span>&lt;FILE&gt;<span class="w"> </span><span class="o">[</span>options<span class="o">]</span>
+</pre></div>
+</div>
+</section>
+<section id="id15">
+<h3>Arguments<a class="headerlink" href="#id15" title="Link to this heading"></a></h3>
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-21">
+<span id="cmdoption-genbank_matrix"></span><span class="sig-name descname"><span class="pre">-g</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--genbank_matrix</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-21" title="Link to this definition"></a></dt>
+<dd><p><strong>(Required)</strong> Input GenBank matrix file.</p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-sf">
+<span id="cmdoption-sequence_file"></span><span class="sig-name descname"><span class="pre">-sf</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--sequence_file</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-sf" title="Link to this definition"></a></dt>
+<dd><p>Input FASTA file containing sequences.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/GenBank-matrix/sequences.fa</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-22">
+<span id="cmdoption-genbank_matrix_filtered"></span><span class="sig-name descname"><span class="pre">-f</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--genbank_matrix_filtered</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-22" title="Link to this definition"></a></dt>
+<dd><p>Directory where the filtered GenBank matrix will be stored.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/GenBank-matrix</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-23">
+<span id="cmdoption-ref_file"></span><span class="sig-name descname"><span class="pre">-r</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--ref_file</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-23" title="Link to this definition"></a></dt>
+<dd><p><strong>(Required)</strong> Text file containing a list of reference sequence accessions.</p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-24">
+<span id="cmdoption-25"></span><span class="sig-name descname"><span class="pre">-b</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--base_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-24" title="Link to this definition"></a></dt>
+<dd><p>Base working directory.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-26">
+<span id="cmdoption-27"></span><span class="sig-name descname"><span class="pre">-o</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--output_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-26" title="Link to this definition"></a></dt>
+<dd><p>Directory where processed sequences will be written.
+Default: <code class="docutils literal notranslate"><span class="pre">Sequences</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-l">
+<span id="cmdoption-total_length"></span><span class="sig-name descname"><span class="pre">-l</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--total_length</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;N&gt;</span></span><a class="headerlink" href="#cmdoption-l" title="Link to this definition"></a></dt>
+<dd><p>Minimum sequence length (including ambiguous characters).
+Default: <code class="docutils literal notranslate"><span class="pre">1</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-n">
+<span id="cmdoption-real_length"></span><span class="sig-name descname"><span class="pre">-n</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--real_length</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;N&gt;</span></span><a class="headerlink" href="#cmdoption-n" title="Link to this definition"></a></dt>
+<dd><p>Minimum sequence length excluding ambiguous <code class="docutils literal notranslate"><span class="pre">N</span></code> bases.
+Default: <code class="docutils literal notranslate"><span class="pre">1</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-28">
+<span id="cmdoption-prop_ambigious_data"></span><span class="sig-name descname"><span class="pre">-a</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--prop_ambigious_data</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;VALS&gt;</span></span><a class="headerlink" href="#cmdoption-28" title="Link to this definition"></a></dt>
+<dd><p>Proportion(s) of ambiguous data to exclude.
+Accepts one or more values.
+Default: <code class="docutils literal notranslate"><span class="pre">None</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-v">
+<span id="cmdoption-segmented_virus"></span><span class="sig-name descname"><span class="pre">-v</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--segmented_virus</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;Y/N&gt;</span></span><a class="headerlink" href="#cmdoption-v" title="Link to this definition"></a></dt>
+<dd><p>Whether the dataset is from a segmented virus.
+Default: <code class="docutils literal notranslate"><span class="pre">N</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-29">
+<span id="cmdoption-genbank_division"></span><span class="sig-name descname"><span class="pre">-d</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--genbank_division</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;LIST&gt;</span></span><a class="headerlink" href="#cmdoption-29" title="Link to this definition"></a></dt>
+<dd><p>GenBank divisions to exclude from analysis.
+Default: <code class="docutils literal notranslate"><span class="pre">[&quot;VRL&quot;,</span> <span class="pre">&quot;PAT&quot;,</span> <span class="pre">&quot;SYN&quot;,</span> <span class="pre">&quot;ENV&quot;]</span></code></p>
+<p>Common divisions include:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">VRL</span></code> — Viral sequences</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">ENV</span></code> — Environmental sequences</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">PAT</span></code> — Patented sequences</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">SYN</span></code> — Synthetic/chimeric sequences</p></li>
+</ul>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-vd">
+<span id="cmdoption-valid_divisions"></span><span class="sig-name descname"><span class="pre">-vd</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--valid_divisions</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;LIST&gt;</span></span><a class="headerlink" href="#cmdoption-vd" title="Link to this definition"></a></dt>
+<dd><p>GenBank divisions to <strong>include</strong> for analysis.
+Default: <code class="docutils literal notranslate"><span class="pre">[&quot;VRL&quot;,</span> <span class="pre">&quot;ENV&quot;]</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-30">
+<span id="cmdoption-seq_type"></span><span class="sig-name descname"><span class="pre">-s</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--seq_type</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;TYPE&gt;</span></span><a class="headerlink" href="#cmdoption-30" title="Link to this definition"></a></dt>
+<dd><p>Sequence type (e.g., nucleotide, protein).
+Default: <code class="docutils literal notranslate"><span class="pre">None</span></code></p>
+</dd></dl>
+
+</section>
+<section id="id16">
+<h3>Examples<a class="headerlink" href="#id16" title="Link to this heading"></a></h3>
+<p>Filter sequences longer than 5000 bases:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>FilterAndExtractSequence.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--genbank_matrix<span class="w"> </span>data/gB_matrix.tsv<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--ref_file<span class="w"> </span>refs.txt<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--total_length<span class="w"> </span><span class="m">5000</span>
+</pre></div>
+</div>
+<p>Exclude environmental and patented sequences:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>FilterAndExtractSequence.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--genbank_matrix<span class="w"> </span>data/gB_matrix.tsv<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--ref_file<span class="w"> </span>refs.txt<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--genbank_division<span class="w"> </span>VRL<span class="w"> </span>PAT<span class="w"> </span>SYN<span class="w"> </span>ENV
+</pre></div>
+</div>
+<p>Filter by valid divisions and only keep nucleotide sequences:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>FilterAndExtractSequence.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--genbank_matrix<span class="w"> </span>data/gB_matrix.tsv<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--ref_file<span class="w"> </span>refs.txt<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--valid_divisions<span class="w"> </span>VRL<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--seq_type<span class="w"> </span>nucleotide
+</pre></div>
+</div>
+</section>
+<section id="id17">
+<h3>Notes<a class="headerlink" href="#id17" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>Both <code class="docutils literal notranslate"><span class="pre">--genbank_division</span></code> and <code class="docutils literal notranslate"><span class="pre">--valid_divisions</span></code> can be provided as lists
+(space-separated).</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--total_length</span></code> and <code class="docutils literal notranslate"><span class="pre">--real_length</span></code> help enforce sequence quality.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--prop_ambigious_data</span></code> allows filtering sequences with excessive ambiguity.</p></li>
+</ul>
+</section>
+</section>
+<section id="blast-alignment">
+<h2>BLAST Alignment<a class="headerlink" href="#blast-alignment" title="Link to this heading"></a></h2>
+<p>The script <code class="docutils literal notranslate"><span class="pre">BlastAlignment.py</span></code> performs BLAST alignments of query sequences
+against a given set of reference sequences. It can create a BLAST database
+from the provided reference FASTA file and produces a table of top hits.</p>
+<section id="id18">
+<h3>Usage<a class="headerlink" href="#id18" title="Link to this heading"></a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>BlastAlignment.py<span class="w"> </span>--master_acc<span class="w"> </span>&lt;ACCESSION&gt;<span class="w"> </span><span class="o">[</span>options<span class="o">]</span>
+</pre></div>
+</div>
+</section>
+<section id="id19">
+<h3>Arguments<a class="headerlink" href="#id19" title="Link to this heading"></a></h3>
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-q">
+<span id="cmdoption-query_fa"></span><span class="sig-name descname"><span class="pre">-q</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--query_fa</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-q" title="Link to this definition"></a></dt>
+<dd><p>Query FASTA file containing sequences to align.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/Sequences/query_seq.fa</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-31">
+<span id="cmdoption-ref_fa"></span><span class="sig-name descname"><span class="pre">-r</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--ref_fa</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-31" title="Link to this definition"></a></dt>
+<dd><p>Reference FASTA file used to create a BLAST database.
+(This file will be indexed for BLAST searches.)
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/Sequences/ref_seq.fa</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-32">
+<span id="cmdoption-33"></span><span class="sig-name descname"><span class="pre">-b</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--base_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-32" title="Link to this definition"></a></dt>
+<dd><p>Base working directory.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-34">
+<span id="cmdoption-35"></span><span class="sig-name descname"><span class="pre">-t</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--output_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-34" title="Link to this definition"></a></dt>
+<dd><p>Output directory for BLAST results.
+Default: <code class="docutils literal notranslate"><span class="pre">Blast</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-36">
+<span id="cmdoption-output_file"></span><span class="sig-name descname"><span class="pre">-o</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--output_file</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-36" title="Link to this definition"></a></dt>
+<dd><p>Output file name for BLAST top hits.
+Default: <code class="docutils literal notranslate"><span class="pre">query_tophits.tsv</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-37">
+<span id="cmdoption-38"></span><span class="sig-name descname"><span class="pre">-s</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--is_segmented_virus</span></span><span class="sig-prename descclassname"> <span class="pre">{Y,N}</span></span><a class="headerlink" href="#cmdoption-37" title="Link to this definition"></a></dt>
+<dd><p>Whether the virus is segmented (<code class="docutils literal notranslate"><span class="pre">Y</span></code> or <code class="docutils literal notranslate"><span class="pre">N</span></code>).
+Default: <code class="docutils literal notranslate"><span class="pre">N</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-39">
+<span id="cmdoption-segment_file"></span><span class="sig-name descname"><span class="pre">-f</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--segment_file</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-39" title="Link to this definition"></a></dt>
+<dd><p>File containing information about viral segments.
+Required only when <code class="docutils literal notranslate"><span class="pre">--is_segmented_virus</span> <span class="pre">Y</span></code>.</p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-m">
+<span id="cmdoption-master_acc"></span><span class="sig-name descname"><span class="pre">-m</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--master_acc</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;ACCESSION&gt;</span></span><a class="headerlink" href="#cmdoption-m" title="Link to this definition"></a></dt>
+<dd><p><strong>(Required)</strong> Master reference accession.
+Example: Rabies virus uses <code class="docutils literal notranslate"><span class="pre">NC_001542</span></code>.</p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-40">
+<span id="cmdoption-is_update"></span><span class="sig-name descname"><span class="pre">-u</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--is_update</span></span><span class="sig-prename descclassname"> <span class="pre">{Y,N}</span></span><a class="headerlink" href="#cmdoption-40" title="Link to this definition"></a></dt>
+<dd><p>If set to <code class="docutils literal notranslate"><span class="pre">Y</span></code>, skips BLAST on sequences that were already aligned,
+useful for incremental updates.
+Default: <code class="docutils literal notranslate"><span class="pre">N</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-k">
+<span id="cmdoption-keep_blast_tmp_dir"></span><span class="sig-name descname"><span class="pre">-k</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--keep_blast_tmp_dir</span></span><span class="sig-prename descclassname"> <span class="pre">{Y,N}</span></span><a class="headerlink" href="#cmdoption-k" title="Link to this definition"></a></dt>
+<dd><p>Whether to retain the temporary BLAST working directory for debugging.
+Default: <code class="docutils literal notranslate"><span class="pre">N</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-41">
+<span id="cmdoption-42"></span><span class="sig-name descname"><span class="pre">-g</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--gb_matrix</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-41" title="Link to this definition"></a></dt>
+<dd><p>Input GenBank matrix file.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/GenBank-matrix/gB_matrix_raw.tsv</span></code></p>
+</dd></dl>
+
+</section>
+<section id="id20">
+<h3>Examples<a class="headerlink" href="#id20" title="Link to this heading"></a></h3>
+<p>Run a basic BLAST alignment:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>BlastAlignment.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--master_acc<span class="w"> </span>NC_001542<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--query_fa<span class="w"> </span>data/query.fa<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--ref_fa<span class="w"> </span>data/ref.fa
+</pre></div>
+</div>
+<p>Run in update mode to skip previously aligned sequences:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>BlastAlignment.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--master_acc<span class="w"> </span>NC_001542<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--query_fa<span class="w"> </span>new_sequences.fa<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--is_update<span class="w"> </span>Y
+</pre></div>
+</div>
+<p>Debugging with retained BLAST temp directory:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>BlastAlignment.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--master_acc<span class="w"> </span>NC_001542<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--keep_blast_tmp_dir<span class="w"> </span>Y
+</pre></div>
+</div>
+</section>
+<section id="id21">
+<h3>Notes<a class="headerlink" href="#id21" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>The <strong>reference FASTA file</strong> is automatically converted into a BLAST database.</p></li>
+<li><p>The <strong>master accession</strong> ensures consistency across analyses (e.g., Rabies virus = <code class="docutils literal notranslate"><span class="pre">NC_001542</span></code>).</p></li>
+<li><p>Use <code class="docutils literal notranslate"><span class="pre">--is_update</span> <span class="pre">Y</span></code> for incremental analyses to save runtime.</p></li>
+<li><p>Set <code class="docutils literal notranslate"><span class="pre">--keep_blast_tmp_dir</span> <span class="pre">Y</span></code> only when you need to inspect raw BLAST output for debugging.</p></li>
+</ul>
+</section>
+</section>
+<section id="nextalign-alignment">
+<h2>Nextalign Alignment<a class="headerlink" href="#nextalign-alignment" title="Link to this heading"></a></h2>
+<p>The script <code class="docutils literal notranslate"><span class="pre">NextalignAlignment.py</span></code> runs <strong>Nextalign</strong> for each query sequence,
+aligning it to a master reference. It can optionally reuse a precomputed
+reference alignment instead of generating one on the fly.</p>
+<section id="id22">
+<h3>Usage<a class="headerlink" href="#id22" title="Link to this heading"></a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>NextalignAlignment.py<span class="w"> </span>--master_ref<span class="w"> </span>&lt;ACCESSION&gt;<span class="w"> </span><span class="o">[</span>options<span class="o">]</span>
+</pre></div>
+</div>
+</section>
+<section id="id23">
+<h3>Arguments<a class="headerlink" href="#id23" title="Link to this heading"></a></h3>
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-43">
+<span id="cmdoption-gB_matrix"></span><span class="sig-name descname"><span class="pre">-g</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--gB_matrix</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-43" title="Link to this definition"></a></dt>
+<dd><p>GenBank matrix (metadata) TSV file.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/GenBank-matrix/gB_matrix_raw.tsv</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-44">
+<span id="cmdoption-query_dir"></span><span class="sig-name descname"><span class="pre">-q</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--query_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-44" title="Link to this definition"></a></dt>
+<dd><p>Directory containing grouped query FASTA files.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/Blast/grouped_fasta</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-45">
+<span id="cmdoption-ref_dir"></span><span class="sig-name descname"><span class="pre">-r</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--ref_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-45" title="Link to this definition"></a></dt>
+<dd><p>Directory containing reference FASTA files.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/Blast/ref_seqs</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-46">
+<span id="cmdoption-ref_fa_file"></span><span class="sig-name descname"><span class="pre">-f</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--ref_fa_file</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-46" title="Link to this definition"></a></dt>
+<dd><p>Combined reference FASTA file.
+This file is used to perform Nextalign against the master reference sequence.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/Sequences/ref_seq.fa</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-ms">
+<span id="cmdoption-master_seq_dir"></span><span class="sig-name descname"><span class="pre">-ms</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--master_seq_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-ms" title="Link to this definition"></a></dt>
+<dd><p>Directory where the master sequence (derived from the master accession) is stored.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/Blast/master_seq</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-47">
+<span id="cmdoption-48"></span><span class="sig-name descname"><span class="pre">-t</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--tmp_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-47" title="Link to this definition"></a></dt>
+<dd><p>Temporary working directory.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-49">
+<span id="cmdoption-master_ref"></span><span class="sig-name descname"><span class="pre">-m</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--master_ref</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;ACCESSION&gt;</span></span><a class="headerlink" href="#cmdoption-49" title="Link to this definition"></a></dt>
+<dd><p><strong>(Required)</strong> Master reference accession (e.g., RefSeq).
+Example (Rabies virus): <code class="docutils literal notranslate"><span class="pre">NC_001542</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-50">
+<span id="cmdoption-nextalign_dir"></span><span class="sig-name descname"><span class="pre">-n</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--nextalign_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-50" title="Link to this definition"></a></dt>
+<dd><p>Output directory for Nextalign results.
+Default: <code class="docutils literal notranslate"><span class="pre">Nextalign</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-ra">
+<span id="cmdoption-ref_alignment_file"></span><span class="sig-name descname"><span class="pre">-ra</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--ref_alignment_file</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-ra" title="Link to this definition"></a></dt>
+<dd><p>Optional <strong>reference alignment</strong> file to use instead of having Nextalign
+align the reference to the master on the fly.</p>
+</dd></dl>
+
+</section>
+<section id="id24">
+<h3>Examples<a class="headerlink" href="#id24" title="Link to this heading"></a></h3>
+<p>Run Nextalign using the default directories:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>NextalignAlignment.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--master_ref<span class="w"> </span>NC_001542
+</pre></div>
+</div>
+<p>Specify a precomputed reference alignment file:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>NextalignAlignment.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--master_ref<span class="w"> </span>NC_001542<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--ref_alignment_file<span class="w"> </span>data/reference_alignment.fasta
+</pre></div>
+</div>
+<p>Use custom locations for queries and references:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>NextalignAlignment.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--master_ref<span class="w"> </span>NC_001542<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--query_dir<span class="w"> </span>work/Blast/grouped_fasta<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--ref_dir<span class="w"> </span>work/Blast/ref_seqs<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--ref_fa_file<span class="w"> </span>work/Sequences/ref_seq.fa<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--nextalign_dir<span class="w"> </span>results/Nextalign
+</pre></div>
+</div>
+</section>
+<section id="id25">
+<h3>Notes<a class="headerlink" href="#id25" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>Ensure <strong>Nextalign</strong> is installed and available on your PATH before running the script.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">--ref_alignment_file</span></code> is optional; if omitted, the script will let Nextalign
+align reference sequences against the master reference automatically.</p></li>
+<li><p>The <strong>master reference accession</strong> should correspond to the canonical reference
+genome used for your analyses (e.g., Rabies virus = <code class="docutils literal notranslate"><span class="pre">NC_001542</span></code>).</p></li>
+</ul>
+</section>
+</section>
+<section id="pad-alignment">
+<h2>Pad Alignment<a class="headerlink" href="#pad-alignment" title="Link to this heading"></a></h2>
+<p>The script <code class="docutils literal notranslate"><span class="pre">PadAlignment.py</span></code> inserts gaps from a <strong>master alignment</strong>
+into corresponding subalignments (e.g., from Nextalign output).
+It ensures subalignments are padded consistently with the reference alignment
+and merges them into a final alignment file.</p>
+<section id="id26">
+<h3>Usage<a class="headerlink" href="#id26" title="Link to this heading"></a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>PadAlignment.py<span class="w"> </span>--reference_alignment<span class="w"> </span>&lt;FILE&gt;<span class="w"> </span><span class="o">[</span>options<span class="o">]</span>
+</pre></div>
+</div>
+</section>
+<section id="id27">
+<h3>Arguments<a class="headerlink" href="#id27" title="Link to this heading"></a></h3>
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-51">
+<span id="cmdoption-reference_alignment"></span><span class="sig-name descname"><span class="pre">-r</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--reference_alignment</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-51" title="Link to this definition"></a></dt>
+<dd><p><strong>(Required)</strong> Master alignment file in FASTA format.</p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-i">
+<span id="cmdoption-52"></span><span class="sig-name descname"><span class="pre">-i</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--input_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-i" title="Link to this definition"></a></dt>
+<dd><p>Directory containing subalignment files (e.g., Nextalign output).
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/Nextalign/query_aln</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-53">
+<span id="cmdoption-54"></span><span class="sig-name descname"><span class="pre">-d</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--base_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-53" title="Link to this definition"></a></dt>
+<dd><p>Base working directory.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-55">
+<span id="cmdoption-56"></span><span class="sig-name descname"><span class="pre">-o</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--output_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-55" title="Link to this definition"></a></dt>
+<dd><p>Directory to save padded subalignments and merged files.
+Default: <code class="docutils literal notranslate"><span class="pre">Pad-alignment</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-keep_intermediate_files">
+<span class="sig-name descname"><span class="pre">--keep_intermediate_files</span></span><span class="sig-prename descclassname"></span><a class="headerlink" href="#cmdoption-keep_intermediate_files" title="Link to this definition"></a></dt>
+<dd><p>Retain intermediate padded subalignment files.
+Default: disabled (files will be removed after processing).</p>
+</dd></dl>
+
+</section>
+<section id="id28">
+<h3>Examples<a class="headerlink" href="#id28" title="Link to this heading"></a></h3>
+<p>Run padding with defaults:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>PadAlignment.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--reference_alignment<span class="w"> </span>data/master_alignment.fasta
+</pre></div>
+</div>
+<p>Keep intermediate padded subalignments:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>PadAlignment.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--reference_alignment<span class="w"> </span>data/master_alignment.fasta<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--keep_intermediate_files
+</pre></div>
+</div>
+<p>Use custom directories for input and output:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>PadAlignment.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--reference_alignment<span class="w"> </span>data/master_alignment.fasta<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--input_dir<span class="w"> </span>work/Nextalign/query_aln<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--output_dir<span class="w"> </span>results/Pad-alignment
+</pre></div>
+</div>
+</section>
+<section id="id29">
+<h3>Notes<a class="headerlink" href="#id29" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>The <strong>reference alignment</strong> is used as a template: its gaps are inserted into
+each subalignment so all sequences share the same coordinate space.</p></li>
+<li><p>By default, intermediate padded subalignment files are cleaned up automatically.
+Use <code class="docutils literal notranslate"><span class="pre">--keep_intermediate_files</span></code> to retain them for debugging.</p></li>
+<li><p>After padding, the script also removes redundant sequences to produce a clean
+merged alignment.</p></li>
+</ul>
+</section>
+</section>
+<section id="calculate-alignment-coordinates">
+<h2>Calculate Alignment Coordinates<a class="headerlink" href="#calculate-alignment-coordinates" title="Link to this heading"></a></h2>
+<p>The script <code class="docutils literal notranslate"><span class="pre">CalcAlignmentCords.py</span></code> calculates genome and CDS coordinates
+for sequences based on a padded alignment and a master GFF3 annotation file.
+It aligns features to the master reference and outputs a table of coordinates.</p>
+<section id="id30">
+<h3>Usage<a class="headerlink" href="#id30" title="Link to this heading"></a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>CalcAlignmentCords.py<span class="w"> </span>--paded_alignment<span class="w"> </span>&lt;FASTA&gt;<span class="w"> </span>--master_accession<span class="w"> </span>&lt;ACC&gt;<span class="w"> </span>--master_gff<span class="w"> </span>&lt;FILE&gt;<span class="w"> </span><span class="o">[</span>options<span class="o">]</span>
+</pre></div>
+</div>
+</section>
+<section id="id31">
+<h3>Arguments<a class="headerlink" href="#id31" title="Link to this heading"></a></h3>
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-57">
+<span id="cmdoption-paded_alignment"></span><span class="sig-name descname"><span class="pre">-i</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--paded_alignment</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE(S)&gt;</span></span><a class="headerlink" href="#cmdoption-57" title="Link to this definition"></a></dt>
+<dd><p><strong>(Required)</strong> Input FASTA alignment file(s).
+Can be a single file or multiple sequence files.</p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-58">
+<span id="cmdoption-59"></span><span class="sig-name descname"><span class="pre">-b</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--tmp_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-58" title="Link to this definition"></a></dt>
+<dd><p>Base working directory.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-60">
+<span id="cmdoption-61"></span><span class="sig-name descname"><span class="pre">-d</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--output_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-60" title="Link to this definition"></a></dt>
+<dd><p>Directory to store processed data and results.
+Default: <code class="docutils literal notranslate"><span class="pre">Tables</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-62">
+<span id="cmdoption-63"></span><span class="sig-name descname"><span class="pre">-o</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--output_file</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-62" title="Link to this definition"></a></dt>
+<dd><p>Output TSV file containing calculated coordinates.
+Default: <code class="docutils literal notranslate"><span class="pre">features.tsv</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-64">
+<span id="cmdoption-master_accession"></span><span class="sig-name descname"><span class="pre">-m</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--master_accession</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;ACC&gt;</span></span><a class="headerlink" href="#cmdoption-64" title="Link to this definition"></a></dt>
+<dd><p><strong>(Required)</strong> Master reference accession ID.
+Example: <code class="docutils literal notranslate"><span class="pre">NC_001542</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-bh">
+<span id="cmdoption-blast_uniq_hits"></span><span class="sig-name descname"><span class="pre">-bh</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--blast_uniq_hits</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-bh" title="Link to this definition"></a></dt>
+<dd><p>BLAST unique hits file used to refine coordinate mapping.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/Blast/query_uniq_tophits.tsv</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-65">
+<span id="cmdoption-master_gff"></span><span class="sig-name descname"><span class="pre">-g</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--master_gff</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-65" title="Link to this definition"></a></dt>
+<dd><p><strong>(Required)</strong> Master GFF3 annotation file for the reference sequence.</p>
+</dd></dl>
+
+</section>
+<section id="id32">
+<h3>Examples<a class="headerlink" href="#id32" title="Link to this heading"></a></h3>
+<p>Calculate coordinates with defaults:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>CalcAlignmentCords.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--paded_alignment<span class="w"> </span>data/padded_alignment.fa<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--master_accession<span class="w"> </span>NC_001542<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--master_gff<span class="w"> </span>data/master.gff
+</pre></div>
+</div>
+<p>Specify a custom output location:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>CalcAlignmentCords.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--paded_alignment<span class="w"> </span>data/aln.fa<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--master_accession<span class="w"> </span>NC_001542<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--master_gff<span class="w"> </span>data/master.gff<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--output_dir<span class="w"> </span>results/Tables<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--output_file<span class="w"> </span>coords.tsv
+</pre></div>
+</div>
+<p>Use a custom BLAST hits file:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>CalcAlignmentCords.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--paded_alignment<span class="w"> </span>data/aln.fa<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--master_accession<span class="w"> </span>NC_001542<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--master_gff<span class="w"> </span>data/master.gff<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--blast_uniq_hits<span class="w"> </span>work/Blast/query_uniq_tophits.tsv
+</pre></div>
+</div>
+</section>
+<section id="id33">
+<h3>Notes<a class="headerlink" href="#id33" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>The <strong>padded alignment</strong> should be generated by previous steps (e.g., Nextalign + padding).</p></li>
+<li><p>The <strong>master GFF3</strong> file provides the annotation used for feature coordinate mapping.</p></li>
+<li><p>The <strong>master accession</strong> defines the coordinate reference system.</p></li>
+<li><p>The script also leverages BLAST unique hits to refine CDS boundaries where applicable.</p></li>
+</ul>
+</section>
+</section>
+<section id="software-version-checker">
+<h2>Software Version Checker<a class="headerlink" href="#software-version-checker" title="Link to this heading"></a></h2>
+<p>The script <code class="docutils literal notranslate"><span class="pre">SoftwareVersion.py</span></code> collects information about available software
+versions and generates a TSV summary table. This is useful for reproducibility
+and workflow documentation.</p>
+<section id="id34">
+<h3>Usage<a class="headerlink" href="#id34" title="Link to this heading"></a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>SoftwareVersion.py<span class="w"> </span><span class="o">[</span>options<span class="o">]</span>
+</pre></div>
+</div>
+</section>
+<section id="id35">
+<h3>Arguments<a class="headerlink" href="#id35" title="Link to this heading"></a></h3>
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-66">
+<span id="cmdoption-67"></span><span class="sig-name descname"><span class="pre">-d</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--tmp_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-66" title="Link to this definition"></a></dt>
+<dd><p>Temporary working directory.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-68">
+<span id="cmdoption-69"></span><span class="sig-name descname"><span class="pre">-o</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--output_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-68" title="Link to this definition"></a></dt>
+<dd><p>Directory where the version summary table will be saved.
+Default: <code class="docutils literal notranslate"><span class="pre">Software_info</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-70">
+<span id="cmdoption-table_name"></span><span class="sig-name descname"><span class="pre">-f</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--table_name</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-70" title="Link to this definition"></a></dt>
+<dd><p>Name of the TSV file to store software version information.
+Default: <code class="docutils literal notranslate"><span class="pre">software_info.tsv</span></code></p>
+</dd></dl>
+
+</section>
+<section id="id36">
+<h3>Examples<a class="headerlink" href="#id36" title="Link to this heading"></a></h3>
+<p>Generate a software version table with defaults:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>SoftwareVersion.py
+</pre></div>
+</div>
+<p>Save the version table with a custom name:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>SoftwareVersion.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--table_name<span class="w"> </span>versions.tsv
+</pre></div>
+</div>
+<p>Write results to a custom directory:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>SoftwareVersion.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--output_dir<span class="w"> </span>results/Software_info
+</pre></div>
+</div>
+</section>
+<section id="id37">
+<h3>Notes<a class="headerlink" href="#id37" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>The output is a TSV file listing the detected software and their versions.</p></li>
+<li><p>Useful for documenting pipeline environments and ensuring reproducibility.</p></li>
+<li><p>The script can be run at the end of a workflow to capture the environment state.</p></li>
+</ul>
+</section>
+</section>
+<section id="generate-database-ready-tables">
+<h2>Generate Database-Ready Tables<a class="headerlink" href="#generate-database-ready-tables" title="Link to this heading"></a></h2>
+<p>The script <code class="docutils literal notranslate"><span class="pre">GenerateTable.py</span></code> produces a set of <strong>TSV tables</strong> ready for
+loading into an SQLite database. It consolidates information from the GenBank
+matrix, BLAST unique hits, and (padded) multiple-sequence alignments, and can
+use Nextalign outputs as needed.</p>
+<section id="id38">
+<h3>Usage<a class="headerlink" href="#id38" title="Link to this heading"></a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>GenerateTable.py<span class="w"> </span><span class="o">[</span>options<span class="o">]</span>
+</pre></div>
+</div>
+</section>
+<section id="id39">
+<h3>Arguments<a class="headerlink" href="#id39" title="Link to this heading"></a></h3>
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-71">
+<span id="cmdoption-72"></span><span class="sig-name descname"><span class="pre">-g</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--genbank_matrix</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-71" title="Link to this definition"></a></dt>
+<dd><p>GenBank matrix TSV file.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/GenBank-matrix/gB_matrix_raw.tsv</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-73">
+<span id="cmdoption-74"></span><span class="sig-name descname"><span class="pre">-b</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--base_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-73" title="Link to this definition"></a></dt>
+<dd><p>Base working directory.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-75">
+<span id="cmdoption-76"></span><span class="sig-name descname"><span class="pre">-o</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--output_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-75" title="Link to this definition"></a></dt>
+<dd><p>Output directory where all DB-ready TSV files are written.
+Default: <code class="docutils literal notranslate"><span class="pre">Tables</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-77">
+<span id="cmdoption-host_taxa"></span><span class="sig-name descname"><span class="pre">-f</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--host_taxa</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-77" title="Link to this definition"></a></dt>
+<dd><p>Host taxa lookup table.
+Default: <code class="docutils literal notranslate"><span class="pre">host_taxa.tsv</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-78">
+<span id="cmdoption-blast_hits"></span><span class="sig-name descname"><span class="pre">-bh</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--blast_hits</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-78" title="Link to this definition"></a></dt>
+<dd><p>BLASTN unique hits table (top hits per query).
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/Blast/query_uniq_tophits.tsv</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-p">
+<span id="cmdoption-paded_aln"></span><span class="sig-name descname"><span class="pre">-p</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--paded_aln</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-p" title="Link to this definition"></a></dt>
+<dd><p><strong>Padded</strong> alignment FASTA file (reference-anchored, gap-padded).
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/Pad-alignment/NC_001542.aligned_merged_MSA.fasta</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-79">
+<span id="cmdoption-80"></span><span class="sig-name descname"><span class="pre">-n</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--nextalign_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-79" title="Link to this definition"></a></dt>
+<dd><p>Directory containing Nextalign alignment outputs.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/Nextalign/</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-81">
+<span id="cmdoption-82"></span><span class="sig-name descname"><span class="pre">-e</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--email</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;EMAIL&gt;</span></span><a class="headerlink" href="#cmdoption-81" title="Link to this definition"></a></dt>
+<dd><p>Contact email (e.g., for NCBI-related requests/logging).
+Default: <code class="docutils literal notranslate"><span class="pre">your-email&#64;example.com</span></code></p>
+</dd></dl>
+
+</section>
+<section id="id40">
+<h3>Examples<a class="headerlink" href="#id40" title="Link to this heading"></a></h3>
+<p>Run with defaults (writes TSVs into <code class="docutils literal notranslate"><span class="pre">Tables/</span></code>):</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>GenerateTable.py
+</pre></div>
+</div>
+<p>Specify custom inputs and output location:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>GenerateTable.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--genbank_matrix<span class="w"> </span>data/gB_matrix_raw.tsv<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--blast_hits<span class="w"> </span>results/Blast/query_uniq_tophits.tsv<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--paded_aln<span class="w"> </span>results/Pad-alignment/aligned_merged_MSA.fasta<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--nextalign_dir<span class="w"> </span>results/Nextalign<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--output_dir<span class="w"> </span>results/Tables<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--email<span class="w"> </span>me@lab.org
+</pre></div>
+</div>
+</section>
+<section id="id41">
+<h3>Notes<a class="headerlink" href="#id41" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>Ensure the <strong>padded alignment</strong> corresponds to the same master reference used
+in previous steps, so feature coordinates remain consistent.</p></li>
+<li><p>The <strong>BLAST unique hits</strong> file should contain one best hit per query (or as
+expected by your pipeline).</p></li>
+<li><p>Output TSVs are organized in <code class="docutils literal notranslate"><span class="pre">--output_dir</span></code> and are intended for direct
+ingestion into your SQLite schema.</p></li>
+</ul>
+</section>
+</section>
+<section id="create-sqlite-database">
+<h2>Create SQLite Database<a class="headerlink" href="#create-sqlite-database" title="Link to this heading"></a></h2>
+<p>The script <code class="docutils literal notranslate"><span class="pre">CreateSqliteTable.py</span></code> creates an <strong>SQLite database</strong> from a
+collection of input tables, metadata, alignments, and reference files.
+It consolidates processed results into a structured database ready for analysis.</p>
+<section id="id42">
+<h3>Usage<a class="headerlink" href="#id42" title="Link to this heading"></a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>CreateSqliteTable.py<span class="w"> </span><span class="o">[</span>options<span class="o">]</span>
+</pre></div>
+</div>
+</section>
+<section id="id43">
+<h3>Arguments<a class="headerlink" href="#id43" title="Link to this heading"></a></h3>
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-83">
+<span id="cmdoption-meta_data"></span><span class="sig-name descname"><span class="pre">-m</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--meta_data</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-83" title="Link to this definition"></a></dt>
+<dd><p>Metadata table (GenBank matrix TSV).
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/GenBank-matrix/gB_matrix_raw.tsv</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-84">
+<span id="cmdoption-85"></span><span class="sig-name descname"><span class="pre">-b</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--base_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-84" title="Link to this definition"></a></dt>
+<dd><p>Base working directory.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-86">
+<span id="cmdoption-87"></span><span class="sig-name descname"><span class="pre">-o</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--output_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-86" title="Link to this definition"></a></dt>
+<dd><p>Directory where the SQLite database will be stored.
+Default: <code class="docutils literal notranslate"><span class="pre">SqliteDB</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-rf">
+<span id="cmdoption-features"></span><span class="sig-name descname"><span class="pre">-rf</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--features</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-rf" title="Link to this definition"></a></dt>
+<dd><p>Features table TSV.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/Tables/features.tsv</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-88">
+<span id="cmdoption-pad_aln"></span><span class="sig-name descname"><span class="pre">-p</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--pad_aln</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-88" title="Link to this definition"></a></dt>
+<dd><p>Padded alignment table (TSV).
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/Tables/sequence_alignment.tsv</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-89">
+<span id="cmdoption-gene_info"></span><span class="sig-name descname"><span class="pre">-g</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--gene_info</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-89" title="Link to this definition"></a></dt>
+<dd><p>Gene information table (CSV).
+Default: <code class="docutils literal notranslate"><span class="pre">generic/rabv/Tables/gene_info.csv</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-mc">
+<span id="cmdoption-m49_countries"></span><span class="sig-name descname"><span class="pre">-mc</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--m49_countries</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-mc" title="Link to this definition"></a></dt>
+<dd><p>UN M49 countries CSV file.
+Default: <code class="docutils literal notranslate"><span class="pre">assets/m49_country.csv</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-mir">
+<span id="cmdoption-m49_interm_region"></span><span class="sig-name descname"><span class="pre">-mir</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--m49_interm_region</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-mir" title="Link to this definition"></a></dt>
+<dd><p>UN M49 intermediate regions CSV file.
+Default: <code class="docutils literal notranslate"><span class="pre">assets/m49_intermediate_region.csv</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-mr">
+<span id="cmdoption-m49_regions"></span><span class="sig-name descname"><span class="pre">-mr</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--m49_regions</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-mr" title="Link to this definition"></a></dt>
+<dd><p>UN M49 regions CSV file.
+Default: <code class="docutils literal notranslate"><span class="pre">assets/m49_region.csv</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-msr">
+<span id="cmdoption-m49_sub_regions"></span><span class="sig-name descname"><span class="pre">-msr</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--m49_sub_regions</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-msr" title="Link to this definition"></a></dt>
+<dd><p>UN M49 sub-regions CSV file.
+Default: <code class="docutils literal notranslate"><span class="pre">assets/m49_sub_region.csv</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-90">
+<span id="cmdoption-proj_settings"></span><span class="sig-name descname"><span class="pre">-s</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--proj_settings</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-90" title="Link to this definition"></a></dt>
+<dd><p>Project/software settings TSV.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/Software_info/software_info.tsv</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-fa">
+<span id="cmdoption-fasta_sequences"></span><span class="sig-name descname"><span class="pre">-fa</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--fasta_sequences</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-fa" title="Link to this definition"></a></dt>
+<dd><p>FASTA sequence file used in the project.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/GenBank-matrix/sequences.fa</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-91">
+<span id="cmdoption-insertion_file"></span><span class="sig-name descname"><span class="pre">-i</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--insertion_file</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-91" title="Link to this definition"></a></dt>
+<dd><p>Nextalign insertions TSV file.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp/Tables/insertions.tsv</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-92">
+<span id="cmdoption-db_name"></span><span class="sig-name descname"><span class="pre">-d</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--db_name</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;STR&gt;</span></span><a class="headerlink" href="#cmdoption-92" title="Link to this definition"></a></dt>
+<dd><p>Name of the SQLite database (without <code class="docutils literal notranslate"><span class="pre">.db</span></code> extension).
+Default: <code class="docutils literal notranslate"><span class="pre">gdb</span></code></p>
+</dd></dl>
+
+</section>
+<section id="id44">
+<h3>Examples<a class="headerlink" href="#id44" title="Link to this heading"></a></h3>
+<p>Run with default settings:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>CreateSqliteTable.py
+</pre></div>
+</div>
+<p>Specify a custom database name and output directory:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>CreateSqliteTable.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--db_name<span class="w"> </span>rabv_database<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--output_dir<span class="w"> </span>results/SqliteDB
+</pre></div>
+</div>
+<p>Use custom metadata and features tables:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>CreateSqliteTable.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--meta_data<span class="w"> </span>data/gB_matrix_raw.tsv<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--features<span class="w"> </span>data/features.tsv<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--gene_info<span class="w"> </span>data/gene_info.csv<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--db_name<span class="w"> </span>custom_gdb
+</pre></div>
+</div>
+</section>
+<section id="id45">
+<h3>Notes<a class="headerlink" href="#id45" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>The script integrates <strong>metadata, features, alignments, gene info, country codes, and insertions</strong> into a unified SQLite database.</p></li>
+<li><p>Ensure that all required TSV/CSV inputs exist before running.</p></li>
+<li><p>The output database will be stored in the directory specified by <code class="docutils literal notranslate"><span class="pre">--output_dir</span></code> with the name <code class="docutils literal notranslate"><span class="pre">&lt;db_name&gt;.db</span></code>.</p></li>
+</ul>
+</section>
+</section>
+<section id="genbank-sequence-submitter">
+<h2>GenBank Sequence Submitter<a class="headerlink" href="#genbank-sequence-submitter" title="Link to this heading"></a></h2>
+<p>The script <code class="docutils literal notranslate"><span class="pre">GenBankSequenceSubmitter.py</span></code> prepares sequence data and metadata
+for <strong>GenBank submission</strong>. It uses a padded alignment, metadata, a master GFF3,
+and a submission template to generate submission-ready files.</p>
+<section id="id46">
+<h3>Usage<a class="headerlink" href="#id46" title="Link to this heading"></a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>GenBankSequenceSubmitter.py<span class="w"> </span>--sequence_dir<span class="w"> </span>&lt;DIR&gt;<span class="w"> </span>--metadata<span class="w"> </span>&lt;FILE&gt;<span class="w"> </span>--ncbi_submission_template<span class="w"> </span>&lt;FILE&gt;<span class="w"> </span>--gff_file<span class="w"> </span>&lt;FILE&gt;<span class="w"> </span>--vgtk-db<span class="w"> </span>&lt;DB&gt;<span class="w"> </span><span class="o">[</span>options<span class="o">]</span>
+</pre></div>
+</div>
+</section>
+<section id="id47">
+<h3>Arguments<a class="headerlink" href="#id47" title="Link to this heading"></a></h3>
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-93">
+<span id="cmdoption-sequence_dir"></span><span class="sig-name descname"><span class="pre">-q</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--sequence_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-93" title="Link to this definition"></a></dt>
+<dd><p><strong>(Required)</strong> Directory containing input FASTA sequence files
+(single or multiple).</p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-94">
+<span id="cmdoption-95"></span><span class="sig-name descname"><span class="pre">-t</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--tmp_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-94" title="Link to this definition"></a></dt>
+<dd><p>Temporary working directory.
+Default: <code class="docutils literal notranslate"><span class="pre">tmp</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-96">
+<span id="cmdoption-97"></span><span class="sig-name descname"><span class="pre">-o</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--output_dir</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;DIR&gt;</span></span><a class="headerlink" href="#cmdoption-96" title="Link to this definition"></a></dt>
+<dd><p>Output directory where processed results and submission files are saved.
+Default: <code class="docutils literal notranslate"><span class="pre">Table2asn</span></code></p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-98">
+<span id="cmdoption-metadata"></span><span class="sig-name descname"><span class="pre">-m</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--metadata</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-98" title="Link to this definition"></a></dt>
+<dd><p><strong>(Required)</strong> Metadata file (tab-delimited).
+Must include required fields for submission.</p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-99">
+<span id="cmdoption-ncbi_submission_template"></span><span class="sig-name descname"><span class="pre">-n</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--ncbi_submission_template</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-99" title="Link to this definition"></a></dt>
+<dd><p><strong>(Required)</strong> NCBI submission template file (generated via:
+<cite>https://submit.ncbi.nlm.nih.gov/genbank/template/submission/</cite>).</p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-gff">
+<span id="cmdoption-gff_file"></span><span class="sig-name descname"><span class="pre">-gff</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--gff_file</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-gff" title="Link to this definition"></a></dt>
+<dd><p><strong>(Required)</strong> Master reference GFF3 annotation file.</p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-db">
+<span id="cmdoption-vgtk-db"></span><span class="sig-name descname"><span class="pre">-db</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--vgtk-db</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;FILE&gt;</span></span><a class="headerlink" href="#cmdoption-db" title="Link to this definition"></a></dt>
+<dd><p><strong>(Required)</strong> VGTK SQLite database file.</p>
+</dd></dl>
+
+<dl class="std option">
+<dt class="sig sig-object std" id="cmdoption-gp">
+<span id="cmdoption-gaps_to_ignore"></span><span class="sig-name descname"><span class="pre">-gp</span></span><span class="sig-prename descclassname"></span><span class="sig-prename descclassname"><span class="pre">,</span> </span><span class="sig-name descname"><span class="pre">--gaps_to_ignore</span></span><span class="sig-prename descclassname"> <span class="pre">&lt;N&gt;</span></span><a class="headerlink" href="#cmdoption-gp" title="Link to this definition"></a></dt>
+<dd><p>Length of alignment gaps to ignore during processing.
+Default: <code class="docutils literal notranslate"><span class="pre">30</span></code></p>
+</dd></dl>
+
+</section>
+<section id="id48">
+<h3>Examples<a class="headerlink" href="#id48" title="Link to this heading"></a></h3>
+<p>Prepare sequences for submission using defaults:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>GenBankSequenceSubmitter.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--sequence_dir<span class="w"> </span>data/sequences<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--metadata<span class="w"> </span>data/metadata.tsv<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--ncbi_submission_template<span class="w"> </span>templates/template.sbt<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--gff_file<span class="w"> </span>reference/master.gff3<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--vgtk-db<span class="w"> </span>db/vgtk.sqlite
+</pre></div>
+</div>
+<p>Specify a custom gap threshold:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>GenBankSequenceSubmitter.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--sequence_dir<span class="w"> </span>data/sequences<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--metadata<span class="w"> </span>data/metadata.tsv<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--ncbi_submission_template<span class="w"> </span>templates/template.sbt<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--gff_file<span class="w"> </span>reference/master.gff3<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--vgtk-db<span class="w"> </span>db/vgtk.sqlite<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--gaps_to_ignore<span class="w"> </span><span class="m">50</span>
+</pre></div>
+</div>
+</section>
+<section id="id49">
+<h3>Notes<a class="headerlink" href="#id49" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>Ensure the <strong>submission template</strong> matches your organism and project type.</p></li>
+<li><p>The <strong>VGTK database</strong> provides reference metadata for consistency.</p></li>
+<li><p>The generated output in <code class="docutils literal notranslate"><span class="pre">--output_dir</span></code> will include files ready for upload to NCBI’s submission portal.</p></li>
+<li><p>Adjust <code class="docutils literal notranslate"><span class="pre">--gaps_to_ignore</span></code> if small insertions/deletions should be tolerated.</p></li>
+</ul>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="installation.html" class="btn btn-neutral float-left" title="Installation" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Joseph Hughes.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
