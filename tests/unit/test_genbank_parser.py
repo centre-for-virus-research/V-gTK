@@ -162,6 +162,28 @@ def test_xml_to_tsv_parses_and_applies_exclusion(tmp_path: Path):
     assert by_acc["REF1"]["n"] == 2
 
 
+def test_xml_to_tsv_non_segmented_forces_segment_one(tmp_path: Path):
+    xml_file = tmp_path / "batch-1.xml"
+    _write_xml(
+        xml_file,
+        [
+            _gbseq_xml("Q1", "AATTCG", segment="NS3"),
+        ],
+    )
+
+    parser = GenBankParser(
+        input_dir=str(tmp_path),
+        base_dir=str(tmp_path),
+        output_dir="out",
+        ref_list=None,
+        exclusion_list=None,
+        is_segmented_virus="N",
+    )
+
+    rows = parser.xml_to_tsv(str(xml_file), {}, [])
+    assert rows[0]["segment"] == "1"
+
+
 def test_select_xml_files_raises_on_missing_critical_refs(tmp_path: Path):
     xml_file = tmp_path / "batch-1.xml"
     _write_xml(xml_file, [_gbseq_xml("REF1", "ATGC")])

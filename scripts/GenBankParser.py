@@ -45,6 +45,12 @@ class GenBankParser:
 		os.makedirs(self.out_root, exist_ok=True)
 		self._existing_accessions = set()
 
+	def _normalize_segment_value(self, raw_segment):
+		segment = (raw_segment or '').strip()
+		if self.is_segmented_virus == 'Y':
+			return segment
+		return '1'
+
 	def count_ATGCN(self, sequence):
 		nucl_dict = {'A': 0, 'T': 0, 'G': 0, 'C': 0, 'N': 0}
 		sequence = (sequence or '').upper()
@@ -256,7 +262,7 @@ class GenBankParser:
 			content['collection_mon'] = split_collection_date['month']
 			content['collection_year'] = split_collection_date['year']
 
-			content['segment'] = segment
+			content['segment'] = self._normalize_segment_value(segment)
 			content['serotype'] = serotype
 			sequence = gbseq.find('GBSeq_sequence')
 			content['sequence'] = sequence.text if sequence is not None else ''
