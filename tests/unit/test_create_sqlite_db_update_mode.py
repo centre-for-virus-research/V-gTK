@@ -211,6 +211,11 @@ def test_create_sqlite_db_update_mode_upserts_without_growth(tmp_path: Path):
     finally:
         conn.close()
 
+    summary = (tmp_path / "SqliteDB" / "db_summary.txt").read_text(encoding="utf-8")
+    assert "[CreateSqliteDB] Update Summary:" in summary
+    assert "Sequences added to DB" in summary
+    assert "Input query sequences passed QC" in summary
+
 
 def test_create_sqlite_db_filtered_ids_do_not_exclude_reference_rows(tmp_path: Path):
     inp = _inputs(tmp_path, "filtered_refs", aln_a="ATGC")
@@ -247,6 +252,97 @@ def test_create_sqlite_db_filtered_ids_do_not_exclude_reference_rows(tmp_path: P
             ("Q1", "1", "alignment_filtering"),
             ("REF1", "", ""),
         ]
+    finally:
+        conn.close()
+
+
+def test_update_mode_backfills_segment_one_for_unsegmented_tables(tmp_path: Path):
+    seed_db = tmp_path / "seed_hcv.db"
+    conn = sqlite3.connect(str(seed_db))
+    try:
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT, segment TEXT, exclusion_status TEXT, exclusion_criteria TEXT)")
+        cur.executemany(
+            "INSERT INTO meta_data(primary_accession, accession_type, segment, exclusion_status, exclusion_criteria) VALUES (?, ?, ?, ?, ?)",
+            [
+                ("REF_OLD", "master", "", "", ""),
+                ("Q_OLD", "query", "", "", ""),
+            ],
+        )
+        cur.execute("CREATE TABLE sequence_alignment (primary_accession TEXT, alignment_name TEXT, alignment TEXT, segment TEXT, sequence_id TEXT)")
+        cur.executemany(
+            "INSERT INTO sequence_alignment(primary_accession, alignment_name, alignment, segment, sequence_id) VALUES (?, ?, ?, ?, ?)",
+            [
+                ("REF_OLD", "REF_OLD", "ATGC", "", "REF_OLD"),
+                ("Q_OLD", "REF_OLD", "ATGT", "", "Q_OLD"),
+            ],
+        )
+        cur.execute(
+            "CREATE TABLE features (accession TEXT, master_ref_accession TEXT, reference_accession TEXT, aln_start TEXT, aln_end TEXT, cds_start TEXT, cds_end TEXT, product TEXT)"
+        )
+        cur.executemany(
+            "INSERT INTO features(accession, master_ref_accession, reference_accession, aln_start, aln_end, cds_start, cds_end, product) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("REF_OLD", "REF_OLD", "REF_OLD", "1", "4", "1", "4", "core protein"),
+                ("Q_OLD", "REF_OLD", "REF_OLD", "1", "4", "1", "4", "core protein"),
+            ],
+        )
+        cur.execute("CREATE TABLE sequences (header TEXT, sequence TEXT)")
+        cur.executemany(
+            "INSERT INTO sequences(header, sequence) VALUES (?, ?)",
+            [("REF_OLD", "ATGC"), ("Q_OLD", "ATGT")],
+        )
+        cur.execute("CREATE TABLE update_batches (batch_id TEXT, mode TEXT, started_at TEXT, finished_at TEXT, update_db TEXT)")
+        cur.execute("CREATE TABLE update_table_deltas (batch_id TEXT, table_name TEXT, before_count INTEGER, after_count INTEGER, delta INTEGER)")
+        cur.execute("CREATE TABLE update_exclusions (batch_id TEXT, table_name TEXT, key TEXT, reason TEXT, date TEXT)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    inp = _inputs(tmp_path, "unsegmented_update", aln_a="ATGA")
+    pd.DataFrame(
+        [
+            ["REF_NEW", "", "", "master"],
+            ["Q_NEW", "", "", "query"],
+        ],
+        columns=["primary_accession", "exclusion", "segment", "accession_type"],
+    ).to_csv(inp["meta"], sep="\t", index=False)
+    pd.DataFrame(
+        [
+            ["REF_NEW", "REF_NEW", "ATGC", "", "REF_NEW"],
+            ["Q_NEW", "REF_NEW", "ATGA", "", "Q_NEW"],
+        ],
+        columns=["primary_accession", "alignment_name", "alignment", "segment", "sequence_id"],
+    ).to_csv(inp["aln"], sep="\t", index=False)
+    pd.DataFrame(
+        [
+            ["REF_NEW", "REF_NEW", "REF_NEW", "1", "4", "1", "4", "core protein", ""],
+            ["Q_NEW", "REF_NEW", "REF_NEW", "1", "4", "1", "4", "core protein", ""],
+        ],
+        columns=["accession", "master_ref_accession", "reference_accession", "aln_start", "aln_end", "cds_start", "cds_end", "product", "segment"],
+    ).to_csv(inp["features"], sep="\t", index=False)
+    pd.DataFrame(
+        [
+            ["REF_NEW", "REF_NEW", "ins:2:A", ""],
+            ["Q_NEW", "REF_NEW", "ins:3:T", ""],
+        ],
+        columns=["primary_accession", "reference", "insertion", "segment"],
+    ).to_csv(inp["insertions"], sep="\t", index=False)
+    inp["fasta"].write_text(">REF_NEW\nATGC\n>Q_NEW\nATGA\n", encoding="utf-8")
+
+    db_path = _build_db(tmp_path, inp, update=True, update_db=seed_db)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM meta_data WHERE COALESCE(TRIM(segment), '') != '1'")
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT COUNT(*) FROM sequence_alignment WHERE COALESCE(TRIM(segment), '') != '1'")
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT COUNT(*) FROM features WHERE COALESCE(TRIM(segment), '') != '1'")
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT COUNT(*) FROM insertions WHERE COALESCE(TRIM(segment), '') != '1'")
+        assert cur.fetchone()[0] == 0
     finally:
         conn.close()
 

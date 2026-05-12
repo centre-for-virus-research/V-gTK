@@ -608,3 +608,44 @@ def test_build_catalog_reference_table_all_columns_preserves_input_columns():
         'combination_id', 'combination_size', 'phenotype', 'serotypes_tested', 'alignment_name'
     ]
     assert result.iloc[0]['serotypes_tested'] == 'H1,H3'
+
+
+def test_write_mutation_tables_handles_empty_mutation_hits(tmp_path):
+    conn = sqlite3.connect(str(tmp_path / 'empty_hits.db'))
+    try:
+        catalog = pd.DataFrame([
+            {
+                'mutation_id': 'm1',
+                'protein_name': 'NS3',
+                'segment': '1',
+                'aa_position': '2',
+                'alt_residue': 'I',
+                'reference_accession': 'REF1',
+                'mutation_type': 'snp',
+                'signature_id': 'sig1',
+                'signature_kind': 'single',
+                'combination_id': '',
+                'combination_size': '',
+                'phenotype': '',
+                'resistance_category': 'I',
+                'drug': 'drugA',
+            }
+        ])
+
+        AnnotateMutations.write_mutation_tables(conn, catalog, [], 'HCV')
+
+        mutation_catalog = pd.read_sql_query('SELECT * FROM mutation_catalog', conn)
+        relevant_summary = pd.read_sql_query('SELECT * FROM sequence_relevant_mutation_summary', conn)
+        completed = pd.read_sql_query('SELECT * FROM completed_signatures_only', conn)
+
+        assert mutation_catalog['mutation_id'].tolist() == ['m1']
+        assert relevant_summary.empty
+        assert relevant_summary.columns.tolist() == [
+            'primary_accession',
+            'relevant_mutations_present',
+            'total_relevant_mutation_count',
+        ]
+        assert completed.empty
+        assert completed.columns.tolist() == ['primary_accession', 'signature_id', 'signature_kind']
+    finally:
+        conn.close()

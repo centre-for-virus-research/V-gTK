@@ -339,6 +339,61 @@ class CreateSqliteDB:
 	def _cluster_placeholder_columns(columns):
 		return [c for c in columns if re.fullmatch(r"cluster_\d+pct", str(c or "").strip())]
 
+	@staticmethod
+	def _collect_nonblank_segments_from_df(df):
+		if df is None or "segment" not in df.columns:
+			return set()
+		values = (
+			df["segment"]
+			.fillna("")
+			.astype(str)
+			.str.strip()
+		)
+		return {value for value in values.tolist() if value != ""}
+
+	def _collect_nonblank_segments_from_table(self, conn, table):
+		if not self._table_exists(conn, table):
+			return set()
+		if "segment" not in self._table_columns(conn, table):
+			return set()
+		rows = conn.execute(
+			f"SELECT DISTINCT TRIM(COALESCE(CAST(segment AS TEXT), '')) FROM {table} "
+			"WHERE TRIM(COALESCE(CAST(segment AS TEXT), '')) != ''"
+		).fetchall()
+		return {str(row[0]).strip() for row in rows if row and str(row[0]).strip()}
+
+	def _should_force_unsegmented_segment_one(self, conn, dfs):
+		observed = set()
+		for df in dfs:
+			observed.update(self._collect_nonblank_segments_from_df(df))
+		if conn is not None:
+			for table in ["meta_data", "features", "sequence_alignment", "insertions"]:
+				observed.update(self._collect_nonblank_segments_from_table(conn, table))
+		return observed.issubset({"1"})
+
+	@staticmethod
+	def _force_segment_one_df(df, create_if_missing=False):
+		if df is None:
+			return df
+		if "segment" not in df.columns:
+			if not create_if_missing:
+				return df
+			df["segment"] = "1"
+			return df
+		segment = df["segment"].fillna("").astype(str).str.strip()
+		df["segment"] = segment.mask(segment == "", "1")
+		return df
+
+	def _backfill_segment_one_in_db(self, conn, tables):
+		for table in tables:
+			if not self._table_exists(conn, table):
+				continue
+			if "segment" not in self._table_columns(conn, table):
+				continue
+			conn.execute(
+				f"UPDATE {table} SET segment='1' WHERE TRIM(COALESCE(CAST(segment AS TEXT), '')) = ''"
+			)
+
 	def _fetch_existing_keys(self, conn, table, key_cols):
 		if not self._table_exists(conn, table):
 			return set()
@@ -553,6 +608,26 @@ class CreateSqliteDB:
 		row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
 		return int(row[0]) if row else 0
 
+	@staticmethod
+	def _count_distinct_nonexcluded_query_accessions(conn):
+		if not CreateSqliteDB._table_exists(conn, "meta_data"):
+			return 0
+		cols = [row[1] for row in conn.execute("PRAGMA table_info(meta_data)").fetchall()]
+		if "primary_accession" not in cols:
+			return 0
+
+		where = ["primary_accession IS NOT NULL", "TRIM(CAST(primary_accession AS TEXT)) != ''"]
+		if "accession_type" in cols:
+			where.append("LOWER(TRIM(COALESCE(CAST(accession_type AS TEXT), ''))) NOT IN ('reference', 'master')")
+		if "exclusion_status" in cols:
+			where.append(
+				"LOWER(TRIM(COALESCE(CAST(exclusion_status AS TEXT), ''))) IN ('', '0', 'false', 'no', 'na', 'none', 'nan')"
+			)
+
+		sql = f"SELECT COUNT(DISTINCT primary_accession) FROM meta_data WHERE {' AND '.join(where)}"
+		row = conn.execute(sql).fetchone()
+		return int(row[0]) if row else 0
+
 	def create_db(self):
 		self._require_file(self.meta_data, "meta_data")
 		self._require_file(self.features, "features")
@@ -622,6 +697,17 @@ class CreateSqliteDB:
 		df_meta_data.loc[df_meta_data["exclusion_criteria"].fillna("").astype(str).str.strip() == "", "exclusion_criteria"] = exclusion_reason
 
 		exclusion_mask = exclusion_reason.astype(str).str.strip() != ""
+		incoming_query_accessions = set()
+		passed_qc_query_accessions = set()
+		if "primary_accession" in df_meta_data.columns:
+			incoming_query_accessions = set(
+				df_meta_data.loc[~is_ref_or_master, "primary_accession"].dropna().astype(str).str.strip()
+			)
+			incoming_query_accessions.discard("")
+			passed_qc_query_accessions = set(
+				df_meta_data.loc[(~is_ref_or_master) & (~exclusion_mask), "primary_accession"].dropna().astype(str).str.strip()
+			)
+			passed_qc_query_accessions.discard("")
 		excluded_rows = df_meta_data[exclusion_mask]
 		if not excluded_rows.empty:
 			print(f"[CreateSqliteDB] Found {len(excluded_rows)} rows with exclusions in meta_data")
@@ -695,8 +781,15 @@ class CreateSqliteDB:
 		now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 		cursor.execute("INSERT OR REPLACE INTO update_batches (batch_id, started_at, finished_at, update_db, mode) VALUES (?, ?, ?, ?, ?)", (self.batch_id, now_str, None, self.update_db if self.update else None, "update" if self.update else "create"))
 
+		if self._should_force_unsegmented_segment_one(conn, [df_meta_data, df_features, df_aln, df_insertions]):
+			df_meta_data = self._force_segment_one_df(df_meta_data, create_if_missing=True)
+			df_features = self._force_segment_one_df(df_features, create_if_missing=True)
+			df_aln = self._force_segment_one_df(df_aln, create_if_missing=True)
+			df_insertions = self._force_segment_one_df(df_insertions, create_if_missing=True)
+
 		tables_for_delta = ["meta_data", "features", "sequence_alignment", "genes", "sequences", "insertions", "host_taxa"]
 		before_counts = {t: self._table_row_count(conn, t) for t in tables_for_delta}
+		before_query_count = self._count_distinct_nonexcluded_query_accessions(conn)
 
 		self.merge_table_append_nonredundant(conn, df_meta_data, "meta_data", None, update_exclusions)
 		self.merge_table_append_nonredundant(conn, df_features, "features", None, update_exclusions)
@@ -710,37 +803,12 @@ class CreateSqliteDB:
 		self.merge_table_append_nonredundant(conn, df_fasta_sequences, "sequences", ["header"], update_exclusions)
 		self.merge_table_append_nonredundant(conn, df_insertions, "insertions", None, update_exclusions)
 		self.merge_table_append_nonredundant(conn, df_host_taxa, "host_taxa", None, update_exclusions)
+		if self._should_force_unsegmented_segment_one(conn, [df_meta_data, df_features, df_aln, df_insertions]):
+			self._backfill_segment_one_in_db(conn, ["meta_data", "features", "sequence_alignment", "insertions"])
 
-		if excluded_records:
-			df_excluded = pd.DataFrame(excluded_records).drop_duplicates(subset=["primary_accession"])
-			
-			df_excluded['base_reason'] = df_excluded['reason'].apply(lambda x: str(x).split(':')[0].strip() if ':' in str(x) else str(x).strip())
-			reason_counts = df_excluded['base_reason'].value_counts()
-			
-			summary_lines = []
-			summary_lines.append("\n" + "="*80)
-			summary_lines.append(f"[CreateSqliteDB] DB Construction Summary:")
-			summary_lines.append("="*80)
-			summary_lines.append(f"Successfully included in DB : {len(df_meta_data)}")
-			summary_lines.append(f"Sequences filtered out      :{len(df_excluded)}")
-			summary_lines.append("-" * 80)
-			summary_lines.append(f"{'Category':<45} | {'Count':<10}")
-			summary_lines.append("-" * 80)
-			for reason, count in reason_counts.items():
-				summary_lines.append(f"{reason:<45} | {count:<10}")
-			
-			summary_lines.append("\n[CreateSqliteDB] Detailed Exclusion Reasons (Top 10):")
-			detailed_counts = df_excluded['reason'].value_counts().head(10)
-			for reason, count in detailed_counts.items():
-				summary_lines.append(f"  - {count:<4} : {reason}")
-			summary_lines.append("="*80 + "\n")
-			
-			summary_str = "\n".join(summary_lines)
-			print(summary_str)
-			
-			summary_path = os.path.join(self.base_dir, self.output_dir, "db_summary.txt")
-			with open(summary_path, "w", encoding="utf-8") as sf:
-				sf.write(summary_str)
+		df_excluded = pd.DataFrame(excluded_records, columns=["primary_accession", "reason"])
+		if not df_excluded.empty:
+			df_excluded = df_excluded.drop_duplicates(subset=["primary_accession"])
 			print(f"[CreateSqliteDB] Marked {len(df_excluded)} excluded accessions directly on meta_data")
 
 		if update_exclusions:
@@ -795,6 +863,7 @@ class CreateSqliteDB:
 		pd.DataFrame([{"creation_type": creation_type, "date": now_str}]).to_sql("info", conn, if_exists="append", index=False)
 
 		after_counts = {t: self._table_row_count(conn, t) for t in tables_for_delta}
+		after_query_count = self._count_distinct_nonexcluded_query_accessions(conn)
 		deltas = []
 		for table_name in tables_for_delta:
 			before = before_counts.get(table_name, 0)
@@ -802,6 +871,46 @@ class CreateSqliteDB:
 			deltas.append({"batch_id": self.batch_id, "table_name": table_name, "before_count": int(before), "after_count": int(after), "delta": int(after - before)})
 		pd.DataFrame(deltas).to_sql("update_table_deltas", conn, if_exists="append", index=False)
 		cursor.execute("UPDATE update_batches SET finished_at=? WHERE batch_id=?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), self.batch_id))
+
+		reason_counts = pd.Series(dtype=int)
+		detailed_counts = pd.Series(dtype=int)
+		if not df_excluded.empty:
+			df_excluded['base_reason'] = df_excluded['reason'].apply(lambda x: str(x).split(':')[0].strip() if ':' in str(x) else str(x).strip())
+			reason_counts = df_excluded['base_reason'].value_counts()
+			detailed_counts = df_excluded['reason'].value_counts().head(10)
+
+		delta_by_table = {row["table_name"]: int(row["delta"]) for row in deltas}
+		summary_lines = []
+		summary_lines.append("\n" + "="*80)
+		summary_lines.append("[CreateSqliteDB] DB Construction Summary:")
+		summary_lines.append("="*80)
+		summary_lines.append(f"Successfully included in DB : {len(df_meta_data)}")
+		summary_lines.append(f"Sequences filtered out      : {len(df_excluded)}")
+		if not reason_counts.empty:
+			summary_lines.append("-" * 80)
+			summary_lines.append(f"{'Category':<45} | {'Count':<10}")
+			summary_lines.append("-" * 80)
+			for reason, count in reason_counts.items():
+				summary_lines.append(f"{reason:<45} | {count:<10}")
+			summary_lines.append("\n[CreateSqliteDB] Detailed Exclusion Reasons (Top 10):")
+			for reason, count in detailed_counts.items():
+				summary_lines.append(f"  - {count:<4} : {reason}")
+
+		if self.update:
+			summary_lines.append("\n[CreateSqliteDB] Update Summary:")
+			summary_lines.append(f"Sequences added to DB       : {delta_by_table.get('meta_data', 0)}")
+			summary_lines.append(f"Input query sequences       : {len(incoming_query_accessions)}")
+			summary_lines.append(f"Input query sequences passed QC : {len(passed_qc_query_accessions)}")
+			summary_lines.append(f"Input query sequences failed QC : {len(incoming_query_accessions - passed_qc_query_accessions)}")
+			summary_lines.append(f"Total passed-QC queries in DB   : {after_query_count} (delta: {after_query_count - before_query_count})")
+
+		summary_lines.append("="*80 + "\n")
+		summary_str = "\n".join(summary_lines)
+		print(summary_str)
+
+		summary_path = os.path.join(self.base_dir, self.output_dir, "db_summary.txt")
+		with open(summary_path, "w", encoding="utf-8") as sf:
+			sf.write(summary_str)
 
 		conn.commit()
 		conn.close()
