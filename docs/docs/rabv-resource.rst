@@ -183,7 +183,7 @@ An example tree metadata file is shown below:
 .. code-block:: text
 
    chromosome    segment_number    tree_type    tree_name                 tree_model
-   1             1                 reference    ref_tree_am3c_am5.treefile
+   1             1                 reference    ref_tree_am3c_am5.treefile  GTR+F+R6
 
 In this example:
 
