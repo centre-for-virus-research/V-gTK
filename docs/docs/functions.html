@@ -1,25 +1,24 @@
 
 
 <!DOCTYPE html>
-<html class="writer-html5" lang="Python" data-content_root="./">
+<html class="writer-html5" lang="Python" data-content_root="../">
 <head>
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Functions &mdash; TING 1.0.0 documentation</title>
-      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
-      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=e59714d7" />
 
   
-      <script src="_static/jquery.js?v=5d32c60e"></script>
-      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
-      <script src="_static/documentation_options.js?v=8eae9801"></script>
-      <script src="_static/doctools.js?v=9bcbadda"></script>
-      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
-    <script src="_static/js/theme.js"></script>
-    <link rel="index" title="Index" href="genindex.html" />
-    <link rel="search" title="Search" href="search.html" />
-    <link rel="prev" title="Installation" href="installation.html" /> 
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=8eae9801"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" /> 
 </head>
 
 <body class="wy-body-for-nav"> 
@@ -30,11 +29,11 @@
 
           
           
-          <a href="index.html" class="icon icon-home">
+          <a href="../index.html" class="icon icon-home">
             TING
           </a>
 <div role="search">
-  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
     <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
     <input type="hidden" name="check_keywords" value="yes" />
     <input type="hidden" name="area" value="default" />
@@ -42,108 +41,12 @@
 </div>
         </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
               <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
-<ul class="current">
-<li class="toctree-l1"><a class="reference internal" href="intro.html">Introduction</a></li>
-<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
-<li class="toctree-l1 current"><a class="current reference internal" href="#">Functions</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="#genbank-xml-downloader">GenBank XML Downloader</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#usage">Usage</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#arguments">Arguments</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#example">Example</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="#genbank-xml-parser">GenBank XML Parser</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#id1">Usage</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id2">Arguments</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#examples">Examples</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#notes">Notes</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="#download-gff3-from-ncbi">Download GFF3 from NCBI</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#id3">Usage</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id4">Arguments</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id5">Examples</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="#validate-genbank-matrix">Validate GenBank Matrix</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#id6">Usage</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id7">Arguments</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id8">Examples</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id9">Notes</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="#add-missing-data-to-genbank-matrix">Add Missing Data to GenBank Matrix</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#id10">Usage</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id11">Arguments</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id12">Examples</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id13">Notes</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="#filter-and-extract-sequences">Filter and Extract Sequences</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#id14">Usage</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id15">Arguments</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id16">Examples</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id17">Notes</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="#blast-alignment">BLAST Alignment</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#id18">Usage</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id19">Arguments</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id20">Examples</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id21">Notes</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="#nextalign-alignment">Nextalign Alignment</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#id22">Usage</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id23">Arguments</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id24">Examples</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id25">Notes</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="#pad-alignment">Pad Alignment</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#id26">Usage</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id27">Arguments</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id28">Examples</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id29">Notes</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="#calculate-alignment-coordinates">Calculate Alignment Coordinates</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#id30">Usage</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id31">Arguments</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id32">Examples</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id33">Notes</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="#software-version-checker">Software Version Checker</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#id34">Usage</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id35">Arguments</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id36">Examples</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id37">Notes</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="#generate-database-ready-tables">Generate Database-Ready Tables</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#id38">Usage</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id39">Arguments</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id40">Examples</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id41">Notes</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="#create-sqlite-database">Create SQLite Database</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#id42">Usage</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id43">Arguments</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id44">Examples</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id45">Notes</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="#genbank-sequence-submitter">GenBank Sequence Submitter</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#id46">Usage</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id47">Arguments</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id48">Examples</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#id49">Notes</a></li>
-</ul>
-</li>
-</ul>
-</li>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../intro.html">Introduction</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../prerequisite.html">Prerequisite</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../functions.html">Functions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../rabv-resource.html">Building Rabies(RABV) resource</a></li>
 </ul>
 
         </div>
@@ -152,17 +55,17 @@
 
     <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
           <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
-          <a href="index.html">TING</a>
+          <a href="../index.html">TING</a>
       </nav>
 
       <div class="wy-nav-content">
         <div class="rst-content">
           <div role="navigation" aria-label="Page navigation">
   <ul class="wy-breadcrumbs">
-      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
       <li class="breadcrumb-item active">Functions</li>
       <li class="wy-breadcrumbs-aside">
-            <a href="_sources/functions.rst.txt" rel="nofollow"> View page source</a>
+            <a href="../_sources/docs/functions.rst.txt" rel="nofollow"> View page source</a>
       </li>
   </ul>
   <hr/>
@@ -1520,9 +1423,7 @@ Default: <code class="docutils literal notranslate"><span class="pre">30</span><
 
            </div>
           </div>
-          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
-        <a href="installation.html" class="btn btn-neutral float-left" title="Installation" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
-    </div>
+          <footer>
 
   <hr/>
 
