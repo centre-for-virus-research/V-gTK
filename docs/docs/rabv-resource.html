@@ -379,6 +379,82 @@ Bos taurus taurus   Bos taurus
 </div>
 </section>
 </section>
+<section id="clade-assignment-files">
+<h2>Clade Assignment Files<a class="headerlink" href="#clade-assignment-files" title="Link to this heading"></a></h2>
+<p>Clade assignment files are used to assign major and minor clade information to
+query sequences during the RABV database build and analysis workflow. These files
+provide the reference framework required for classifying new or unassigned RABV
+sequences based on their relationship to known reference sequences.</p>
+<p>To perform clade assignment, a curated reference sequence set is required. This
+can be the same reference sequence set used to build the reference tree. Each
+reference sequence should have an associated major clade and, where available, a
+minor clade. These assignments are then used by V-gTK to interpret where query
+sequences belong within the RABV diversity framework.</p>
+<p>For RABV, clade assignment is usually organised at two levels:</p>
+<ul class="simple">
+<li><p><strong>major clade</strong>: broad evolutionary group</p></li>
+<li><p><strong>minor clade</strong>: more specific sub-group within a major clade</p></li>
+</ul>
+<section id="major-clade-assignment">
+<h3>Major Clade Assignment<a class="headerlink" href="#major-clade-assignment" title="Link to this heading"></a></h3>
+<p>The major clade file defines the broad clade membership of each reference
+sequence. Each sequence should be assigned to one major clade based on its
+phylogenetic placement and curated classification.</p>
+<p>The file should contain two columns:</p>
+<ol class="arabic simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">sequence_id</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">major_clade</span></code></p></li>
+</ol>
+<p>Example:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>sequence_id    major_clade
+AB041966       Indian-Sub
+AB247428       Bats
+AB362483       Cosmopolitan
+AB383163       Bats
+AB383164       Bats
+</pre></div>
+</div>
+</section>
+<section id="minor-clade-assignment">
+<h3>Minor Clade Assignment<a class="headerlink" href="#minor-clade-assignment" title="Link to this heading"></a></h3>
+<p>The minor clade file provides a more detailed classification within the major
+clade structure. Minor clades represent finer-scale phylogenetic groups and can
+be useful for more detailed epidemiological, geographic, or evolutionary
+interpretation.</p>
+<p>The file should contain two columns:</p>
+<ol class="arabic simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">sequence_id</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">minor_clade</span></code></p></li>
+</ol>
+<p>Example:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>sequence_id    minor_clade
+AB041966       NULL
+AB247428       DR
+AB362483       AM3b
+AB383163       LC
+AB383164       LC
+</pre></div>
+</div>
+</section>
+<section id="id2">
+<h3>Important Notes<a class="headerlink" href="#id2" title="Link to this heading"></a></h3>
+<p>When preparing clade assignment files, consider the following:</p>
+<ul class="simple">
+<li><p>each reference sequence should have a major clade assignment</p></li>
+<li><p>minor clade assignment can be set to <code class="docutils literal notranslate"><span class="pre">NULL</span></code> if unavailable</p></li>
+<li><p>sequence identifiers must match across the reference files, tree, and clade
+files</p></li>
+<li><p>major and minor clades should be curated using the reference tree</p></li>
+<li><p>clade names should be written consistently across all files</p></li>
+<li><p>avoid spelling differences or duplicated labels for the same clade</p></li>
+<li><p>update clade files when new reference sequences are added</p></li>
+<li><p>review clade assignments after updating or rebuilding the reference tree</p></li>
+</ul>
+<p>Clade assignment depends heavily on the quality of the reference sequence set and
+reference tree. Therefore, the reference tree should include a diverse set of
+sequences covering all known major and minor RABV clades where possible.</p>
+</section>
+</section>
 </section>
 
 

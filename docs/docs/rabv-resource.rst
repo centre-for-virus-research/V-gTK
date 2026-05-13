@@ -351,3 +351,90 @@ Example:
    bovine; male        Bos taurus
    bovine; female      Bos taurus
    Bos taurus taurus   Bos taurus
+
+
+Clade Assignment Files
+----------------------
+
+Clade assignment files are used to assign major and minor clade information to
+query sequences during the RABV database build and analysis workflow. These files
+provide the reference framework required for classifying new or unassigned RABV
+sequences based on their relationship to known reference sequences.
+
+To perform clade assignment, a curated reference sequence set is required. This
+can be the same reference sequence set used to build the reference tree. Each
+reference sequence should have an associated major clade and, where available, a
+minor clade. These assignments are then used by V-gTK to interpret where query
+sequences belong within the RABV diversity framework.
+
+For RABV, clade assignment is usually organised at two levels:
+
+* **major clade**: broad evolutionary group
+* **minor clade**: more specific sub-group within a major clade
+
+Major Clade Assignment
+~~~~~~~~~~~~~~~~~~~~~~
+
+The major clade file defines the broad clade membership of each reference
+sequence. Each sequence should be assigned to one major clade based on its
+phylogenetic placement and curated classification.
+
+The file should contain two columns:
+
+1. ``sequence_id``
+2. ``major_clade``
+
+Example:
+
+.. code-block:: text
+
+   sequence_id    major_clade
+   AB041966       Indian-Sub
+   AB247428       Bats
+   AB362483       Cosmopolitan
+   AB383163       Bats
+   AB383164       Bats
+
+
+Minor Clade Assignment
+~~~~~~~~~~~~~~~~~~~~~~
+
+The minor clade file provides a more detailed classification within the major
+clade structure. Minor clades represent finer-scale phylogenetic groups and can
+be useful for more detailed epidemiological, geographic, or evolutionary
+interpretation.
+
+The file should contain two columns:
+
+1. ``sequence_id``
+2. ``minor_clade``
+
+Example:
+
+.. code-block:: text
+
+   sequence_id    minor_clade
+   AB041966       NULL
+   AB247428       DR
+   AB362483       AM3b
+   AB383163       LC
+   AB383164       LC
+
+Important Notes
+~~~~~~~~~~~~~~~
+
+When preparing clade assignment files, consider the following:
+
+* each reference sequence should have a major clade assignment
+* minor clade assignment can be set to ``NULL`` if unavailable
+* sequence identifiers must match across the reference files, tree, and clade
+  files
+* major and minor clades should be curated using the reference tree
+* clade names should be written consistently across all files
+* avoid spelling differences or duplicated labels for the same clade
+* update clade files when new reference sequences are added
+* review clade assignments after updating or rebuilding the reference tree
+
+Clade assignment depends heavily on the quality of the reference sequence set and
+reference tree. Therefore, the reference tree should include a diverse set of
+sequences covering all known major and minor RABV clades where possible.
