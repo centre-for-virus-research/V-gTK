@@ -293,7 +293,7 @@ single standardised value.
 This helps keep the database clean, consistent, and easier to query.
 
 Purpose of Mapping Files
-------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~
 
 Metadata downloaded from public databases such as GenBank can contain variation
 in how fields are recorded. The same country, region, or host species may be
@@ -313,7 +313,7 @@ They can be used to:
 * improve consistency across large datasets
 
 Country Mapping File
---------------------
+~~~~~~~~~~~~~~~~~~~~
 
 The country mapping file is used to standardise country names. It contains two
 columns:
@@ -334,7 +334,7 @@ Example:
 
 
 Host Mapping File
------------------
+~~~~~~~~~~~~~~~~~
 
 The host mapping file is used to standardise host information. Like the country
 mapping file, it contains two columns:
@@ -351,4 +351,3 @@ Example:
    bovine; male        Bos taurus
    bovine; female      Bos taurus
    Bos taurus taurus   Bos taurus
-

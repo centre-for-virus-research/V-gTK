@@ -188,7 +188,7 @@ belongs.</p>
 reference tree and how it should be interpreted during the workflow.</p>
 <p>An example tree metadata file is shown below:</p>
 <div class="highlight-text notranslate"><div class="highlight"><pre><span></span>chromosome    segment_number    tree_type    tree_name                 tree_model
-1             1                 reference    ref_tree_am3c_am5.treefile
+1             1                 reference    ref_tree_am3c_am5.treefile  GTR+F+R6
 </pre></div>
 </div>
 <p>In this example:</p>
@@ -272,6 +272,72 @@ reference tree, the quality and diversity of this tree directly affect the
 accuracy and usefulness of the final database.</p>
 </section>
 </section>
+<section id="mapping-files">
+<h2>Mapping Files<a class="headerlink" href="#mapping-files" title="Link to this heading">¶</a></h2>
+<p>Mapping files are used to standardise and correct metadata values during the
+RABV database build process. They are especially useful when the same incorrect,
+inconsistent, or non-standard metadata values occur many times across hundreds
+or thousands of records.</p>
+<p>For example, country names may appear in different formats such as <code class="docutils literal notranslate"><span class="pre">USA</span></code>,
+<code class="docutils literal notranslate"><span class="pre">United</span> <span class="pre">States</span> <span class="pre">of</span> <span class="pre">America</span></code>, or <code class="docutils literal notranslate"><span class="pre">US</span></code>. Similarly, host names may be recorded
+using common names, incomplete names, spelling variations, or extended
+descriptions. Mapping files allow these values to be replaced in bulk with a
+single standardised value.</p>
+<p>This helps keep the database clean, consistent, and easier to query.</p>
+<section id="purpose-of-mapping-files">
+<h3>Purpose of Mapping Files<a class="headerlink" href="#purpose-of-mapping-files" title="Link to this heading">¶</a></h3>
+<p>Metadata downloaded from public databases such as GenBank can contain variation
+in how fields are recorded. The same country, region, or host species may be
+written in different ways by different submitters.</p>
+<p>Mapping files provide a simple way to correct these inconsistencies before the
+final database is generated.</p>
+<p>They can be used to:</p>
+<ul class="simple">
+<li><p>correct country names</p></li>
+<li><p>standardise host names</p></li>
+<li><p>replace outdated geographic names</p></li>
+<li><p>convert abbreviations into full names</p></li>
+<li><p>fix spelling variations</p></li>
+<li><p>merge multiple equivalent terms into one accepted value</p></li>
+<li><p>improve consistency across large datasets</p></li>
+</ul>
+</section>
+<section id="country-mapping-file">
+<h3>Country Mapping File<a class="headerlink" href="#country-mapping-file" title="Link to this heading">¶</a></h3>
+<p>The country mapping file is used to standardise country names. It contains two
+columns:</p>
+<ol class="arabic simple">
+<li><p>the original value present in the metadata</p></li>
+<li><p>the corrected or standardised value to replace it with</p></li>
+</ol>
+<p>Example:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>country          replaced_by
+USA              United States
+Czechoslovakia   Czechia
+Laos             Lao
+UK               United Kingdom
+CSRF             Czechia
+</pre></div>
+</div>
+</section>
+<section id="host-mapping-file">
+<h3>Host Mapping File<a class="headerlink" href="#host-mapping-file" title="Link to this heading">¶</a></h3>
+<p>The host mapping file is used to standardise host information. Like the country
+mapping file, it contains two columns:</p>
+<ol class="arabic simple">
+<li><p>the original host value present in the metadata</p></li>
+<li><p>the corrected or standardised host value to replace it with</p></li>
+</ol>
+<p>Example:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>host                replaced_by
+Indian Gaur         Bos gaurus
+bovine; male        Bos taurus
+bovine; female      Bos taurus
+Bos taurus taurus   Bos taurus
+</pre></div>
+</div>
+</section>
+</section>
 </section>
 
 
@@ -313,6 +379,7 @@ accuracy and usefulness of the final database.</p>
 <li class="toctree-l2"><a class="reference internal" href="#reference-list-format">Reference List Format</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#important-notes">Important Notes</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#reference-tree">Reference Tree</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#mapping-files">Mapping Files</a></li>
 </ul>
 </li>
 </ul>
