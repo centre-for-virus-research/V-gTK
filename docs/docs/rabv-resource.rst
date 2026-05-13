@@ -126,7 +126,7 @@ affects sequence grouping, downstream annotation, clade assignment, and the
 overall usability of the generated database.
 
 Reference Tree
-==============
+--------------
 
 The reference tree is one of the key prerequisite files required for building
 the RABV resource. It contains a phylogenetic tree generated from all selected
