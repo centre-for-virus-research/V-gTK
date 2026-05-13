@@ -6,7 +6,7 @@
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
-project = 'TING'
+project = 'V-gTK'
 copyright = '2025, Joseph Hughes'
 author = 'Joseph Hughes'
 release = '1.0.0'
