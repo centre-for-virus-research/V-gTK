@@ -47,7 +47,14 @@
 <li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="prerequisite.html">Prerequisite</a></li>
 <li class="toctree-l1"><a class="reference internal" href="functions.html">Functions</a></li>
-<li class="toctree-l1 current"><a class="current reference internal" href="#">Building Rabies(RABV) resource</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Building Rabies(RABV) resource</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#prerequisite-files-for-building-the-rabv-resource">Prerequisite Files for Building the RABV Resource</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#reference-accession-list">Reference Accession List</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#master-reference-sequence">Master Reference Sequence</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#reference-list-format">Reference List Format</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#important-notes">Important Notes</a></li>
+</ul>
+</li>
 </ul>
 
         </div>
@@ -76,6 +83,118 @@
              
   <section id="building-rabies-rabv-resource">
 <h1>Building Rabies(RABV) resource<a class="headerlink" href="#building-rabies-rabv-resource" title="Link to this heading"></a></h1>
+<section id="prerequisite-files-for-building-the-rabv-resource">
+<h2>Prerequisite Files for Building the RABV Resource<a class="headerlink" href="#prerequisite-files-for-building-the-rabv-resource" title="Link to this heading"></a></h2>
+<p>Building the RABV resource requires a set of prerequisite files that define how
+sequences are selected, organised, mapped, and annotated during the V-gTK
+database build process. These files provide the foundation for constructing a
+consistent and reusable RABV genomic resource.</p>
+<p>The main prerequisite files include:</p>
+<ul class="simple">
+<li><p>reference accession list</p></li>
+<li><p>reference tree</p></li>
+<li><p>clade assignment information</p></li>
+<li><p>sequence-to-clade or sequence-to-group mapping files</p></li>
+<li><p>master reference sequence information</p></li>
+</ul>
+<p>Together, these files help V-gTK identify representative RABV sequences, assign
+new or query sequences to appropriate reference groups, and support downstream
+alignment, annotation, and phylogenetic workflows.</p>
+</section>
+<section id="reference-accession-list">
+<h2>Reference Accession List<a class="headerlink" href="#reference-accession-list" title="Link to this heading"></a></h2>
+<p>The reference accession list contains a diverse set of GenBank accessions that
+represent the known genetic diversity of rabies virus. These accessions are used
+as the reference sequence set during the database build process.</p>
+<p>The purpose of the reference set is to provide representative sequences against
+which query sequences can be compared. Ideally, the reference list should include
+sequences from different clades, lineages, geographic regions, and host
+associations, depending on the scope of the database being built.</p>
+<p>During the workflow, query sequences downloaded from GenBank are compared against
+the reference set. If a query sequence aligns well to one of the existing
+reference sequences, it can be associated with that reference group. This allows
+V-gTK to organise related sequences together and maintain a structured resource.</p>
+<p>However, if a query sequence does not align well to any sequence in the current
+reference set, this may indicate that the sequence represents a divergent or
+under-represented part of the dataset. In such cases, that sequence should be
+considered for inclusion in the reference set. Adding it as a new reference helps
+ensure that future sequences similar to it can be detected and grouped correctly.</p>
+<p>The opposite case can also occur. A sequence may be included in the reference
+set, but no query sequences align to it during the build process. In this
+situation, the sequence may not currently act as an informative reference for
+the available query dataset. Such sequences can be reviewed and, if appropriate,
+treated as part of the query sequence set instead of the reference set.</p>
+<p>In this way, the reference accession list is not necessarily fixed. It can be
+updated and curated as new data become available, allowing the RABV resource to
+remain flexible and representative over time.</p>
+</section>
+<section id="master-reference-sequence">
+<h2>Master Reference Sequence<a class="headerlink" href="#master-reference-sequence" title="Link to this heading"></a></h2>
+<p>In addition to the general reference accessions, the reference list should also
+include a master reference sequence. The master sequence is used during the
+post-alignment step for genome region annotation.</p>
+<p>The master reference provides the coordinate framework required to map aligned
+sequences to corresponding genomic regions, such as genes and coding sequences.
+For RABV, this is important because the workflow needs to identify where each
+sequence aligns relative to the standard genome organisation.</p>
+<p>For example, the master reference can be used to annotate regions corresponding
+to RABV genes such as:</p>
+<ul class="simple">
+<li><p>N gene</p></li>
+<li><p>P gene</p></li>
+<li><p>M gene</p></li>
+<li><p>G gene</p></li>
+<li><p>L gene</p></li>
+</ul>
+<p>The master sequence should therefore be a complete and well-annotated reference
+genome. For RABV, <code class="docutils literal notranslate"><span class="pre">NC_001542</span></code> is commonly used as the master reference
+sequence.</p>
+</section>
+<section id="reference-list-format">
+<h2>Reference List Format<a class="headerlink" href="#reference-list-format" title="Link to this heading"></a></h2>
+<p>The reference accession file is a tab-delimited file with two columns:</p>
+<ol class="arabic simple">
+<li><p>GenBank accession</p></li>
+<li><p>sequence type</p></li>
+</ol>
+<p>The sequence type should indicate whether the accession is a standard
+<code class="docutils literal notranslate"><span class="pre">reference</span></code> sequence or the <code class="docutils literal notranslate"><span class="pre">master</span></code> reference sequence.</p>
+<p>Example format:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>AB041966    reference
+AB247428    reference
+AB362483    reference
+AB383163    reference
+AB383164    reference
+AB383165    reference
+NC_001542   master
+</pre></div>
+</div>
+<p>In this example, the accessions labelled <code class="docutils literal notranslate"><span class="pre">reference</span></code> are used as representative
+RABV reference sequences. The accession labelled <code class="docutils literal notranslate"><span class="pre">master</span></code> is used as the main
+coordinate reference for post-alignment annotation and genome-region mapping.</p>
+</section>
+<section id="important-notes">
+<h2>Important Notes<a class="headerlink" href="#important-notes" title="Link to this heading"></a></h2>
+<p>The reference accession list should be reviewed carefully before building the
+database. A good reference set should be diverse enough to capture the known
+variation in the dataset, but not so large that it becomes redundant or difficult
+to maintain.</p>
+<p>When curating the reference set, consider the following:</p>
+<ul class="simple">
+<li><p>include representative sequences from major RABV clades or lineages</p></li>
+<li><p>include geographically and genetically diverse sequences where possible</p></li>
+<li><p>ensure that the master reference is complete and correctly labelled as
+<code class="docutils literal notranslate"><span class="pre">master</span></code></p></li>
+<li><p>review query sequences that fail to align to the current reference set</p></li>
+<li><p>consider adding divergent unaligned query sequences as new references</p></li>
+<li><p>review reference sequences that do not map to any query sequences</p></li>
+<li><p>update the reference list as new RABV diversity becomes available</p></li>
+</ul>
+<p>Maintaining a high-quality reference accession list is an important step in
+building a reliable RABV genomic database. The quality of this file directly
+affects sequence grouping, downstream annotation, clade assignment, and the
+overall usability of the generated database.</p>
+</section>
 </section>
 
 
