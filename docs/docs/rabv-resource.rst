@@ -24,7 +24,7 @@ alignment, annotation, and phylogenetic workflows.
 Reference Accession List
 ------------------------
 
-The reference accession list contains a diverse set of GenBank accessions that
+The reference accession list contains a diverse set of accessions that
 represent the known genetic diversity of rabies virus. These accessions are used
 as the reference sequence set during the database build process.
 
@@ -33,12 +33,7 @@ which query sequences can be compared. Ideally, the reference list should includ
 sequences from different clades, lineages, geographic regions, and host
 associations, depending on the scope of the database being built.
 
-During the workflow, query sequences downloaded from GenBank are compared against
-the reference set. If a query sequence aligns well to one of the existing
-reference sequences, it can be associated with that reference group. This allows
-V-gTK to organise related sequences together and maintain a structured resource.
-
-However, if a query sequence does not align well to any sequence in the current
+During the workflow, if a query sequence does not align well to any sequence in the current
 reference set, this may indicate that the sequence represents a divergent or
 under-represented part of the dataset. In such cases, that sequence should be
 considered for inclusion in the reference set. Adding it as a new reference helps
@@ -129,3 +124,154 @@ Maintaining a high-quality reference accession list is an important step in
 building a reliable RABV genomic database. The quality of this file directly
 affects sequence grouping, downstream annotation, clade assignment, and the
 overall usability of the generated database.
+
+Reference Tree
+==============
+
+The reference tree is one of the key prerequisite files required for building
+the RABV resource. It contains a phylogenetic tree generated from all selected
+reference sequences. These reference sequences should represent the known
+genetic diversity of rabies virus and provide the framework used for downstream
+clade assignment.
+
+For RABV, the reference tree should cover the major and minor diversity present
+within the virus. For example, RABV can be represented by several major clades
+and many minor clades. The reference tree should therefore be built from a
+carefully selected and diverse reference sequence set so that the major
+evolutionary structure of the dataset is captured.
+
+The reference tree acts as the main phylogenetic backbone of the database. New
+or query sequences can later be compared against this reference structure to
+support clade assignment, lineage interpretation, and downstream phylogenetic
+analysis.
+
+Importance of the Reference Tree
+--------------------------------
+
+The reference tree is used as the primary tree for assigning major and minor
+clade information. Because of this, it is important that the tree is generated
+from a representative set of reference sequences.
+
+A well-curated reference tree should:
+
+* include sequences covering the known RABV diversity
+* represent all major clades where possible
+* include representative sequences from minor clades
+* avoid unnecessary redundancy
+* be generated using an appropriate phylogenetic model
+* be linked to clear metadata describing how the tree was created
+
+If the reference tree does not adequately represent the diversity of the
+available RABV sequences, newly added or query sequences may be incorrectly
+placed or remain difficult to classify. Therefore, maintaining a diverse and
+well-constructed reference tree is mandatory for reliable database construction
+and clade assignment.
+
+Reference Tree Metadata
+-----------------------
+
+Along with the tree file, a metadata file must also be provided. This metadata
+describes the tree file and provides information such as the tree name, tree
+type, model used, and the genome segment or chromosome to which the tree
+belongs.
+
+The metadata file allows V-gTK to identify which tree should be used as the main
+reference tree and how it should be interpreted during the workflow.
+
+An example tree metadata file is shown below:
+
+.. code-block:: text
+
+   chromosome    segment_number    tree_type    tree_name                 tree_model
+   1             1                 reference    ref_tree_am3c_am5.treefile
+
+In this example:
+
+* ``chromosome`` indicates the chromosome or genome component.
+* ``segment_number`` indicates the segment number. For RABV, this is usually
+  ``1`` because RABV has a non-segmented genome.
+* ``tree_type`` defines the type of tree. The value ``reference`` indicates
+  that this is the main reference tree.
+* ``tree_name`` provides the filename of the tree file.
+* ``tree_model`` records the phylogenetic model used to generate the tree, if
+  available.
+
+The ``tree_type`` field is particularly important because the tree labelled as
+``reference`` is treated as the main tree for clade assignment.
+
+Additional Trees
+----------------
+
+In addition to the main reference tree, users can also include other
+phylogenetic trees in the resource. These additional trees can be useful for
+more focused analyses.
+
+Examples include:
+
+* a complete tree containing a larger set of available sequences
+* a region-specific tree
+* a country-specific tree
+* a host-specific tree
+* a clade-specific tree
+
+For example, a tree generated using Latin American RABV sequences can be added
+to the database. This type of regional tree can help users analyse newly
+generated sequences from Latin America in greater detail. While the main
+reference tree provides broad clade assignment, the regional tree can provide
+additional resolution within a specific geographic or evolutionary context.
+
+Similarly, users may add trees focused on particular clades, hosts, or outbreak
+datasets depending on the purpose of the database.
+
+Reference Tree Versus Additional Trees
+--------------------------------------
+
+It is important to distinguish the main reference tree from additional trees.
+
+The ``reference`` tree is the primary tree used for assigning major and minor
+clades. This tree must be diverse and carefully curated because it forms the
+main phylogenetic framework for the RABV resource.
+
+Additional trees are optional and are mainly used to support specialised
+analysis. They can provide extra context, but they do not replace the main
+reference tree unless they are explicitly defined as the reference tree in the
+metadata.
+
+For this reason, the main reference tree should always be built from a diverse
+set of representative reference sequences. This ensures that the database has a
+stable and reliable framework for classifying new RABV sequences.
+
+Example Tree Metadata with Multiple Trees
+-----------------------------------------
+
+An extended metadata file may include more than one tree:
+
+.. code-block:: text
+
+   chromosome    segment_number    tree_type       tree_name                         tree_model
+   1             1                 reference       ref_tree_am3c_am5.treefile        GTR+F+R6
+   1             1                 complete        complete_rabv_tree.treefile       GTR+F+R6
+   1             1                 regional        latin_america_rabv.treefile       GTR+F+R6
+
+In this example, ``ref_tree_am3c_am5.treefile`` is the main reference tree used
+for clade assignment. The complete and regional trees provide additional
+phylogenetic context for downstream analysis.
+
+Important Notes
+---------------
+
+When preparing reference tree files, consider the following:
+
+* the reference tree should be built from the curated reference accession set
+* the tree should represent the full diversity expected in the database
+* the metadata file must correctly identify the main tree as ``reference``
+* additional trees can be included for specialised downstream analysis
+* regional or clade-specific trees can improve interpretation within specific
+  sequence groups
+* the tree model should be recorded where possible
+* the tree filename in the metadata must match the actual tree file name
+
+A diverse and well-documented reference tree is essential for building a robust
+RABV genomic database. Since major and minor clade assignments are based on the
+reference tree, the quality and diversity of this tree directly affect the
+accuracy and usefulness of the final database.
