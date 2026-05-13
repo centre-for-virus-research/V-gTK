@@ -146,7 +146,7 @@ support clade assignment, lineage interpretation, and downstream phylogenetic
 analysis.
 
 Importance of the Reference Tree
---------------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The reference tree is used as the primary tree for assigning major and minor
 clade information. Because of this, it is important that the tree is generated
@@ -168,7 +168,7 @@ well-constructed reference tree is mandatory for reliable database construction
 and clade assignment.
 
 Reference Tree Metadata
------------------------
+~~~~~~~~~~~~~~~~~~~~~~~
 
 Along with the tree file, a metadata file must also be provided. This metadata
 describes the tree file and provides information such as the tree name, tree
@@ -200,7 +200,7 @@ The ``tree_type`` field is particularly important because the tree labelled as
 ``reference`` is treated as the main tree for clade assignment.
 
 Additional Trees
-----------------
+~~~~~~~~~~~~~~~~
 
 In addition to the main reference tree, users can also include other
 phylogenetic trees in the resource. These additional trees can be useful for
@@ -224,7 +224,7 @@ Similarly, users may add trees focused on particular clades, hosts, or outbreak
 datasets depending on the purpose of the database.
 
 Reference Tree Versus Additional Trees
---------------------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 It is important to distinguish the main reference tree from additional trees.
 
@@ -242,7 +242,7 @@ set of representative reference sequences. This ensures that the database has a
 stable and reliable framework for classifying new RABV sequences.
 
 Example Tree Metadata with Multiple Trees
------------------------------------------
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 An extended metadata file may include more than one tree:
 
@@ -258,7 +258,7 @@ for clade assignment. The complete and regional trees provide additional
 phylogenetic context for downstream analysis.
 
 Important Notes
----------------
+~~~~~~~~~~~~~~~
 
 When preparing reference tree files, consider the following:
 

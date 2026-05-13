@@ -53,15 +53,15 @@
 <li class="toctree-l2"><a class="reference internal" href="#master-reference-sequence">Master Reference Sequence</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#reference-list-format">Reference List Format</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#important-notes">Important Notes</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#reference-tree">Reference Tree</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#importance-of-the-reference-tree">Importance of the Reference Tree</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#reference-tree-metadata">Reference Tree Metadata</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#additional-trees">Additional Trees</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#reference-tree-versus-additional-trees">Reference Tree Versus Additional Trees</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#example-tree-metadata-with-multiple-trees">Example Tree Metadata with Multiple Trees</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id1">Important Notes</a></li>
 </ul>
 </li>
-<li class="toctree-l1"><a class="reference internal" href="#reference-tree">Reference Tree</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="#importance-of-the-reference-tree">Importance of the Reference Tree</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#reference-tree-metadata">Reference Tree Metadata</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#additional-trees">Additional Trees</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#reference-tree-versus-additional-trees">Reference Tree Versus Additional Trees</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#example-tree-metadata-with-multiple-trees">Example Tree Metadata with Multiple Trees</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#id1">Important Notes</a></li>
 </ul>
 </li>
 </ul>
@@ -200,9 +200,8 @@ building a reliable RABV genomic database. The quality of this file directly
 affects sequence grouping, downstream annotation, clade assignment, and the
 overall usability of the generated database.</p>
 </section>
-</section>
 <section id="reference-tree">
-<h1>Reference Tree<a class="headerlink" href="#reference-tree" title="Link to this heading"></a></h1>
+<h2>Reference Tree<a class="headerlink" href="#reference-tree" title="Link to this heading"></a></h2>
 <p>The reference tree is one of the key prerequisite files required for building
 the RABV resource. It contains a phylogenetic tree generated from all selected
 reference sequences. These reference sequences should represent the known
@@ -218,7 +217,7 @@ or query sequences can later be compared against this reference structure to
 support clade assignment, lineage interpretation, and downstream phylogenetic
 analysis.</p>
 <section id="importance-of-the-reference-tree">
-<h2>Importance of the Reference Tree<a class="headerlink" href="#importance-of-the-reference-tree" title="Link to this heading"></a></h2>
+<h3>Importance of the Reference Tree<a class="headerlink" href="#importance-of-the-reference-tree" title="Link to this heading"></a></h3>
 <p>The reference tree is used as the primary tree for assigning major and minor
 clade information. Because of this, it is important that the tree is generated
 from a representative set of reference sequences.</p>
@@ -238,7 +237,7 @@ well-constructed reference tree is mandatory for reliable database construction
 and clade assignment.</p>
 </section>
 <section id="reference-tree-metadata">
-<h2>Reference Tree Metadata<a class="headerlink" href="#reference-tree-metadata" title="Link to this heading"></a></h2>
+<h3>Reference Tree Metadata<a class="headerlink" href="#reference-tree-metadata" title="Link to this heading"></a></h3>
 <p>Along with the tree file, a metadata file must also be provided. This metadata
 describes the tree file and provides information such as the tree name, tree
 type, model used, and the genome segment or chromosome to which the tree
@@ -265,7 +264,7 @@ available.</p></li>
 <code class="docutils literal notranslate"><span class="pre">reference</span></code> is treated as the main tree for clade assignment.</p>
 </section>
 <section id="additional-trees">
-<h2>Additional Trees<a class="headerlink" href="#additional-trees" title="Link to this heading"></a></h2>
+<h3>Additional Trees<a class="headerlink" href="#additional-trees" title="Link to this heading"></a></h3>
 <p>In addition to the main reference tree, users can also include other
 phylogenetic trees in the resource. These additional trees can be useful for
 more focused analyses.</p>
@@ -286,7 +285,7 @@ additional resolution within a specific geographic or evolutionary context.</p>
 datasets depending on the purpose of the database.</p>
 </section>
 <section id="reference-tree-versus-additional-trees">
-<h2>Reference Tree Versus Additional Trees<a class="headerlink" href="#reference-tree-versus-additional-trees" title="Link to this heading"></a></h2>
+<h3>Reference Tree Versus Additional Trees<a class="headerlink" href="#reference-tree-versus-additional-trees" title="Link to this heading"></a></h3>
 <p>It is important to distinguish the main reference tree from additional trees.</p>
 <p>The <code class="docutils literal notranslate"><span class="pre">reference</span></code> tree is the primary tree used for assigning major and minor
 clades. This tree must be diverse and carefully curated because it forms the
@@ -300,7 +299,7 @@ set of representative reference sequences. This ensures that the database has a
 stable and reliable framework for classifying new RABV sequences.</p>
 </section>
 <section id="example-tree-metadata-with-multiple-trees">
-<h2>Example Tree Metadata with Multiple Trees<a class="headerlink" href="#example-tree-metadata-with-multiple-trees" title="Link to this heading"></a></h2>
+<h3>Example Tree Metadata with Multiple Trees<a class="headerlink" href="#example-tree-metadata-with-multiple-trees" title="Link to this heading"></a></h3>
 <p>An extended metadata file may include more than one tree:</p>
 <div class="highlight-text notranslate"><div class="highlight"><pre><span></span>chromosome    segment_number    tree_type       tree_name                         tree_model
 1             1                 reference       ref_tree_am3c_am5.treefile        GTR+F+R6
@@ -313,7 +312,7 @@ for clade assignment. The complete and regional trees provide additional
 phylogenetic context for downstream analysis.</p>
 </section>
 <section id="id1">
-<h2>Important Notes<a class="headerlink" href="#id1" title="Link to this heading"></a></h2>
+<h3>Important Notes<a class="headerlink" href="#id1" title="Link to this heading"></a></h3>
 <p>When preparing reference tree files, consider the following:</p>
 <ul class="simple">
 <li><p>the reference tree should be built from the curated reference accession set</p></li>
@@ -329,6 +328,7 @@ sequence groups</p></li>
 RABV genomic database. Since major and minor clade assignments are based on the
 reference tree, the quality and diversity of this tree directly affect the
 accuracy and usefulness of the final database.</p>
+</section>
 </section>
 </section>
 
