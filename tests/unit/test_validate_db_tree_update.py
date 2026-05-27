@@ -249,12 +249,12 @@ def test_validate_db_tree_update_integrity_fails_for_out_of_span_feature_project
         cur.execute("DELETE FROM features WHERE accession='REF1'")
         cur.execute("DELETE FROM features WHERE accession='Q_OLD'")
         cur.executemany(
-            "INSERT INTO features(accession, master_ref_accession, reference_accession, aln_start, aln_end, cds_start, cds_end, product, segment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO features(accession, master_ref_accession, reference_accession, aln_start, aln_end, cds_start, cds_end, cds_start_OG_seq, cds_end_OG_seq, product, segment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
-                ("REF1", "REF1", "REF1", "1", "4", "1", "2", "P1", "1"),
-                ("REF1", "REF1", "REF1", "1", "4", "3", "4", "P2", "1"),
-                ("Q_OLD", "REF1", "REF1", "1", "2", "1", "2", "P1", "1"),
-                ("Q_OLD", "REF1", "REF1", "1", "2", "2", "2", "P2", "1"),
+                ("REF1", "REF1", "REF1", "1", "4", "1", "2", "1", "2", "P1", "1"),
+                ("REF1", "REF1", "REF1", "1", "4", "3", "4", "3", "4", "P2", "1"),
+                ("Q_OLD", "REF1", "REF1", "1", "2", "1", "2", "1", "2", "P1", "1"),
+                ("Q_OLD", "REF1", "REF1", "1", "2", "2", "2", "2", "2", "P2", "1"),
             ],
         )
         conn.commit()

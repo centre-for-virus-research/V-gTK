@@ -44,7 +44,7 @@ def _inputs(tmp_path: Path, suffix: str, aln_a: str = "ATGC"):
     fasta = tmp_path / f"seqs_{suffix}.fa"
 
     _write_tsv(meta, [["A", "", "1"]], ["primary_accession", "exclusion", "segment"])
-    _write_tsv(features, [["A", "M", "R", "1", "10", "1", "10", "P", "1"]], ["accession", "master_ref_accession", "reference_accession", "aln_start", "aln_end", "cds_start", "cds_end", "product", "segment"])
+    _write_tsv(features, [["A", "M", "R", "1", "10", "1", "10", "1", "10", "P", "1"]], ["accession", "master_ref_accession", "reference_accession", "aln_start", "aln_end", "cds_start", "cds_end", "cds_start_OG_seq", "cds_end_OG_seq", "product", "segment"])
     _write_tsv(aln, [["A", "R", aln_a, "1"]], ["primary_accession", "alignment_name", "alignment", "segment"])
     _write_tsv(gene, [["geneA", "Gene A"]], ["name", "description"])
     _write_csv(m49_country, [["001", "World"]], ["m49_code", "name"])
@@ -316,10 +316,10 @@ def test_update_mode_backfills_segment_one_for_unsegmented_tables(tmp_path: Path
     ).to_csv(inp["aln"], sep="\t", index=False)
     pd.DataFrame(
         [
-            ["REF_NEW", "REF_NEW", "REF_NEW", "1", "4", "1", "4", "core protein", ""],
-            ["Q_NEW", "REF_NEW", "REF_NEW", "1", "4", "1", "4", "core protein", ""],
+            ["REF_NEW", "REF_NEW", "REF_NEW", "1", "4", "1", "4", "1", "4", "core protein", ""],
+            ["Q_NEW", "REF_NEW", "REF_NEW", "1", "4", "1", "4", "1", "4", "core protein", ""],
         ],
-        columns=["accession", "master_ref_accession", "reference_accession", "aln_start", "aln_end", "cds_start", "cds_end", "product", "segment"],
+        columns=["accession", "master_ref_accession", "reference_accession", "aln_start", "aln_end", "cds_start", "cds_end", "cds_start_OG_seq", "cds_end_OG_seq", "product", "segment"],
     ).to_csv(inp["features"], sep="\t", index=False)
     pd.DataFrame(
         [
@@ -715,7 +715,7 @@ def test_update_mode_uses_meta_exclusion_criteria_when_filtered_files_are_empty(
     ).to_csv(update_inp["aln"], sep="\t", index=False)
 
     pd.DataFrame(
-        [["REF1", "REF1", "REF1", "1", "4", "1", "4", "P", "1"]],
+        [["REF1", "REF1", "REF1", "1", "4", "1", "4", "1", "4", "P", "1"]],
         columns=[
             "accession",
             "master_ref_accession",
@@ -724,6 +724,8 @@ def test_update_mode_uses_meta_exclusion_criteria_when_filtered_files_are_empty(
             "aln_end",
             "cds_start",
             "cds_end",
+            "cds_start_OG_seq",
+            "cds_end_OG_seq",
             "product",
             "segment",
         ],

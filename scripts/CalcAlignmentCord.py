@@ -143,8 +143,10 @@ class CalculateAlignmentCoordinates:
 			adj_start = overlap_start - gaps_before_start + (start_offset - 1)
 			adj_end = overlap_end - gaps_before_end + (start_offset - 1)
 			adjusted_entry = {
-				'start': adj_start,
-				'end': adj_end,
+				'start': overlap_start,
+				'end': overlap_end,
+				'og_start': adj_start,
+				'og_end': adj_end,
 				'product': cds['product'],
 			}
 			if adjusted_entry not in adjusted_coords:
@@ -202,7 +204,18 @@ class CalculateAlignmentCoordinates:
 		if not masters:
 			raise ValueError("No master accession could be resolved from --master_accession")
 
-		header = ["accession", "master_ref_accession", "reference_accession", "aln_start", "aln_end", "cds_start", "cds_end", "product"]
+		header = [
+			"accession",
+			"master_ref_accession",
+			"reference_accession",
+			"aln_start",
+			"aln_end",
+			"cds_start",
+			"cds_end",
+			"cds_start_OG_seq",
+			"cds_end_OG_seq",
+			"product",
+		]
 		if segment_map:
 			header.append("segment")
 		with open(join(self.tmp_dir, self.output_dir, self.output_file), "w") as out_f:
@@ -280,7 +293,18 @@ class CalculateAlignmentCoordinates:
 							if record_segment and ref_segment and record_segment != ref_segment:
 								raise ValueError(f"Segment mismatch for {record.id}: record={record_segment}, ref={ref_segment}")
 
-						data = [record.id, current_master, reference_acc, str(genome_cord_start), str(genome_cord_end), str(each_cords['start']), str(each_cords['end']), each_cords['product']]
+						data = [
+							record.id,
+							current_master,
+							reference_acc,
+							str(genome_cord_start),
+							str(genome_cord_end),
+							str(each_cords['start']),
+							str(each_cords['end']),
+							str(each_cords['og_start']),
+							str(each_cords['og_end']),
+							each_cords['product'],
+						]
 						if segment_map:
 							data.append(segment_map.get(record.id, ""))
 						out_f.write('\t'.join(data))

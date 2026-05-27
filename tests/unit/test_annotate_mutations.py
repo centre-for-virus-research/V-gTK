@@ -19,7 +19,9 @@ HCV_CATALOG_HEADER = [
 HCV_DB_COLUMNS = [
     'mutation_id', 'protein_name', 'segment', 'aa_position', 'alt_residue', 'reference_accession',
     'mutation_type', 'signature_id', 'signature_kind', 'combination_id', 'combination_size',
-    'phenotype', 'resistance_category', 'drug'
+    'phenotype', 'resistance_category', 'drug', 'drug_category', 'drug_producer', 'pubmed_id',
+    'DOI', 'any_in_vitro_evidence', 'in_vitro_max_ec50_midpoint', 'any_in_vivo_evidence',
+    'in_vivo_baseline', 'in_vivo_treatment_emergent'
 ]
 
 
@@ -161,8 +163,8 @@ def test_annotation_with_reference_indels(tmp_path):
         HCV_CATALOG_HEADER,
         # Reference AA is M (ATG), we look for a mutation to V.
         ['NS3', '1', '2', 'V', 'REF1', 'NS3:2V', 'snp', 'sig1', 'single', '', '', '', '', ''],
-        # Reference AA is H (CAT) at pos 4 (pos 3 is a gaping deletion). We look for Q.
-        ['NS3', '1', '4', 'Q', 'REF1', 'NS3:4Q', 'snp', 'sig2', 'single', '', '', '', '', '']
+        # In query-sequence coordinates, the deleted codon is absent and CAA is the third observable codon.
+        ['NS3', '1', '3', 'Q', 'REF1', 'NS3:3Q', 'snp', 'sig2', 'single', '', '', '', '', '']
     ]
     with open(catalog_path, 'w') as f:
         for row in catalog_data:
@@ -171,10 +173,10 @@ def test_annotation_with_reference_indels(tmp_path):
     conn = sqlite3.connect(str(db_path))
     cursor = conn.cursor()
     cursor.execute("CREATE TABLE features (accession TEXT, product TEXT, segment TEXT, cds_start INTEGER, cds_end INTEGER)")
-    # Let's say cds_start is 4
+    # Features in the DB are query-sequence coordinates, not aligned-string offsets.
     cursor.executemany("INSERT INTO features VALUES (?, ?, ?, ?, ?)", [
-        ('REF_MASTER', 'NS3', '1', 4, 15),
-        ('mutated_seq', 'NS3', '1', 4, 15)
+        ('REF_MASTER', 'NS3', '1', 4, 12),
+        ('mutated_seq', 'NS3', '1', 4, 12)
     ])
     
     cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, alignment TEXT)")
@@ -206,12 +208,174 @@ def test_annotation_with_reference_indels(tmp_path):
     
     mutation_ids = _mutation_ids_by_accession(mutation_summary)
     assert 'REF_MASTER' not in mutation_ids, "Reference should not trigger any mutation hits"
-    assert mutation_ids['mutated_seq'] == ['NS3:2V', 'NS3:4Q']
+    assert mutation_ids['mutated_seq'] == ['NS3:2V', 'NS3:3Q']
 
     completed_by_accession = _completed_signatures_by_accession(completed)
     assert completed_by_accession['mutated_seq'] == {'sig1', 'sig2'}
     
     conn.close()
+
+
+def test_annotate_from_feature_rows_uses_alignment_coordinate_map_for_gapped_alignments():
+    catalog = pd.DataFrame(
+        [
+            {
+                'protein_name': 'NS3',
+                'segment': '1',
+                'aa_position': '1',
+                'alt_residue': 'I',
+                'reference_accession': 'REF1',
+                'mutation_id': 'NS3:1I',
+                'mutation_type': 'snp',
+                'signature_id': 'sig1',
+                'signature_kind': 'single',
+                'combination_id': '',
+                'combination_size': '',
+                'phenotype': '',
+            }
+        ]
+    )
+    catalog, invalid_positions = AnnotateMutations.prepare_catalog(catalog, {})
+    assert invalid_positions == 0
+
+    features = pd.DataFrame(
+        [
+            {
+                'accession': 'seq1',
+                'product': 'NS3',
+                'segment': '1',
+                'cds_start': 4,
+                'cds_end': 9,
+                '_canonical_product': 'NS3',
+                '_segment_norm': '1',
+            }
+        ]
+    )
+
+    mutations_found, diagnostics = AnnotateMutations.annotate_from_feature_rows(
+        catalog,
+        features,
+        {'seq1': 'GG-GATAAAA'},
+        has_segment=True,
+    )
+
+    assert [mutation['mutation_id'] for mutation in mutations_found] == ['NS3:1I']
+    assert diagnostics['mutation_hits'] == 1
+
+
+def test_annotate_from_feature_rows_does_not_call_mutation_for_other_amino_acid():
+    catalog = pd.DataFrame(
+        [
+            {
+                'protein_name': 'NS3',
+                'segment': '1',
+                'aa_position': '2',
+                'alt_residue': 'K',
+                'reference_accession': 'REF1',
+                'mutation_id': 'NS3:2K',
+                'mutation_type': 'snp',
+                'signature_id': 'sig1',
+                'signature_kind': 'single',
+                'combination_id': '',
+                'combination_size': '',
+                'phenotype': '',
+            }
+        ]
+    )
+    catalog, invalid_positions = AnnotateMutations.prepare_catalog(catalog, {})
+    assert invalid_positions == 0
+
+    features = pd.DataFrame(
+        [
+            {
+                'accession': 'seq_match',
+                'product': 'NS3',
+                'segment': '1',
+                'cds_start': 4,
+                'cds_end': 9,
+                '_canonical_product': 'NS3',
+                '_segment_norm': '1',
+            },
+            {
+                'accession': 'seq_other',
+                'product': 'NS3',
+                'segment': '1',
+                'cds_start': 4,
+                'cds_end': 9,
+                '_canonical_product': 'NS3',
+                '_segment_norm': '1',
+            },
+        ]
+    )
+
+    mutations_found, diagnostics = AnnotateMutations.annotate_from_feature_rows(
+        catalog,
+        features,
+        {
+            'seq_match': 'GGGATAAAA',
+            'seq_other': 'GGGATAGGG',
+        },
+        has_segment=True,
+    )
+
+    assert [mutation['primary_accession'] for mutation in mutations_found] == ['seq_match']
+    assert [mutation['mutation_id'] for mutation in mutations_found] == ['NS3:2K']
+    assert diagnostics['mutation_hits'] == 1
+
+
+def test_extract_feature_codon_returns_none_when_query_coordinates_do_not_map():
+    coord_map = AnnotateMutations.build_alignment_coordinate_map('GGG---ATA')
+
+    codon = AnnotateMutations.extract_feature_codon('GGG---ATA', coord_map, cds_start=8, aa_pos=1)
+
+    assert codon is None
+
+
+def test_annotate_from_feature_rows_rejects_nonpositive_coordinate_requests():
+    catalog = pd.DataFrame(
+        [
+            {
+                'protein_name': 'NS3',
+                'segment': '1',
+                'aa_position': '0',
+                'alt_residue': 'I',
+                'reference_accession': 'REF1',
+                'mutation_id': 'NS3:0I',
+                'mutation_type': 'snp',
+                'signature_id': 'sig1',
+                'signature_kind': 'single',
+                'combination_id': '',
+                'combination_size': '',
+                'phenotype': '',
+            }
+        ]
+    )
+    catalog, invalid_positions = AnnotateMutations.prepare_catalog(catalog, {})
+    assert invalid_positions == 0
+
+    features = pd.DataFrame(
+        [
+            {
+                'accession': 'seq1',
+                'product': 'NS3',
+                'segment': '1',
+                'cds_start': 4,
+                'cds_end': 9,
+                '_canonical_product': 'NS3',
+                '_segment_norm': '1',
+            }
+        ]
+    )
+
+    mutations_found, diagnostics = AnnotateMutations.annotate_from_feature_rows(
+        catalog,
+        features,
+        {'seq1': 'GGGATAAAA'},
+        has_segment=True,
+    )
+
+    assert mutations_found == []
+    assert diagnostics['codon_out_of_bounds'] == 1
 
 
 def test_annotate_mutations_falls_back_to_db_gff_coordinate_mapping(tmp_path):
@@ -360,6 +524,67 @@ def test_annotate_mutations_can_build_reference_maps_from_features_table(tmp_pat
     assert all(m['primary_accession'] == 'seq1' for m in mutations_found)
     assert resolved_maps['EU781827']['resolved_accession'] == 'NC_004102'
     assert diagnostics['mutation_hits'] == 2
+
+
+def test_reference_coordinate_mapping_keeps_catalog_reference_hints_when_master_exists():
+    catalog = pd.DataFrame(
+        [
+            {
+                'protein_name': 'NS3',
+                'segment': '1',
+                'aa_position': '1',
+                'alt_residue': 'I',
+                'reference_accession': 'CATREF',
+                'mutation_id': 'NS3:1I',
+                'mutation_type': 'snp',
+                'signature_id': 'sig1',
+                'signature_kind': 'single',
+                'combination_id': '',
+                'combination_size': '',
+                'phenotype': '',
+            }
+        ]
+    )
+    catalog, invalid_positions = AnnotateMutations.prepare_catalog(catalog, {})
+    assert invalid_positions == 0
+
+    seq_aln = pd.DataFrame(
+        [
+            {'sequence_id': 'CATREF', 'primary_accession': 'CATREF', 'alignment_name': 'ALIGNREF', 'alignment': 'ATG'},
+            {'sequence_id': 'seq1', 'primary_accession': 'seq1', 'alignment_name': 'ALIGNREF', 'alignment': 'ATA'},
+        ]
+    )
+    meta_data = pd.DataFrame(
+        [
+            {'primary_accession': 'MASTERREF', 'accession_type': 'master'},
+        ]
+    )
+    db_gff_maps = {
+        'CATREF': {
+            'NS3': {
+                'product': 'NS3',
+                'raw_product': 'NS3',
+                'cds_start': 1,
+                'cds_end': 3,
+                'reference_accession': 'CATREF',
+                'feature_type': 'gene',
+                'source': 'db_gff',
+            }
+        }
+    }
+
+    mutations_found, diagnostics, resolved_maps = AnnotateMutations.annotate_from_reference_coordinates(
+        catalog,
+        seq_aln,
+        meta_data,
+        {},
+        db_gff_maps,
+        False,
+    )
+
+    assert resolved_maps['ALIGNREF']['resolved_accession'] == 'CATREF'
+    assert [mutation['mutation_id'] for mutation in mutations_found] == ['NS3:1I']
+    assert diagnostics['mutation_hits'] == 1
 
 
 def test_annotate_mutations_uses_descriptive_hcv_feature_products_without_gene_aliases(tmp_path):

@@ -283,11 +283,11 @@ def test_create_sqlite_db_preserves_projected_gff_feature_columns(tmp_path: Path
     write_tsv(
         features,
         [
-            ["NC_004102", "NC_004102", "NC_004102", "1", "9", "4", "9", "NS3"],
-            ["EU781827", "NC_004102", "EU781827", "1", "9", "4", "9", "NS3"],
-            ["seq1", "NC_004102", "EU781827", "1", "9", "4", "9", "NS3"],
+            ["NC_004102", "NC_004102", "NC_004102", "1", "9", "4", "9", "4", "9", "NS3"],
+            ["EU781827", "NC_004102", "EU781827", "1", "9", "4", "9", "4", "9", "NS3"],
+            ["seq1", "NC_004102", "EU781827", "1", "9", "4", "9", "4", "9", "NS3"],
         ],
-        ["accession", "master_ref_accession", "reference_accession", "aln_start", "aln_end", "cds_start", "cds_end", "product"],
+        ["accession", "master_ref_accession", "reference_accession", "aln_start", "aln_end", "cds_start", "cds_end", "cds_start_OG_seq", "cds_end_OG_seq", "product"],
     )
     write_tsv(
         aln,
@@ -343,7 +343,10 @@ def test_create_sqlite_db_preserves_projected_gff_feature_columns(tmp_path: Path
         'aln_end',
         'cds_start',
         'cds_end',
+        'cds_start_OG_seq',
+        'cds_end_OG_seq',
         'product',
+        'segment',
     ]
     assert rows == [
         ('EU781827', 'NC_004102', 'EU781827', '4', '9', 'NS3'),

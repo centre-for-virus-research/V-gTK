@@ -843,7 +843,6 @@ def format_mutation_integrity_result(result, show_n=25):
     return "\n".join(lines)
 
 
-<<<<<<< HEAD
 def format_feature_integrity_result(result, show_n=25):
     lines = [f"[{result['title']}]"]
     if result.get("skipped"):
@@ -871,12 +870,10 @@ def format_feature_integrity_result(result, show_n=25):
                 )
             )
     return "\n".join(lines)
-=======
 def get_extra_tree_label(tree_source):
     if tree_source == "usher":
         return "Non-centroid UShER leaves"
     return "Extra nodes in tree"
->>>>>>> fad6b34 (better file updating (still having some segment misnaming issue))
 
 
 def main(argv=None):

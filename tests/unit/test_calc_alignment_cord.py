@@ -64,8 +64,8 @@ def test_gap_helpers_and_cds_recalculation(tmp_path: Path):
     ]
     adjusted = processor.recalculate_cds_coordinates("Q_A", gaps, cds_list, start_offset=1)
     assert adjusted == [
-        {"start": 1, "end": 3, "product": "P1"},
-        {"start": 4, "end": 8, "product": "P2"},
+        {"start": 1, "end": 4, "og_start": 1, "og_end": 3, "product": "P1"},
+        {"start": 5, "end": 9, "og_start": 4, "og_end": 8, "product": "P2"},
     ]
 
 
@@ -128,7 +128,9 @@ def test_find_gaps_in_fasta_preserves_projected_product_identity(tmp_path: Path)
             "aln_start": "1",
             "aln_end": "9",
             "cds_start": "1",
-            "cds_end": "3",
+            "cds_end": "4",
+            "cds_start_OG_seq": "1",
+            "cds_end_OG_seq": "3",
             "product": "P1",
         },
         {
@@ -137,8 +139,10 @@ def test_find_gaps_in_fasta_preserves_projected_product_identity(tmp_path: Path)
             "reference_accession": "REF_A",
             "aln_start": "1",
             "aln_end": "9",
-            "cds_start": "4",
-            "cds_end": "8",
+            "cds_start": "5",
+            "cds_end": "9",
+            "cds_start_OG_seq": "4",
+            "cds_end_OG_seq": "8",
             "product": "P2",
         },
     ]
@@ -193,6 +197,8 @@ def test_find_gaps_in_fasta_skips_features_outside_partial_sequence_span(tmp_pat
             "aln_end": "3",
             "cds_start": "1",
             "cds_end": "3",
+            "cds_start_OG_seq": "1",
+            "cds_end_OG_seq": "3",
             "product": "P1",
         }
     ]

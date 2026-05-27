@@ -512,9 +512,59 @@ def find_reference_alignment_row(group_df, reference_id, master_candidates):
     return None, None
 
 
+def resolve_aligned_codon_indices(coord_map, cds_start, aa_pos):
+    try:
+        cds_start = int(cds_start)
+        aa_pos = int(aa_pos)
+    except (TypeError, ValueError):
+        return None
+
+    if cds_start < 1 or aa_pos < 1:
+        return None
+
+    nuc_start = cds_start + (aa_pos - 1) * 3
+    query_positions = [nuc_start + offset for offset in range(3)]
+    alignment_indices = []
+    for position in query_positions:
+        alignment_index = coord_map.get(position)
+        if alignment_index is None or alignment_index < 0:
+            return None
+        alignment_indices.append(alignment_index)
+    return tuple(alignment_indices)
+
+
+def extract_aligned_codon(alignment, alignment_indices):
+    alignment = str(alignment or '')
+    if not alignment_indices:
+        return None
+    if min(alignment_indices) < 0 or max(alignment_indices) >= len(alignment):
+        return None
+    codon = ''.join(alignment[index] for index in alignment_indices)
+    if len(codon) != 3:
+        return None
+    return codon
+
+
+def extract_feature_codon(alignment, coord_map, cds_start, aa_pos):
+    alignment_indices = resolve_aligned_codon_indices(coord_map, cds_start, aa_pos)
+    if alignment_indices is None:
+        return None
+    return extract_aligned_codon(alignment, alignment_indices)
+
+
+def get_query_feature_cds_start(feature_row):
+    if hasattr(feature_row, "get"):
+        value = feature_row.get("cds_start_OG_seq")
+        if value not in (None, ""):
+            return value
+        return feature_row.get("cds_start")
+    return None
+
+
 def annotate_from_feature_rows(catalog, features, aln_dict, has_segment):
     mutations_found = []
     diagnostics = Counter()
+    alignment_coord_maps = {}
 
     for _, row in catalog.iterrows():
         protein_name = row['_canonical_protein']
@@ -546,14 +596,13 @@ def annotate_from_feature_rows(catalog, features, aln_dict, has_segment):
                 diagnostics['alignment_missing_for_feature_accession'] += 1
                 continue
 
-            cds_start = int(feat['cds_start'])
-            nuc_idx = (cds_start - 1) + (aa_pos - 1) * 3
             aln = aln_dict[acc]
-            if nuc_idx + 3 > len(aln):
+            coord_map = alignment_coord_maps.setdefault(acc, build_alignment_coordinate_map(aln))
+            codon = extract_feature_codon(aln, coord_map, get_query_feature_cds_start(feat), aa_pos)
+            if codon is None:
                 diagnostics['codon_out_of_bounds'] += 1
                 continue
 
-            codon = aln[nuc_idx:nuc_idx+3]
             aa = translate_codon(codon)
             if aa == alt_residue:
                 mutations_found.append({
@@ -608,7 +657,11 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
 
     for reference_id in by_reference:
         try:
-            reference_candidates = master_candidates if master_candidates else [reference_id] + catalog_reference_hints
+            reference_candidates = []
+            for candidate in [reference_id] + master_candidates + catalog_reference_hints:
+                candidate = str(candidate or '').strip()
+                if candidate and candidate not in reference_candidates:
+                    reference_candidates.append(candidate)
             resolved_accession, feature_map, attempted, source = resolve_reference_feature_map(
                 reference_candidates[0] if reference_candidates else reference_id,
                 reference_candidates[1:],
@@ -658,18 +711,12 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
                 proteins_missing_from_reference[(reference_id, protein_name)] += 1
                 continue
 
-            gene_start = int(gene_entry['cds_start'])
-            query_nuc_positions = [gene_start + (aa_pos - 1) * 3 + offset for offset in range(3)]
-            alignment_indices = []
-            missing_positions = []
-            for position in query_nuc_positions:
-                alignment_index = resolved['aligned_reference_map'].get(position)
-                if alignment_index is None:
-                    missing_positions.append(position)
-                else:
-                    alignment_indices.append(alignment_index)
-
-            if missing_positions:
+            alignment_indices = resolve_aligned_codon_indices(
+                resolved['aligned_reference_map'],
+                gene_entry['cds_start'],
+                aa_pos,
+            )
+            if alignment_indices is None:
                 diagnostics['reference_coordinate_missing_in_alignment'] += 1
                 continue
 
@@ -700,10 +747,10 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
             alignment = seq_row['alignment']
             primary_accession = seq_row['sequence_id']
             for (protein_name, aa_pos, alignment_indices), alt_lookup in grouped_positions.items():
-                if max(alignment_indices) >= len(alignment):
+                codon = extract_aligned_codon(alignment, alignment_indices)
+                if codon is None:
                     diagnostics['codon_out_of_bounds'] += 1
                     continue
-                codon = ''.join(alignment[index] for index in alignment_indices)
                 aa = translate_codon(codon)
                 matched_rows = alt_lookup.get(aa, [])
                 if not matched_rows:
@@ -814,14 +861,6 @@ def main():
 
     print("Loading mutation catalog...")
     catalog = pd.read_csv(args.mutation_catalog, sep='\t', dtype=str)
-    
-    required_cols = ['protein_name', 'segment', 'aa_position', 'alt_residue', 
-                     'reference_accession', 'mutation_id', 'mutation_type', 
-                     'signature_id', 'signature_kind']
-    for col in REQUIRED_MUTATION_CATALOG_COLUMNS:
-        if col not in catalog.columns:
-            print(f"Error: Catalog missing required column '{col}'.", file=sys.stderr)
-            sys.exit(1)
 
     try:
         validate_required_catalog_columns(catalog)
