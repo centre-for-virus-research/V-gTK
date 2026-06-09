@@ -73,7 +73,7 @@ After cloning, the RABV-gDB-build directory will contain RABV-specific input fil
 Next, move the required files from RABV-gDB-build into the main V-gTK directory.
 ```shell
 mv RABV-gDB-build/generic .
-mv RABV-gDB-build/rabv_gDB-build.sh .
+mv RABV-gDB-build/rabv-gDB-build.sh .
 ```
 
 After this step, the main V-gTK directory should contain the generic directory and the rabv_gDB-build.sh script.
