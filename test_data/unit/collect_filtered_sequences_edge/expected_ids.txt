@@ -1,2 +1,1 @@
 SEQ_A
-SEQ_B

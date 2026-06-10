@@ -522,6 +522,44 @@ def test_download_test_run_fallbacks_to_empty_ids_on_error(tmp_path: Path, monke
     assert captured["ids"] == []
 
 
+def test_download_test_run_uses_configured_test_fetch_count(tmp_path: Path, monkeypatch):
+    fetcher = GenBankFetcher(
+        taxid="11292",
+        base_url="https://example/",
+        email="x@y.com",
+        output_dir=str(tmp_path),
+        batch_size=100,
+        sleep_time=0,
+        base_dir="GenBank-XML",
+        update_file=None,
+        test_run=True,
+        test_fetch_count=100,
+    )
+
+    requested_urls = []
+    sampled = {}
+    captured = {}
+
+    def fake_get(url):
+        requested_urls.append(url)
+        return _FakeResponse({"esearchresult": {"idlist": [f"ACC{i}" for i in range(150)]}})
+
+    def fake_sample(population, k):
+        sampled["population_size"] = len(population)
+        sampled["k"] = k
+        return list(population)[:k]
+
+    monkeypatch.setattr("GenBankFetcher.requests.get", fake_get)
+    monkeypatch.setattr(gb_module.random, "sample", fake_sample)
+    monkeypatch.setattr(fetcher, "save_data", lambda data, marker: captured.setdefault("markers", []).append(marker))
+
+    fetcher.download()
+
+    assert any("retmax=100" in url for url in requested_urls)
+    assert sampled == {"population_size": 150, "k": 100}
+    assert captured["markers"] == [10] * 10
+
+
 def test_update_does_not_fetch_refs_from_ref_list_in_db_backed_mode(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "prev_refs.db"
     _write_db(
@@ -659,6 +697,49 @@ def test_update_test_run_stops_after_first_100_missing_accessions(tmp_path: Path
     assert len(captured["ids"]) == 100
     assert captured["ids"][0] == "NEW0_0.1"
     assert captured["ids"][-1] == "NEW1_49.1"
+
+
+def test_update_test_run_respects_configured_test_fetch_count(tmp_path: Path, monkeypatch):
+    db_path = tmp_path / "prev_test_update.db"
+    _write_db(
+        db_path,
+        meta_col="accession_version",
+        meta_values=["OLD.1"],
+        excluded_values=[],
+    )
+
+    fetcher = GenBankFetcher(
+        taxid="11292",
+        base_url="https://example/",
+        email="x@y.com",
+        output_dir=str(tmp_path),
+        batch_size=50,
+        sleep_time=0,
+        base_dir="GenBank-XML",
+        update_file=str(db_path),
+        test_run=True,
+        test_fetch_count=25,
+    )
+
+    pages_seen = []
+
+    def fake_iter_accs():
+        for page_idx in range(2):
+            page = [f"NEW{page_idx}_{i}.1" for i in range(50)]
+            pages_seen.append(page_idx)
+            yield page
+
+    monkeypatch.setattr(fetcher, "iter_accs", fake_iter_accs)
+
+    captured = {}
+    monkeypatch.setattr(fetcher, "fetch_genbank_data", lambda ids: captured.setdefault("ids", ids))
+
+    fetcher.update(str(db_path))
+
+    assert pages_seen == [0]
+    assert len(captured["ids"]) == 25
+    assert captured["ids"][0] == "NEW0_0.1"
+    assert captured["ids"][-1] == "NEW0_24.1"
 
 
 def test_fetch_genbank_data_does_not_test_sample_when_update_mode(tmp_path: Path, monkeypatch):

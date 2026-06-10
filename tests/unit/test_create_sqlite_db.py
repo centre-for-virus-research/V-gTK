@@ -1,4 +1,5 @@
 import sqlite3
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -195,6 +196,146 @@ def test_create_sqlite_db_uses_filtered_details_reason(tmp_path: Path):
     assert tree_count == 0
 
 
+def test_create_sqlite_db_summary_collapses_per_sequence_alignment_errors(tmp_path: Path):
+    meta = tmp_path / "meta.tsv"
+    features = tmp_path / "features.tsv"
+    aln = tmp_path / "sequence_alignment.tsv"
+    gene = tmp_path / "gene.tsv"
+    m49_country = tmp_path / "m49_country.csv"
+    m49_inter = tmp_path / "m49_inter.csv"
+    m49_region = tmp_path / "m49_region.csv"
+    m49_sub = tmp_path / "m49_sub.csv"
+    proj = tmp_path / "software.tsv"
+    insertions = tmp_path / "insertions.tsv"
+    host_taxa = tmp_path / "host.tsv"
+    fasta = tmp_path / "seqs.fa"
+    filtered_ids = tmp_path / "filtered_ids.txt"
+    filtered_details = tmp_path / "filtered_sequences.tsv"
+
+    write_tsv(meta, [["Q1", ""], ["Q2", ""]], ["primary_accession", "exclusion"])
+    write_tsv(features, [["Q1", "P"]], ["primary_accession", "feature"])
+    write_tsv(aln, [["Q1", "ATGC"]], ["primary_accession", "aligned_seq"])
+    write_tsv(gene, [["geneA", "Gene A"]], ["name", "description"])
+    write_csv(m49_country, [["001", "World"]], ["m49_code", "name"])
+    write_csv(m49_inter, [["X", "Inter"]], ["code", "name"])
+    write_csv(m49_region, [["Y", "Region"]], ["code", "name"])
+    write_csv(m49_sub, [["Z", "SubRegion"]], ["code", "name"])
+    write_tsv(proj, [["Python", "3.11"]], ["Software", "Version"])
+    write_tsv(insertions, [["Q1", "none"]], ["primary_accession", "insertions"])
+    write_tsv(host_taxa, [["Q1", "host1"]], ["primary_accession", "host"])
+    fasta.write_text(">Q1\nATGC\n>Q2\nATGA\n", encoding="utf-8")
+
+    filtered_ids.write_text("Q1\nQ2\n", encoding="utf-8")
+    write_tsv(
+        filtered_details,
+        [
+            ["Q1", "REF1", "In sequence #30 'Q1': Unable to align: not enough matches. Details: number of seed matches: 0.", ""],
+            ["Q2", "REF1", "In sequence #42 'Q2': Unable to align: not enough matches. Details: number of seed matches: 0.", ""],
+        ],
+        ["seq_name", "reference", "error", "warnings"],
+    )
+
+    db = CreateSqliteDB(
+        meta_data=str(meta),
+        features=str(features),
+        pad_aln=str(aln),
+        gene_info=str(gene),
+        m49_countries=str(m49_country),
+        m49_interm_region=str(m49_inter),
+        m49_regions=str(m49_region),
+        m49_sub_regions=str(m49_sub),
+        proj_settings=str(proj),
+        fasta_sequence_file=str(fasta),
+        insertions=str(insertions),
+        host_taxa_file=str(host_taxa),
+        base_dir=str(tmp_path),
+        output_dir="SqliteDB",
+        db_name="testdb_summary",
+        db_status="new db",
+        filtered_ids_file=str(filtered_ids),
+        filtered_details_file=str(filtered_details),
+    )
+    db.create_db()
+
+    summary = (tmp_path / "SqliteDB" / "db_summary.txt").read_text(encoding="utf-8")
+    assert "alignment_filtering: Unable to align: not enough matches. Details: number of seed matches: 0." in summary
+    assert "alignment_filtering                           |" not in summary
+    assert "  - 2    : alignment_filtering: Unable to align: not enough matches. Details: number of seed matches: 0." in summary
+    assert "In sequence #30 'Q1'" not in summary
+    assert "In sequence #42 'Q2'" not in summary
+
+
+def test_create_sqlite_db_preserves_host_taxa_for_excluded_metadata(tmp_path: Path):
+    meta = tmp_path / "meta.tsv"
+    features = tmp_path / "features.tsv"
+    aln = tmp_path / "sequence_alignment.tsv"
+    gene = tmp_path / "gene.tsv"
+    m49_country = tmp_path / "m49_country.csv"
+    m49_inter = tmp_path / "m49_inter.csv"
+    m49_region = tmp_path / "m49_region.csv"
+    m49_sub = tmp_path / "m49_sub.csv"
+    proj = tmp_path / "software.tsv"
+    insertions = tmp_path / "insertions.tsv"
+    host_taxa = tmp_path / "host.tsv"
+    fasta = tmp_path / "seqs.fa"
+
+    write_tsv(
+        meta,
+        [
+            ["A", "", "9606"],
+            ["B", "manual exclusion reason", "9796"],
+        ],
+        ["primary_accession", "exclusion", "host_taxa_id"],
+    )
+    write_tsv(features, [["A", "P"]], ["primary_accession", "feature"])
+    write_tsv(aln, [["A", "ATGC"]], ["primary_accession", "aligned_seq"])
+    write_tsv(gene, [["geneA", "Gene A"]], ["name", "description"])
+    write_csv(m49_country, [["001", "World"]], ["m49_code", "name"])
+    write_csv(m49_inter, [["X", "Inter"]], ["code", "name"])
+    write_csv(m49_region, [["Y", "Region"]], ["code", "name"])
+    write_csv(m49_sub, [["Z", "SubRegion"]], ["code", "name"])
+    write_tsv(proj, [["Python", "3.11"]], ["Software", "Version"])
+    write_tsv(insertions, [["A", "none"]], ["primary_accession", "insertions"])
+    write_tsv(
+        host_taxa,
+        [["9606", "human", "generic", "species"], ["9796", "horse", "generic", "species"]],
+        ["taxa_id", "name", "name_type", "taxonomy_level"],
+    )
+    fasta.write_text(">A\nATGC\n>B\nATGA\n", encoding="utf-8")
+
+    db = CreateSqliteDB(
+        meta_data=str(meta),
+        features=str(features),
+        pad_aln=str(aln),
+        gene_info=str(gene),
+        m49_countries=str(m49_country),
+        m49_interm_region=str(m49_inter),
+        m49_regions=str(m49_region),
+        m49_sub_regions=str(m49_sub),
+        proj_settings=str(proj),
+        fasta_sequence_file=str(fasta),
+        insertions=str(insertions),
+        host_taxa_file=str(host_taxa),
+        base_dir=str(tmp_path),
+        output_dir="SqliteDB",
+        db_name="testdb_host_taxa",
+        db_status="updated",
+        tree_file=None,
+        iqtree_file=None,
+        usher_tree=None,
+    )
+
+    db.create_db()
+
+    conn = sqlite3.connect(tmp_path / "SqliteDB" / "testdb_host_taxa.db")
+    cur = conn.cursor()
+    cur.execute("SELECT taxa_id FROM host_taxa ORDER BY taxa_id")
+    rows = cur.fetchall()
+    conn.close()
+
+    assert rows == [("9606",), ("9796",)]
+
+
 def test_create_sqlite_db_maps_tree_manifest_segment_from_refset_key(tmp_path: Path):
     meta = tmp_path / "meta.tsv"
     features = tmp_path / "features.tsv"
@@ -259,6 +400,343 @@ def test_create_sqlite_db_maps_tree_manifest_segment_from_refset_key(tmp_path: P
     conn.close()
 
     assert row == ("usher", "refset_1_aln_merged_MSA", "1")
+
+
+def test_create_sqlite_db_preserves_multi_segment_rows_and_tree_segments(tmp_path: Path):
+    meta = tmp_path / "meta.tsv"
+    features = tmp_path / "features.tsv"
+    aln = tmp_path / "sequence_alignment.tsv"
+    gene = tmp_path / "gene.tsv"
+    m49_country = tmp_path / "m49_country.csv"
+    m49_inter = tmp_path / "m49_inter.csv"
+    m49_region = tmp_path / "m49_region.csv"
+    m49_sub = tmp_path / "m49_sub.csv"
+    proj = tmp_path / "software.tsv"
+    insertions = tmp_path / "insertions.tsv"
+    host_taxa = tmp_path / "host.tsv"
+    fasta = tmp_path / "seqs.fa"
+    tree_manifest = tmp_path / "tree_manifest.tsv"
+    seg1_tree = tmp_path / "seg1.treefile"
+    seg2_tree = tmp_path / "seg2.treefile"
+
+    write_tsv(
+        meta,
+        [
+            ["MASTER1", "master", "1"],
+            ["MASTER2", "master", "2"],
+            ["Q_SEG1", "query", "1"],
+            ["Q_SEG2", "query", "2"],
+        ],
+        ["primary_accession", "accession_type", "segment"],
+    )
+    write_tsv(
+        features,
+        [
+            ["MASTER1", "MASTER1", "MASTER1", "1", "4", "1", "4", "1", "4", "P1", "1"],
+            ["MASTER2", "MASTER2", "MASTER2", "1", "4", "1", "4", "1", "4", "P2", "2"],
+            ["Q_SEG1", "MASTER1", "MASTER1", "1", "4", "1", "4", "1", "4", "P1", "1"],
+            ["Q_SEG2", "MASTER2", "MASTER2", "1", "4", "1", "4", "1", "4", "P2", "2"],
+        ],
+        [
+            "accession",
+            "master_ref_accession",
+            "reference_accession",
+            "aln_start",
+            "aln_end",
+            "cds_start",
+            "cds_end",
+            "cds_start_OG_seq",
+            "cds_end_OG_seq",
+            "product",
+            "segment",
+        ],
+    )
+    write_tsv(
+        aln,
+        [
+            ["MASTER1", "MASTER1", "ATGC", "1"],
+            ["MASTER2", "MASTER2", "ATGC", "2"],
+            ["Q_SEG1", "MASTER1", "AT-T", "1"],
+            ["Q_SEG2", "MASTER2", "A-GC", "2"],
+        ],
+        ["primary_accession", "alignment_name", "alignment", "segment"],
+    )
+    write_tsv(gene, [["geneA", "Gene A"]], ["name", "description"])
+    write_csv(m49_country, [["001", "World"]], ["m49_code", "name"])
+    write_csv(m49_inter, [["X", "Inter"]], ["code", "name"])
+    write_csv(m49_region, [["Y", "Region"]], ["code", "name"])
+    write_csv(m49_sub, [["Z", "SubRegion"]], ["code", "name"])
+    write_tsv(proj, [["Python", "3.11"]], ["Software", "Version"])
+    write_tsv(
+        insertions,
+        [["Q_SEG1", "MASTER1", "ins:2:A", "1"], ["Q_SEG2", "MASTER2", "ins:3:T", "2"]],
+        ["primary_accession", "reference", "insertion", "segment"],
+    )
+    write_tsv(host_taxa, [["MASTER1", "host1"], ["MASTER2", "host2"]], ["primary_accession", "host"])
+    fasta.write_text(
+        ">MASTER1\nATGC\n>MASTER2\nATGC\n>Q_SEG1\nATTT\n>Q_SEG2\nAGGC\n",
+        encoding="utf-8",
+    )
+
+    seg1_tree.write_text("(MASTER1:0.1,Q_SEG1:0.2);\n", encoding="utf-8")
+    seg2_tree.write_text("(MASTER2:0.1,Q_SEG2:0.2);\n", encoding="utf-8")
+    write_tsv(
+        tree_manifest,
+        [
+            ["usher", "usher_refset_1", "refset_1_aln_merged_MSA", str(seg1_tree)],
+            ["usher", "usher_refset_2", "refset_2_aln_merged_MSA", str(seg2_tree)],
+        ],
+        ["source", "name", "segment_key", "path"],
+    )
+
+    db = CreateSqliteDB(
+        meta_data=str(meta),
+        features=str(features),
+        pad_aln=str(aln),
+        gene_info=str(gene),
+        m49_countries=str(m49_country),
+        m49_interm_region=str(m49_inter),
+        m49_regions=str(m49_region),
+        m49_sub_regions=str(m49_sub),
+        proj_settings=str(proj),
+        fasta_sequence_file=str(fasta),
+        insertions=str(insertions),
+        host_taxa_file=str(host_taxa),
+        base_dir=str(tmp_path),
+        output_dir="SqliteDB",
+        db_name="testdb_segmented_rows",
+        db_status="new db",
+        tree_manifest=str(tree_manifest),
+    )
+    db.create_db()
+
+    conn = sqlite3.connect(tmp_path / "SqliteDB" / "testdb_segmented_rows.db")
+    cur = conn.cursor()
+    cur.execute("SELECT primary_accession, segment FROM meta_data WHERE accession_type='query' ORDER BY primary_accession")
+    meta_rows = cur.fetchall()
+    cur.execute("SELECT primary_accession, segment FROM sequence_alignment WHERE primary_accession LIKE 'Q_%' ORDER BY primary_accession")
+    aln_rows = cur.fetchall()
+    cur.execute("SELECT accession, segment FROM features WHERE accession LIKE 'Q_%' ORDER BY accession")
+    feature_rows = cur.fetchall()
+    cur.execute("SELECT segment_key, segment FROM trees ORDER BY segment_key")
+    tree_rows = cur.fetchall()
+    conn.close()
+
+    assert meta_rows == [("Q_SEG1", "1"), ("Q_SEG2", "2")]
+    assert aln_rows == [("Q_SEG1", "1"), ("Q_SEG2", "2")]
+    assert feature_rows == [("Q_SEG1", "1"), ("Q_SEG2", "2")]
+    assert tree_rows == [("refset_1_aln_merged_MSA", "1"), ("refset_2_aln_merged_MSA", "2")]
+
+
+def test_create_sqlite_db_preserves_segmented_rows_across_tables(tmp_path: Path):
+    meta = tmp_path / "meta.tsv"
+    features = tmp_path / "features.tsv"
+    aln = tmp_path / "sequence_alignment.tsv"
+    gene = tmp_path / "gene.tsv"
+    m49_country = tmp_path / "m49_country.csv"
+    m49_inter = tmp_path / "m49_inter.csv"
+    m49_region = tmp_path / "m49_region.csv"
+    m49_sub = tmp_path / "m49_sub.csv"
+    proj = tmp_path / "software.tsv"
+    insertions = tmp_path / "insertions.tsv"
+    host_taxa = tmp_path / "host.tsv"
+    fasta = tmp_path / "seqs.fa"
+    tree_manifest = tmp_path / "tree_manifest.tsv"
+    usher_seg1 = tmp_path / "usher_seg1.tree"
+    usher_seg2 = tmp_path / "usher_seg2.tree"
+
+    write_tsv(
+        meta,
+        [
+            ["MASTER1", "master", "1", ""],
+            ["MASTER2", "master", "2", ""],
+            ["Q1", "query", "1", ""],
+            ["Q2", "query", "2", ""],
+        ],
+        ["primary_accession", "accession_type", "segment", "exclusion"],
+    )
+    write_tsv(
+        features,
+        [
+            ["MASTER1", "MASTER1", "MASTER1", "1", "4", "1", "4", "1", "4", "P1", "1"],
+            ["MASTER2", "MASTER2", "MASTER2", "1", "4", "1", "4", "1", "4", "P2", "2"],
+            ["Q1", "MASTER1", "MASTER1", "1", "4", "1", "4", "1", "4", "P1", "1"],
+            ["Q2", "MASTER2", "MASTER2", "1", "4", "1", "4", "1", "4", "P2", "2"],
+        ],
+        [
+            "accession",
+            "master_ref_accession",
+            "reference_accession",
+            "aln_start",
+            "aln_end",
+            "cds_start",
+            "cds_end",
+            "cds_start_OG_seq",
+            "cds_end_OG_seq",
+            "product",
+            "segment",
+        ],
+    )
+    write_tsv(
+        aln,
+        [
+            ["MASTER1", "MASTER1", "ATGC", "1"],
+            ["MASTER2", "MASTER2", "ATGA", "2"],
+            ["Q1", "MASTER1", "AT-T", "1"],
+            ["Q2", "MASTER2", "A-GA", "2"],
+        ],
+        ["primary_accession", "alignment_name", "alignment", "segment"],
+    )
+    write_tsv(gene, [["geneA", "Gene A"]], ["name", "description"])
+    write_csv(m49_country, [["001", "World"]], ["m49_code", "name"])
+    write_csv(m49_inter, [["X", "Inter"]], ["code", "name"])
+    write_csv(m49_region, [["Y", "Region"]], ["code", "name"])
+    write_csv(m49_sub, [["Z", "SubRegion"]], ["code", "name"])
+    write_tsv(proj, [["Python", "3.11"]], ["Software", "Version"])
+    write_tsv(
+        insertions,
+        [["Q1", "MASTER1", "ins:2:T", "1"], ["Q2", "MASTER2", "ins:3:G", "2"]],
+        ["primary_accession", "reference", "insertion", "segment"],
+    )
+    write_tsv(host_taxa, [["MASTER1", "host1"], ["MASTER2", "host2"]], ["primary_accession", "host"])
+    fasta.write_text(
+        ">MASTER1\nATGC\n"
+        ">MASTER2\nATGA\n"
+        ">Q1\nATTT\n"
+        ">Q2\nAGGA\n",
+        encoding="utf-8",
+    )
+
+    usher_seg1.write_text("(MASTER1:0.1,Q1:0.2);\n", encoding="utf-8")
+    usher_seg2.write_text("(MASTER2:0.1,Q2:0.2);\n", encoding="utf-8")
+    write_tsv(
+        tree_manifest,
+        [
+            ["usher", "usher_refset_1", "refset_1_aln_merged_MSA", str(usher_seg1)],
+            ["usher", "usher_refset_2", "refset_2_aln_merged_MSA", str(usher_seg2)],
+        ],
+        ["source", "name", "segment_key", "path"],
+    )
+
+    db = CreateSqliteDB(
+        meta_data=str(meta),
+        features=str(features),
+        pad_aln=str(aln),
+        gene_info=str(gene),
+        m49_countries=str(m49_country),
+        m49_interm_region=str(m49_inter),
+        m49_regions=str(m49_region),
+        m49_sub_regions=str(m49_sub),
+        proj_settings=str(proj),
+        fasta_sequence_file=str(fasta),
+        insertions=str(insertions),
+        host_taxa_file=str(host_taxa),
+        base_dir=str(tmp_path),
+        output_dir="SqliteDB",
+        db_name="testdb_segmented_tables",
+        db_status="new db",
+        tree_manifest=str(tree_manifest),
+    )
+
+    db.create_db()
+
+    conn = sqlite3.connect(tmp_path / "SqliteDB" / "testdb_segmented_tables.db")
+    cur = conn.cursor()
+    cur.execute("SELECT primary_accession, segment FROM meta_data ORDER BY primary_accession")
+    meta_rows = cur.fetchall()
+    cur.execute("SELECT primary_accession, segment FROM sequence_alignment ORDER BY primary_accession")
+    aln_rows = cur.fetchall()
+    cur.execute("SELECT accession, segment FROM features ORDER BY accession")
+    feature_rows = cur.fetchall()
+    cur.execute("SELECT primary_accession, segment FROM insertions ORDER BY primary_accession")
+    insertion_rows = cur.fetchall()
+    cur.execute("SELECT name, segment_key, segment FROM trees ORDER BY segment")
+    tree_rows = cur.fetchall()
+    conn.close()
+
+    assert meta_rows == [("MASTER1", "1"), ("MASTER2", "2"), ("Q1", "1"), ("Q2", "2")]
+    assert aln_rows == [("MASTER1", "1"), ("MASTER2", "2"), ("Q1", "1"), ("Q2", "2")]
+    assert feature_rows == [("MASTER1", "1"), ("MASTER2", "2"), ("Q1", "1"), ("Q2", "2")]
+    assert insertion_rows == [("Q1", "1"), ("Q2", "2")]
+    assert tree_rows == [
+        ("usher_refset_1", "refset_1_aln_merged_MSA", "1"),
+        ("usher_refset_2", "refset_2_aln_merged_MSA", "2"),
+    ]
+
+
+def test_create_sqlite_db_summary_reports_segment_inclusion_exclusion_counts(tmp_path: Path):
+    meta = tmp_path / "meta.tsv"
+    features = tmp_path / "features.tsv"
+    aln = tmp_path / "sequence_alignment.tsv"
+    gene = tmp_path / "gene.tsv"
+    m49_country = tmp_path / "m49_country.csv"
+    m49_inter = tmp_path / "m49_inter.csv"
+    m49_region = tmp_path / "m49_region.csv"
+    m49_sub = tmp_path / "m49_sub.csv"
+    proj = tmp_path / "software.tsv"
+    insertions = tmp_path / "insertions.tsv"
+    host_taxa = tmp_path / "host.tsv"
+    fasta = tmp_path / "seqs.fa"
+
+    write_tsv(
+        meta,
+        [
+            ["REF_SEG1", "", "1", "reference"],
+            ["REF_SEG2", "", "2", "reference"],
+            ["Q_SEG1_OK", "", "1", "query"],
+            ["Q_SEG1_EX", "manual exclusion reason", "1", "query"],
+            ["Q_SEG2_OK", "", "2", "query"],
+            ["Q_SEG2_EX", "manual exclusion reason", "2", "query"],
+        ],
+        ["primary_accession", "exclusion", "segment", "accession_type"],
+    )
+    write_tsv(features, [["Q_SEG1_OK", "P1", "1"], ["Q_SEG2_OK", "P2", "2"]], ["primary_accession", "feature", "segment"])
+    write_tsv(aln, [["Q_SEG1_OK", "ATGC", "1"], ["Q_SEG2_OK", "ATGC", "2"]], ["primary_accession", "aligned_seq", "segment"])
+    write_tsv(gene, [["geneA", "Gene A"]], ["name", "description"])
+    write_csv(m49_country, [["001", "World"]], ["m49_code", "name"])
+    write_csv(m49_inter, [["X", "Inter"]], ["code", "name"])
+    write_csv(m49_region, [["Y", "Region"]], ["code", "name"])
+    write_csv(m49_sub, [["Z", "SubRegion"]], ["code", "name"])
+    write_tsv(proj, [["Python", "3.11"]], ["Software", "Version"])
+    write_tsv(insertions, [["Q_SEG1_OK", "none", "1"], ["Q_SEG2_OK", "none", "2"]], ["primary_accession", "insertions", "segment"])
+    write_tsv(host_taxa, [["Q_SEG1_OK", "host1"]], ["primary_accession", "host"])
+    fasta.write_text(
+        ">REF_SEG1\nATGC\n"
+        ">REF_SEG2\nATGC\n"
+        ">Q_SEG1_OK\nATGC\n"
+        ">Q_SEG1_EX\nATGC\n"
+        ">Q_SEG2_OK\nATGC\n"
+        ">Q_SEG2_EX\nATGC\n",
+        encoding="utf-8",
+    )
+
+    db = CreateSqliteDB(
+        meta_data=str(meta),
+        features=str(features),
+        pad_aln=str(aln),
+        gene_info=str(gene),
+        m49_countries=str(m49_country),
+        m49_interm_region=str(m49_inter),
+        m49_regions=str(m49_region),
+        m49_sub_regions=str(m49_sub),
+        proj_settings=str(proj),
+        fasta_sequence_file=str(fasta),
+        insertions=str(insertions),
+        host_taxa_file=str(host_taxa),
+        base_dir=str(tmp_path),
+        output_dir="SqliteDB",
+        db_name="testdb_segment_summary",
+        db_status="new db",
+    )
+    db.create_db()
+
+    summary = (tmp_path / "SqliteDB" / "db_summary.txt").read_text(encoding="utf-8")
+    assert "[CreateSqliteDB] Query Sequences by Segment (passed/failed QC):" in summary
+    assert "Query sequences passing QC" in summary
+
+    segment_block = summary.split("[CreateSqliteDB] Query Sequences by Segment (passed/failed QC):", 1)[1]
+    assert re.search(r"(?m)^1\s*\|\s*1\s*\|\s*1\s*$", segment_block)
+    assert re.search(r"(?m)^2\s*\|\s*1\s*\|\s*1\s*$", segment_block)
 
 
 def test_create_sqlite_db_preserves_projected_gff_feature_columns(tmp_path: Path):

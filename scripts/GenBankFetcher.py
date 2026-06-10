@@ -34,7 +34,7 @@ except ModuleNotFoundError:
 	requests = _RequestsFallback()
 
 class GenBankFetcher:
-	def __init__(self, taxid, base_url, email, output_dir, batch_size, sleep_time, base_dir, update_file, test_run=False, ref_list=None):
+	def __init__(self, taxid, base_url, email, output_dir, batch_size, sleep_time, base_dir, update_file, test_run=False, ref_list=None, test_fetch_count=100):
 		self.taxid = taxid
 		self.base_url = base_url
 		self.email = email
@@ -46,6 +46,7 @@ class GenBankFetcher:
 		self.update_file = update_file
 		self.test_run = test_run
 		self.ref_list = ref_list
+		self.test_fetch_count = test_fetch_count
 		self.update_log = "update_accessions.tsv"
 		
 		# Ensure output directories exist immediately
@@ -240,7 +241,7 @@ class GenBankFetcher:
 		# Use a separate internal batch size just for efetch
 		batch_n = self.efetch_batch_size
 		if self.test_run and not self.update_file:
-			ids = random.sample(ids, k=min(50, len(ids)))
+			ids = random.sample(ids, k=min(self.test_fetch_count, len(ids)))
 			batch_n=10
 
 		if self.ref_list and not self.update_file:
@@ -312,7 +313,7 @@ class GenBankFetcher:
 				search_url = (
 					f"{self.base_url}esearch.fcgi?db=nucleotide"
 					f"&term=txid{self.taxid}[Organism:exp]"
-					f"&retmax=50&idtype=acc"
+					f"&retmax={self.test_fetch_count}&idtype=acc"
 					f"&usehistory=y&email={self.email}&retmode=json"
 				)
 				response = requests.get(search_url)
@@ -485,7 +486,7 @@ class GenBankFetcher:
 			updated_versions = []
 			new_accessions = []
 			missing_ids = []
-			limit = 100
+			limit = self.test_fetch_count
 			for page in self.iter_accs():
 				ids.extend(page)
 				page_missing, page_updates, page_new = self._compute_missing_ids(page, meta_accessions, excluded_primary)
@@ -516,10 +517,10 @@ class GenBankFetcher:
 
 		if self.test_run and missing_ids:
 			if new_accessions:
-				missing_ids = list(dict.fromkeys(new_accessions))[:100]
+				missing_ids = list(dict.fromkeys(new_accessions))[:self.test_fetch_count]
 				print(f"[update][test_run] selected {len(missing_ids)} brand-new accessions not present in DB")
 			else:
-				missing_ids = list(dict.fromkeys(missing_ids))[:100]
+				missing_ids = list(dict.fromkeys(missing_ids))[:self.test_fetch_count]
 				print(f"[update][test_run] no brand-new accessions found; selected {len(missing_ids)} update candidates")
 
 		self._write_update_log(updated_versions, new_accessions)
@@ -545,6 +546,7 @@ if __name__ == "__main__":
 	parser.add_argument('-s', '--sleep_time', help='Delay after each set of information fetch', default=2, type=int)
 	parser.add_argument('-d', '--base_dir', help='Directory where all the XML files are stored', default='GenBank-XML')
 	parser.add_argument("--test_run", action="store_true", help="Run a test fetching only a few records for quick testing")
+	parser.add_argument('--test_fetch_count', default=100, type=int, help='Number of accessions to fetch in test mode (default: 100)')
 	parser.add_argument('--ref_list', help='Reference accession list for test run', default=None)
 	args = parser.parse_args()
 
@@ -558,7 +560,8 @@ if __name__ == "__main__":
 		base_dir = args.base_dir,
 		update_file = args.update,
 		test_run = args.test_run,
-		ref_list = args.ref_list
+		ref_list = args.ref_list,
+		test_fetch_count = args.test_fetch_count
 	)
 	fetcher.update_log = args.update_log
 

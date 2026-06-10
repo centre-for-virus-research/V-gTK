@@ -19,12 +19,16 @@ def _read_matrix(path: Path):
 
 def test_update_gb_matrix_marks_failed_accessions(tmp_path: Path):
     matrix = tmp_path / "gB_matrix_raw.tsv"
-    _write_matrix(matrix)
+    with matrix.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f, delimiter="\t")
+        writer.writerow(["gi_number", "accession_type", "exclusion_status", "exclusion_criteria"])
+        writer.writerow(["ACC_OK", "query", "0", ""])
+        writer.writerow(["ACC_FAIL", "query", "0", ""])
 
     aln_dir = tmp_path / "Nextalign" / "query_aln" / "REF1"
     aln_dir.mkdir(parents=True, exist_ok=True)
     (aln_dir / "REF1.errors.csv").write_text(
-        "ACC_FAIL,In sequence ACC_FAIL failed due to X\n",
+        'seqName,errors,warnings\nACC_FAIL,"In sequence #2 ''ACC_FAIL'': Unable to align, not enough matches.",\n',
         encoding="utf-8",
     )
 
@@ -44,8 +48,54 @@ def test_update_gb_matrix_marks_failed_accessions(tmp_path: Path):
 
     rows = {r["gi_number"]: r for r in _read_matrix(matrix)}
     assert rows["ACC_FAIL"]["exclusion_status"] == "1"
-    assert "In sequence" in rows["ACC_FAIL"]["exclusion_criteria"]
+    assert rows["ACC_FAIL"]["exclusion_criteria"] == "In sequence #2 ACC_FAIL: Unable to align, not enough matches."
     assert rows["ACC_OK"]["exclusion_status"] == "0"
+
+
+def test_update_gb_matrix_ignores_reference_alignment_errors(tmp_path: Path):
+    matrix = tmp_path / "gB_matrix_raw.tsv"
+    with matrix.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f, delimiter="\t")
+        writer.writerow(["gi_number", "accession_type", "exclusion_status", "exclusion_criteria"])
+        writer.writerow(["REF_FAIL", "reference", "0", ""])
+        writer.writerow(["Q_FAIL", "query", "0", ""])
+
+    query_dir = tmp_path / "Nextalign" / "query_aln" / "REF1"
+    query_dir.mkdir(parents=True, exist_ok=True)
+    (query_dir / "REF1.errors.csv").write_text(
+        "seqName,errors,warnings\nQ_FAIL,query failure,\n",
+        encoding="utf-8",
+    )
+
+    ref_dir = tmp_path / "Nextalign" / "reference_aln" / "MASTER1"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    (ref_dir / "MASTER1.errors.csv").write_text(
+        "seqName,errors,warnings\nREF_FAIL,reference failure,\n",
+        encoding="utf-8",
+    )
+
+    processor = NextalignAlignment(
+        gb_matrix=str(matrix),
+        query_dir=str(tmp_path / "query"),
+        ref_dir=str(tmp_path / "ref"),
+        ref_fa_file=str(tmp_path / "ref.fa"),
+        master_seq_dir=str(tmp_path / "master"),
+        tmp_dir=str(tmp_path),
+        master_ref="MASTER1",
+        nextalign_dir="Nextalign",
+        reference_alignment=None,
+    )
+
+    processor.update_gb_matrix(
+        [str(tmp_path / "Nextalign" / "query_aln"), str(tmp_path / "Nextalign" / "reference_aln")],
+        str(matrix),
+    )
+
+    rows = {r["gi_number"]: r for r in _read_matrix(matrix)}
+    assert rows["Q_FAIL"]["exclusion_status"] == "1"
+    assert rows["Q_FAIL"]["exclusion_criteria"] == "query failure"
+    assert rows["REF_FAIL"]["exclusion_status"] == "0"
+    assert rows["REF_FAIL"]["exclusion_criteria"] == ""
 
 
 def test_process_reference_alignment_mode_runs_query_only(tmp_path: Path, monkeypatch):

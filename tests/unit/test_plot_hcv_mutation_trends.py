@@ -548,6 +548,25 @@ def test_plot_target_mutation_proportions_handles_empty_and_nonempty_frames():
     assert getattr(ax, "axison")
     assert ax.get_ylabel() == "Mutation frequency"
     assert ax.get_legend() is not None
+    assert ax.get_ylim()[1] < 1.0
+    assert len(ax.collections) == 2
+    assert len(ax.lines) == 2
+    first_point_rgba = ax.collections[0].get_facecolors()[0]
+    first_line_rgba = ax.lines[0].get_color()
+    assert tuple(first_point_rgba[:3]) == tuple(first_line_rgba[:3])
+    assert first_point_rgba[3] == pytest.approx(0.95)
+    plt.close(figure)
+
+    figure, ax = plt.subplots()
+    PlotHcvMutationTrends._plot_target_mutation_proportions(
+        ax,
+        target_df,
+        "NS5A Y93H frequency by year",
+        log_scale=True,
+    )
+    assert getattr(ax, "axison")
+    assert ax.get_yscale() == "log"
+    assert ax.get_ylabel() == "Mutation frequency (log scale)"
     plt.close(figure)
 
 

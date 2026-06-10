@@ -71,6 +71,10 @@ def _truncate(text: str, limit: int = 140) -> str:
 FALSE_EXCLUSION_VALUES = {"", "0", "false", "no", "na", "none", "nan"}
 
 
+def _is_reference_like(value: object) -> bool:
+    return str(value or "").strip().lower() in {"reference", "master", "exclusion_list"}
+
+
 def _is_excluded_status(value: object) -> bool:
     return str(value or "").strip().lower() not in FALSE_EXCLUSION_VALUES
 
@@ -218,17 +222,33 @@ def db_checks(db_path: str, segmented: bool) -> Tuple[List[str], List[str]]:
     )
     excluded_other = excluded_rows - excluded_unprojectable - excluded_not_enough_matches
 
-    meta_select = "primary_accession, segment" if segmented else "primary_accession"
+    meta_cols = _table_columns(cur, "meta_data")
+    meta_select_cols = ["primary_accession"]
+    if segmented:
+        meta_select_cols.append("segment")
+    if "accession_type" in meta_cols:
+        meta_select_cols.append("accession_type")
+    meta_select = ", ".join(meta_select_cols)
     cur.execute(
         f"SELECT {meta_select} FROM meta_data WHERE primary_accession IS NOT NULL AND TRIM(primary_accession) <> '' ORDER BY primary_accession"
     )
     meta_accession_rows = cur.fetchall()
     excluded_accessions = {accession for accession, _ in excluded_row_data}
-    accepted_accessions = {
-        str(row[0]).strip()
-        for row in meta_accession_rows
-        if row and str(row[0]).strip() and str(row[0]).strip() not in excluded_accessions
-    }
+    accepted_accessions = set()
+    for row in meta_accession_rows:
+        if not row:
+            continue
+        accession = str(row[0] or "").strip()
+        if not accession or accession in excluded_accessions:
+            continue
+        acc_type = ""
+        if segmented and len(row) > 2:
+            acc_type = str(row[2] or "").strip()
+        elif not segmented and len(row) > 1:
+            acc_type = str(row[1] or "").strip()
+        if _is_reference_like(acc_type):
+            continue
+        accepted_accessions.add(accession)
     cur.execute(
         "SELECT DISTINCT sequence_id FROM sequence_alignment WHERE sequence_id IS NOT NULL AND TRIM(sequence_id) <> ''"
     )

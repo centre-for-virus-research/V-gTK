@@ -412,7 +412,7 @@ process GENBANK_PARSER{
         
         echo "DEBUG: Final extra args: ${extra}"
         
-        python !{scripts_dir}/GenBankParser.py -r !{ref_list_path} -d !{gen_bank_XML} -o . -b . ${extra} \
+            python !{scripts_dir}/GenBankParser.py -r !{ref_list_path} -d !{gen_bank_XML} -o . -b . -s !{params.is_segmented} ${extra} \
             --min_length_ratio !{params.min_seq_length_ratio}
         python !{scripts_dir}/ValidateMatrix.py -o . -a !{projectDir}/assets -b . \
         -g gB_matrix_raw.tsv \

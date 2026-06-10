@@ -1,3 +1,2 @@
 seq_name	reference	error	warnings
 SEQ_A	REF1	too many, ambiguities	warn1
-SEQ_B	REF2	frame shift at codon 3	x

@@ -90,19 +90,45 @@ class NextalignAlignment:
 		else:
 			print(f"{accession} failed with return code {return_code}")
 
+	@staticmethod
+	def _read_nextalign_errors(error_file_path, reference_accession):
+		failed = {}
+		with open(error_file_path, newline='', encoding='utf-8') as handle:
+			reader = csv.DictReader(handle)
+			fieldnames = reader.fieldnames or []
+			if {'seqName', 'errors'}.issubset(set(fieldnames)):
+				for row in reader:
+					acc = str(row.get('seqName', '')).strip()
+					error = str(row.get('errors', '')).strip()
+					if not acc or not error or acc == reference_accession:
+						continue
+					failed.setdefault(acc, []).append(error)
+				return failed
+
+		# Backward-compatible fallback for older/headerless test fixtures.
+		handle.seek(0)
+		reader = csv.reader(handle)
+		for row in reader:
+			if len(row) < 2:
+				continue
+			acc = str(row[0]).strip()
+			error = str(row[1]).strip()
+			if not acc or not error or acc == reference_accession:
+				continue
+			failed.setdefault(acc, []).append(error)
+		return failed
+
 	def update_gb_matrix(self, alignment_dir: list, gB_matrix_file):
 		failed_accessions = {}
 
 		for each_aln_type in alignment_dir:
+			if os.path.basename(os.path.normpath(each_aln_type)) != "query_aln":
+				continue
 			for each_aln in os.listdir(each_aln_type):
 				error_file_path = join(each_aln_type, each_aln, each_aln + ".errors.csv")
 				if os.path.exists(error_file_path):
-					with open(error_file_path) as f:
-						for line in f:
-							if "In sequence" in line:
-								acc = line.split(",")[0].strip()
-								error = line.split(",")[1].strip()
-								failed_accessions.setdefault(acc, []).append(error)
+					for acc, errors in self._read_nextalign_errors(error_file_path, each_aln).items():
+						failed_accessions.setdefault(acc, []).extend(errors)
 
 		updated_rows = []
 		with open(gB_matrix_file, newline='') as csvfile:
@@ -116,7 +142,8 @@ class NextalignAlignment:
 
 			for row in reader:
 				gi = row.get('gi_number')
-				if gi in failed_accessions:
+				acc_type = str(row.get('accession_type', '')).strip().lower()
+				if gi in failed_accessions and acc_type not in {'reference', 'master', 'exclusion_list'}:
 					row['exclusion_status'] = '1'
 					existing_criteria = row.get('exclusion_criteria', '')
 					new_criteria = '; '.join(failed_accessions[gi])

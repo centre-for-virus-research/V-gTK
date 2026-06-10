@@ -240,6 +240,43 @@ def test_validate_db_tree_update_integrity_passes_on_seed_db(tmp_path: Path, bas
     assert "[sequence_drug_resistance integrity]" in report
 
 
+def test_validate_db_tree_update_integrity_allows_host_taxa_used_only_by_excluded_rows(tmp_path: Path, basic_update_db: Path):
+    _add_required_alignment_tables(basic_update_db)
+
+    conn = sqlite3.connect(str(basic_update_db))
+    try:
+        cur = conn.cursor()
+        cur.execute("UPDATE meta_data SET host_taxa_id='9796' WHERE primary_accession='Q_EXCL'")
+        cur.execute("INSERT INTO host_taxa(taxonomy_id) VALUES ('9796')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    outdir = tmp_path / "out_host_taxa_excluded"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--db",
+            str(basic_update_db),
+            "--outdir",
+            str(outdir),
+            "--check-update-integrity",
+            "--expect-segment-trees",
+            "--test-mode",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0
+    report = (outdir / "db_tree_validation.txt").read_text(encoding="utf-8")
+    assert "[host_taxa vs meta_data]" in report
+    assert "Table: host_taxa  Column: taxonomy_id" in report
+    assert "Expected: 3  Observed: 3" in report
+    assert "Extra: 0" in report
+
+
 def test_validate_db_tree_update_integrity_fails_for_out_of_span_feature_projection(tmp_path: Path, basic_update_db: Path):
     _add_required_alignment_tables(basic_update_db)
 
@@ -284,7 +321,59 @@ def test_validate_db_tree_update_integrity_fails_for_out_of_span_feature_project
     report = (outdir / "db_tree_validation.txt").read_text(encoding="utf-8")
     assert "[feature projection integrity]" in report
     assert "offending_rows: 1" in report
+    assert "mismatched_cds_rows: 1" in report
     assert "accession=Q_OLD product=P2" in report
+    assert "reason=cds_span_mismatch" in report
+
+
+def test_validate_db_tree_update_integrity_fails_for_clipped_cds_projection_with_overlapping_alignment(tmp_path: Path, basic_update_db: Path):
+    _add_required_alignment_tables(basic_update_db)
+
+    conn = sqlite3.connect(str(basic_update_db))
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM features WHERE accession='REF1'")
+        cur.execute("DELETE FROM features WHERE accession='Q_OLD'")
+        cur.executemany(
+            "INSERT INTO features(accession, master_ref_accession, reference_accession, aln_start, aln_end, cds_start, cds_end, cds_start_OG_seq, cds_end_OG_seq, product, segment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("REF1", "REF1", "REF1", "1", "4", "1", "2", "1", "2", "P1", "1"),
+                ("REF1", "REF1", "REF1", "1", "4", "3", "4", "3", "4", "P2", "1"),
+                # Alignment span still overlaps P1 on REF1, but cds span was incorrectly clipped to the covered region.
+                ("Q_OLD", "REF1", "REF1", "1", "2", "1", "1", "1", "1", "P1", "1"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    outdir = tmp_path / "out_clipped"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--db",
+            str(basic_update_db),
+            "--outdir",
+            str(outdir),
+            "--check-update-integrity",
+            "--expect-segment-trees",
+            "--test-mode",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "feature projection integrity check failed" in result.stderr
+
+    report = (outdir / "db_tree_validation.txt").read_text(encoding="utf-8")
+    assert "[feature projection integrity]" in report
+    assert "offending_rows: 1" in report
+    assert "mismatched_cds_rows: 1" in report
+    assert "accession=Q_OLD product=P1" in report
+    assert "cds_start=1 cds_end=1" in report
+    assert "reason=cds_span_mismatch" in report
 
 
 def test_validate_db_tree_update_integrity_passes_with_compact_mutation_tables(tmp_path: Path, basic_update_db: Path):
@@ -734,6 +823,226 @@ def test_validate_db_tree_segmented_test_mode_skips_strict_consistency_without_u
 
     assert result.returncode == 0
     assert "skipping strict DB consistency failures for segmented validation run" in result.stdout
+
+
+def test_validate_db_tree_ignores_reference_and_master_alignment_rows_in_consistency_check(tmp_path: Path):
+    db_path = tmp_path / "alignment_refs_ok.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT, exclusion_status TEXT, exclusion_criteria TEXT)"
+        )
+        cur.executemany(
+            "INSERT INTO meta_data(primary_accession, accession_type, exclusion_status, exclusion_criteria) VALUES (?, ?, ?, ?)",
+            [
+                ("QUERY1", "query", "", ""),
+                ("REF1", "reference", "1", "reference_context"),
+                ("MASTER1", "master", "1", "master_context"),
+            ],
+        )
+        cur.execute("CREATE TABLE sequences (header TEXT, sequence TEXT)")
+        cur.execute("INSERT INTO sequences(header, sequence) VALUES ('QUERY1', 'ATGC')")
+        cur.execute(
+            "CREATE TABLE sequence_alignment (primary_accession TEXT, sequence_id TEXT, alignment_name TEXT, segment TEXT)"
+        )
+        cur.executemany(
+            "INSERT INTO sequence_alignment(primary_accession, sequence_id, alignment_name, segment) VALUES (?, ?, ?, ?)",
+            [
+                ("QUERY1", "QUERY1", "REF1", "1"),
+                ("REF1", "REF1", "REF1", "1"),
+                ("MASTER1", "MASTER1", "MASTER1", "1"),
+            ],
+        )
+        cur.execute("CREATE TABLE trees (name TEXT, source TEXT, newick TEXT, segment TEXT, segment_key TEXT)")
+        cur.execute(
+            "INSERT INTO trees(name, source, newick, segment, segment_key) VALUES ('usher_tree', 'usher', '(QUERY1:0.1);', '1', 'refset_1')"
+        )
+        cur.execute("CREATE TABLE features (accession TEXT)")
+        cur.execute("INSERT INTO features(accession) VALUES ('QUERY1')")
+        cur.execute("CREATE TABLE insertions (primary_accession TEXT)")
+        cur.execute("INSERT INTO insertions(primary_accession) VALUES ('QUERY1')")
+        cur.execute("CREATE TABLE host_taxa (other_col TEXT)")
+        cur.execute("INSERT INTO host_taxa(other_col) VALUES ('placeholder')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--db",
+            str(db_path),
+            "--outdir",
+            str(tmp_path / "out"),
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0
+    assert "sequence_alignment vs meta_data: ok=True" in result.stdout
+
+
+def test_validate_db_tree_segmented_allows_excluded_reference_context_rows(tmp_path: Path):
+    db_path = tmp_path / "segmented_excluded_refs.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT, segment TEXT, exclusion_status TEXT, exclusion_criteria TEXT)"
+        )
+        cur.executemany(
+            "INSERT INTO meta_data(primary_accession, accession_type, segment, exclusion_status, exclusion_criteria) VALUES (?, ?, ?, ?, ?)",
+            [
+                ("SEG1_MASTER", "master", "1", "1", "reference_context"),
+                ("SEG2_REF", "reference", "2", "1", "reference_context"),
+                ("SEG1_Q", "query", "1", "", ""),
+                ("SEG2_Q", "query", "2", "", ""),
+            ],
+        )
+        cur.execute("CREATE TABLE sequences (header TEXT, sequence TEXT)")
+        cur.executemany(
+            "INSERT INTO sequences(header, sequence) VALUES (?, ?)",
+            [("SEG1_Q", "ATGC"), ("SEG2_Q", "ATGA")],
+        )
+        cur.execute(
+            "CREATE TABLE sequence_alignment (primary_accession TEXT, sequence_id TEXT, alignment_name TEXT, segment TEXT)"
+        )
+        cur.executemany(
+            "INSERT INTO sequence_alignment(primary_accession, sequence_id, alignment_name, segment) VALUES (?, ?, ?, ?)",
+            [
+                ("SEG1_MASTER", "SEG1_MASTER", "SEG1_MASTER", "1"),
+                ("SEG2_REF", "SEG2_REF", "SEG2_REF", "2"),
+                ("SEG1_Q", "SEG1_Q", "SEG1_MASTER", "1"),
+                ("SEG2_Q", "SEG2_Q", "SEG2_REF", "2"),
+            ],
+        )
+        cur.execute("CREATE TABLE trees (name TEXT, source TEXT, newick TEXT, segment TEXT, segment_key TEXT)")
+        cur.executemany(
+            "INSERT INTO trees(name, source, newick, segment, segment_key) VALUES (?, ?, ?, ?, ?)",
+            [
+                ("usher_seg1", "usher", "(SEG1_Q:0.1);", "1", "refset_1"),
+                ("usher_seg2", "usher", "(SEG2_Q:0.1);", "2", "refset_2"),
+            ],
+        )
+        cur.execute("CREATE TABLE features (accession TEXT, segment TEXT)")
+        cur.executemany(
+            "INSERT INTO features(accession, segment) VALUES (?, ?)",
+            [("SEG1_Q", "1"), ("SEG2_Q", "2")],
+        )
+        cur.execute("CREATE TABLE insertions (primary_accession TEXT)")
+        cur.executemany(
+            "INSERT INTO insertions(primary_accession) VALUES (?)",
+            [("SEG1_Q",), ("SEG2_Q",)],
+        )
+        cur.execute("CREATE TABLE host_taxa (primary_accession TEXT)")
+        cur.executemany(
+            "INSERT INTO host_taxa(primary_accession) VALUES (?)",
+            [("SEG1_Q",), ("SEG2_Q",)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--db",
+            str(db_path),
+            "--outdir",
+            str(tmp_path / "out"),
+            "--expect-segment-trees",
+            "--test-mode",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0
+    assert "Segmented validation: meta segments=2 tree segments=2" in result.stdout
+    assert "sequence_alignment vs meta_data: ok=True" in result.stdout
+
+
+def test_validate_db_tree_segmented_ignores_excluded_reference_alignment_rows(tmp_path: Path):
+    db_path = tmp_path / "segmented_excluded_reference_alignment.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT, segment TEXT, exclusion_status TEXT, exclusion_criteria TEXT)"
+        )
+        cur.executemany(
+            "INSERT INTO meta_data(primary_accession, accession_type, segment, exclusion_status, exclusion_criteria) VALUES (?, ?, ?, ?, ?)",
+            [
+                ("SEG1_A", "query", "1", "", ""),
+                ("SEG2_A", "query", "2", "", ""),
+                ("REF_EXCL", "reference", "1", "1", "trimmed_from_update_assets"),
+            ],
+        )
+        cur.execute("CREATE TABLE sequences (header TEXT, sequence TEXT)")
+        cur.executemany(
+            "INSERT INTO sequences(header, sequence) VALUES (?, ?)",
+            [("SEG1_A", "ATGC"), ("SEG2_A", "ATGA")],
+        )
+        cur.execute(
+            "CREATE TABLE sequence_alignment (primary_accession TEXT, sequence_id TEXT, alignment_name TEXT, segment TEXT)"
+        )
+        cur.executemany(
+            "INSERT INTO sequence_alignment(primary_accession, sequence_id, alignment_name, segment) VALUES (?, ?, ?, ?)",
+            [
+                ("SEG1_A", "SEG1_A", "SEG1_A", "1"),
+                ("SEG2_A", "SEG2_A", "SEG2_A", "2"),
+                ("REF_EXCL", "REF_EXCL", "REF_EXCL", "1"),
+            ],
+        )
+        cur.execute("CREATE TABLE features (accession TEXT, segment TEXT)")
+        cur.executemany(
+            "INSERT INTO features(accession, segment) VALUES (?, ?)",
+            [("SEG1_A", "1"), ("SEG2_A", "2")],
+        )
+        cur.execute("CREATE TABLE insertions (primary_accession TEXT)")
+        cur.executemany(
+            "INSERT INTO insertions(primary_accession) VALUES (?)",
+            [("SEG1_A",), ("SEG2_A",)],
+        )
+        cur.execute("CREATE TABLE host_taxa (primary_accession TEXT)")
+        cur.executemany(
+            "INSERT INTO host_taxa(primary_accession) VALUES (?)",
+            [("SEG1_A",), ("SEG2_A",)],
+        )
+        cur.execute("CREATE TABLE trees (name TEXT, source TEXT, newick TEXT, segment TEXT, segment_key TEXT)")
+        cur.executemany(
+            "INSERT INTO trees(name, source, newick, segment, segment_key) VALUES (?, ?, ?, ?, ?)",
+            [
+                ("usher_seg1", "usher", "(SEG1_A:0.1);", "1", "refset_1"),
+                ("usher_seg2", "usher", "(SEG2_A:0.1);", "2", "refset_2"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--db",
+            str(db_path),
+            "--outdir",
+            str(tmp_path / "out"),
+            "--expect-segment-trees",
+            "--test-mode",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0
+    assert "Segmented validation: meta segments=2 tree segments=2" in result.stdout
+    assert "sequence_alignment vs meta_data: ok=True" in result.stdout
 
 
 def test_validate_db_tree_prefers_largest_usher_tree_row(tmp_path: Path):

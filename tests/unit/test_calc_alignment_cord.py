@@ -69,6 +69,30 @@ def test_gap_helpers_and_cds_recalculation(tmp_path: Path):
     ]
 
 
+def test_recalculate_cds_coordinates_keeps_reference_feature_span_for_partial_sequences(tmp_path: Path):
+    processor = make_processor(tmp_path)
+
+    gaps = processor.get_gap_ranges("--GCCGT--")
+    cds_list = [
+        {"start": "1", "end": "4", "product": "P1"},
+        {"start": "5", "end": "9", "product": "P2"},
+    ]
+
+    adjusted = processor.recalculate_cds_coordinates_with_span(
+        "Q_B",
+        gaps,
+        cds_list,
+        start_offset=3,
+        genome_cord_start=3,
+        genome_cord_end=7,
+    )
+
+    assert adjusted == [
+        {"start": 1, "end": 4, "og_start": 1, "og_end": 2, "product": "P1"},
+        {"start": 5, "end": 9, "og_start": 3, "og_end": 5, "product": "P2"},
+    ]
+
+
 def test_get_products_for_range(tmp_path: Path):
     processor = make_processor(tmp_path)
     cds_list = [
@@ -148,6 +172,41 @@ def test_find_gaps_in_fasta_preserves_projected_product_identity(tmp_path: Path)
     ]
 
 
+def test_find_gaps_in_fasta_partial_sequences_keep_overlapping_reference_feature_coordinates(tmp_path: Path):
+    processor = make_processor(tmp_path)
+    processor.find_gaps_in_fasta()
+
+    rows = read_tsv_as_dicts(tmp_path / "Tables" / "features.tsv")
+    q_b_rows = [row for row in rows if row["accession"] == "Q_B"]
+
+    assert q_b_rows == [
+        {
+            "accession": "Q_B",
+            "master_ref_accession": "MASTER1",
+            "reference_accession": "MASTER1",
+            "aln_start": "3",
+            "aln_end": "7",
+            "cds_start": "1",
+            "cds_end": "4",
+            "cds_start_OG_seq": "1",
+            "cds_end_OG_seq": "2",
+            "product": "P1",
+        },
+        {
+            "accession": "Q_B",
+            "master_ref_accession": "MASTER1",
+            "reference_accession": "MASTER1",
+            "aln_start": "3",
+            "aln_end": "7",
+            "cds_start": "5",
+            "cds_end": "9",
+            "cds_start_OG_seq": "3",
+            "cds_end_OG_seq": "5",
+            "product": "P2",
+        },
+    ]
+
+
 def test_find_gaps_in_fasta_skips_features_outside_partial_sequence_span(tmp_path: Path):
     alignment_dir = tmp_path / "padded_alignment"
     alignment_dir.mkdir()
@@ -196,10 +255,151 @@ def test_find_gaps_in_fasta_skips_features_outside_partial_sequence_span(tmp_pat
             "aln_start": "1",
             "aln_end": "3",
             "cds_start": "1",
-            "cds_end": "3",
+            "cds_end": "4",
             "cds_start_OG_seq": "1",
             "cds_end_OG_seq": "3",
             "product": "P1",
+        }
+    ]
+
+
+def test_find_gaps_in_fasta_resolves_segmented_refset_files_to_matching_master(tmp_path: Path):
+    alignment_dir = tmp_path / "padded_alignment"
+    alignment_dir.mkdir()
+    (alignment_dir / "refset_2_aln_merged_MSA.fasta").write_text(
+        ">MASTER2\n"
+        "ATGCCGTAA\n"
+        ">Q_SEG\n"
+        "ATG-CGTAA\n",
+        encoding="utf-8",
+    )
+
+    gff1 = tmp_path / "MASTER1.gff3"
+    gff1.write_text(
+        "##gff-version 3\n"
+        "MASTER1\tRefSeq\tCDS\t1\t4\t.\t+\t0\tID=cds1;product=P1\n",
+        encoding="utf-8",
+    )
+    gff2 = tmp_path / "MASTER2.gff3"
+    gff2.write_text(
+        "##gff-version 3\n"
+        "MASTER2\tRefSeq\tCDS\t1\t4\t.\t+\t0\tID=cds2;product=P2\n",
+        encoding="utf-8",
+    )
+
+    ref_list = tmp_path / "ref_list.tsv"
+    ref_list.write_text(
+        "MASTER1\tmaster\t1\n"
+        "MASTER2\tmaster\t2\n",
+        encoding="utf-8",
+    )
+
+    blast_hits = tmp_path / "query_uniq_tophits.tsv"
+    blast_hits.write_text("Q_SEG\tREF_SEG\t99.0\tplus\n", encoding="utf-8")
+
+    processor = CalculateAlignmentCoordinates(
+        paded_alignment=str(alignment_dir),
+        master_gff=[str(gff1), str(gff2)],
+        tmp_dir=str(tmp_path),
+        output_dir="Tables",
+        output_file="features.tsv",
+        master_accession=str(ref_list),
+        blast_uniq_hits=str(blast_hits),
+    )
+
+    processor.find_gaps_in_fasta()
+
+    rows = read_tsv_as_dicts(tmp_path / "Tables" / "features.tsv")
+    q_seg_rows = [row for row in rows if row["accession"] == "Q_SEG"]
+
+    assert q_seg_rows == [
+        {
+            "accession": "Q_SEG",
+            "master_ref_accession": "MASTER2",
+            "reference_accession": "REF_SEG",
+            "aln_start": "1",
+            "aln_end": "9",
+            "cds_start": "1",
+            "cds_end": "4",
+            "cds_start_OG_seq": "1",
+            "cds_end_OG_seq": "3",
+            "product": "P2",
+        }
+    ]
+
+
+def test_find_gaps_in_fasta_segmented_refset_emits_segment_column_from_segment_map(tmp_path: Path):
+    alignment_dir = tmp_path / "padded_alignment"
+    alignment_dir.mkdir()
+    (alignment_dir / "refset_2_aln_merged_MSA.fasta").write_text(
+        ">MASTER2\n"
+        "ATGCCGTAA\n"
+        ">Q_SEG\n"
+        "ATG-CGTAA\n",
+        encoding="utf-8",
+    )
+
+    gff1 = tmp_path / "MASTER1.gff3"
+    gff1.write_text(
+        "##gff-version 3\n"
+        "MASTER1\tRefSeq\tCDS\t1\t4\t.\t+\t0\tID=cds1;product=P1\n",
+        encoding="utf-8",
+    )
+    gff2 = tmp_path / "MASTER2.gff3"
+    gff2.write_text(
+        "##gff-version 3\n"
+        "MASTER2\tRefSeq\tCDS\t1\t4\t.\t+\t0\tID=cds2;product=P2\n",
+        encoding="utf-8",
+    )
+
+    ref_list = tmp_path / "ref_list.tsv"
+    ref_list.write_text(
+        "MASTER1\tmaster\t1\n"
+        "MASTER2\tmaster\t2\n",
+        encoding="utf-8",
+    )
+
+    blast_hits = tmp_path / "query_uniq_tophits.tsv"
+    blast_hits.write_text("Q_SEG\tREF_SEG\t99.0\tplus\n", encoding="utf-8")
+
+    segment_map = tmp_path / "segment_map.tsv"
+    segment_map.write_text(
+        "primary_accession\tsegment\n"
+        "MASTER2\t2\n"
+        "REF_SEG\t2\n"
+        "Q_SEG\t2\n",
+        encoding="utf-8",
+    )
+
+    processor = CalculateAlignmentCoordinates(
+        paded_alignment=str(alignment_dir),
+        master_gff=[str(gff1), str(gff2)],
+        tmp_dir=str(tmp_path),
+        output_dir="Tables",
+        output_file="features.tsv",
+        master_accession=str(ref_list),
+        blast_uniq_hits=str(blast_hits),
+        segment_map_tsv=str(segment_map),
+    )
+
+    processor.find_gaps_in_fasta()
+
+    rows = read_tsv_as_dicts(tmp_path / "Tables" / "features.tsv")
+    q_seg_rows = [row for row in rows if row["accession"] == "Q_SEG"]
+
+    assert q_seg_rows == [
+        {
+            "accession": "Q_SEG",
+            "master_ref_accession": "MASTER2",
+            "reference_accession": "REF_SEG",
+            "aln_start": "1",
+            "aln_end": "9",
+            "cds_start": "1",
+            "cds_end": "4",
+            "cds_start_OG_seq": "1",
+            "cds_end_OG_seq": "3",
+            "product": "P2",
+            "segment": "2",
         }
     ]
 

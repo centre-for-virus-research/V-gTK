@@ -109,6 +109,40 @@ def test_annotate_matrix_can_overwrite_exclusions(tmp_path: Path):
     assert rows[0]["exclusion"] == "non IAV genomic sequence"
 
 
+def test_annotate_matrix_does_not_mark_reference_rows_as_no_hit(tmp_path: Path):
+    matrix = tmp_path / "gB_matrix.tsv"
+    write_tsv(
+        matrix,
+        [
+            ["REF1", "reference", "4", ""],
+            ["Q1", "query", "", ""],
+        ],
+        header=["primary_accession", "accession_type", "segment", "exclusion"],
+    )
+
+    ann = tmp_path / "annotated.tsv"
+    write_tsv(ann, [["Q1", "REF1", "99.9", "+", "4"]])
+
+    out_file = tmp_path / "out.tsv"
+    annotate_matrix(
+        str(matrix),
+        build_segment_map(str(ann)),
+        build_reference_map(str(ann)),
+        str(out_file),
+        overwrite=False,
+        overwrite_exclusions=False,
+    )
+
+    rows = read_tsv_dicts(out_file)
+    assert rows[0]["segment_validated"] == "4"
+    assert rows[0]["closest_reference"] == "REF1"
+    assert rows[0]["exclusion"] == ""
+
+    assert rows[1]["segment_validated"] == "4"
+    assert rows[1]["closest_reference"] == "REF1"
+    assert rows[1]["exclusion"] == ""
+
+
 def test_edge_dataset_preserve_existing_exclusions(tmp_path: Path):
     matrix = tmp_path / "input_matrix.tsv"
     matrix.write_text((DATA_DIR / "input_matrix.tsv").read_text(encoding="utf-8"), encoding="utf-8")

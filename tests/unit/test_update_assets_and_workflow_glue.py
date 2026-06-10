@@ -49,7 +49,7 @@ def test_workflow_update_glue_contains_skip_and_guard():
 
     assert "def UPDATE_MODE = params.update_db" in text
     assert "def TREE_FREE_MODE = params.tree_free.toString().toBoolean()" in text
-    assert "params.tree_free is currently only supported for fresh DB builds" in text
+    assert "params.tree_free=true with params.update_db: skipping tree placement and retaining any existing trees already stored in the update DB" in text
     assert "update DB path matches output DB path" in text
     assert "if( UPDATE_MODE )" in text and "USHER_PLACEMENT(usher_input_ch)" in text
     assert "if( TREE_FREE_MODE )" in text
@@ -77,6 +77,13 @@ def test_workflow_update_glue_contains_skip_and_guard():
     # TEST_SUBSAMPLE_CLUSTER_INPUT should not be invoked in the workflow
     # (subsampling happens at the GenBankFetcher stage, not after DB population)
     assert "TEST_SUBSAMPLE_CLUSTER_INPUT(" not in text
+
+
+def test_workflow_genbank_parser_passes_segmented_flag():
+    workflow_path = Path(__file__).resolve().parents[2] / "vgtk-init.nf"
+    text = workflow_path.read_text(encoding="utf-8")
+
+    assert "GenBankParser.py -r !{ref_list_path} -d !{gen_bank_XML} -o . -b . -s !{params.is_segmented} ${extra}" in text
 
 
 def test_nextflow_config_defines_mutation_defaults():

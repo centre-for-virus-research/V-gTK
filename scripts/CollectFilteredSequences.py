@@ -152,8 +152,10 @@ def collect_filtered_sequences(nextalign_dir: str, output_file: str, max_gap_pro
     filtered = {}
     nextalign_path = _validate_nextalign_dir(nextalign_dir)
     
-    # Search in both query_aln and reference_aln subdirectories
-    for errors_file in nextalign_path.rglob("*.errors.csv"):
+    # Only query_aln failures correspond to candidate query sequences. Reference
+    # alignment failures are diagnostics for subject/reference rows and must not
+    # be turned into downstream query exclusions.
+    for errors_file in nextalign_path.glob("query_aln/*/*.errors.csv"):
         # Get reference ID from parent directory name
         ref_id = errors_file.parent.name
         
@@ -171,7 +173,7 @@ def collect_filtered_sequences(nextalign_dir: str, output_file: str, max_gap_pro
                     warnings = row.get("warnings", "").strip()
                     
                     # Only include if there's an actual error (not just warnings)
-                    if seq_name and errors:
+                    if seq_name and seq_name != ref_id and errors:
                         filtered[seq_name] = {
                             "reference": ref_id,
                             "error": errors,

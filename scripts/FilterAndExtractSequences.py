@@ -2,6 +2,7 @@ import os
 import csv
 import shutil
 import tempfile
+from collections import Counter
 from Bio import SeqIO
 from os.path import join
 from argparse import ArgumentParser
@@ -56,6 +57,38 @@ class FilterAndExtractSequences:
 			return True
 		return True
 
+	@staticmethod
+	def _classify_accession(row, accession, ref_list):
+		row_type = str(row.get('accession_type', '')).strip().lower()
+		if row_type:
+			return row_type
+		ref_type = str(ref_list.get(accession, '')).strip().lower()
+		if ref_type:
+			return ref_type
+		return 'query'
+
+	def _write_filter_summary(self, total_queries, written_queries, excluded_query_reasons, written_refs):
+		summary_lines = [
+			"[FilterAndExtractSequences] Summary:",
+			f"  - reference/master rows written to ref_seq.fa: {written_refs}",
+			f"  - query rows written to query_seq.fa: {written_queries}",
+			f"  - query rows excluded before BLAST: {sum(excluded_query_reasons.values())}",
+		]
+		if excluded_query_reasons:
+			summary_lines.append("[FilterAndExtractSequences] Query Exclusion Reasons:")
+			for reason, count in excluded_query_reasons.most_common(10):
+				summary_lines.append(f"  - {count:<4} : {reason}")
+		if total_queries > 0 and written_queries == 0:
+			summary_lines.append(
+				f"[FilterAndExtractSequences] WARNING: all {total_queries} query rows were filtered before BLAST; query_seq.fa is empty"
+			)
+
+		summary_text = "\n".join(summary_lines)
+		print(summary_text)
+		summary_path = join(self.base_dir, self.output_dir, 'filter_summary.txt')
+		with open(summary_path, 'w', encoding='utf-8') as handle:
+			handle.write(summary_text + "\n")
+
 	def filter_columns(self):
 		#if not self.check_gb_division():
 		#	print("Error: Invalid GenBank division specified.")
@@ -82,6 +115,10 @@ class FilterAndExtractSequences:
 
 		query_seq_file = join(self.base_dir, self.output_dir, 'query_seq.fa')
 		ref_seq_file = join(self.base_dir, self.output_dir, 'ref_seq.fa')
+		excluded_query_reasons = Counter()
+		total_queries = 0
+		written_queries = 0
+		written_refs = 0
 
 		with open(query_seq_file, 'w') as write_query_seq, open(ref_seq_file, 'w') as write_ref_seq:
 			with open(self.genbank_matrix) as file, tempfile.NamedTemporaryFile('w', delete=False, newline='') as tmpfile:
@@ -97,12 +134,20 @@ class FilterAndExtractSequences:
 				writer.writeheader()
 
 				for row in csv_reader:
+					accession = row['gi_number']
+					acc_type = self._classify_accession(row, accession, ref_list)
+					is_query = acc_type == 'query'
+					if is_query:
+						total_queries += 1
+					
 					if str(row.get('exclusion_status', '')).strip() == '1':
+						if is_query:
+							reason = row.get('exclusion_criteria', '').strip() or 'metadata_exclusion'
+							excluded_query_reasons[reason] += 1
 						writer.writerow(row)
 						continue
 
 					gb_division = row['division']
-					accession = row['gi_number'] #row['primary_accession']
 					
 					# Get sequence safely
 					if accession in sequence_dict:
@@ -129,6 +174,9 @@ class FilterAndExtractSequences:
 
 					exclusion_status = 0
 					exclusion_criteria = ""
+					if acc_type == 'exclusion_list':
+						exclusion_status = 1
+						exclusion_criteria = "excluded by reference list exclusion flag"
 
 					if self.gb_division is not None and gb_division not in self.gb_division:
 						exclusion_status = 1
@@ -157,15 +205,20 @@ class FilterAndExtractSequences:
 
 					if exclusion_status == 1:
 						exclusion_dict[accession] = row['exclusion_criteria']
+						if is_query:
+							excluded_query_reasons[row['exclusion_criteria'] or 'metadata_exclusion'] += 1
 						continue
 
-					if accession in ref_list:
+					if acc_type != 'query':
 						write_ref_seq.write(f">{accession}\n{sequence}\n")
+						written_refs += 1
 					else:
 						write_query_seq.write(f">{accession}\n{sequence}\n")
+						written_queries += 1
 
 		# Replace original matrix file with updated temp file
 		shutil.move(tmpfile.name, self.genbank_matrix)
+		self._write_filter_summary(total_queries, written_queries, excluded_query_reasons, written_refs)
 
 	def process(self):
 		self.filter_columns()

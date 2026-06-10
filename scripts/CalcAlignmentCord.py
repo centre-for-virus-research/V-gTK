@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import sqlite3
 import pandas as pd
@@ -7,7 +8,7 @@ from os.path import join
 from argparse import ArgumentParser
 from GffToDictionary import GffDictionary
 from CalcGenomeCords import CalculateGenomeCoordinates 
-from ExportRefListFromUpdateDb import load_master_accessions_from_file
+from ExportRefListFromUpdateDb import load_master_accessions_from_file, load_reference_file_table
 
 class CalculateAlignmentCoordinates:
 
@@ -22,6 +23,30 @@ class CalculateAlignmentCoordinates:
 		self.update_db = update_db
 		self.update_scope_tsv = update_scope_tsv
 		self.segment_map_tsv = segment_map_tsv
+
+	@staticmethod
+	def _normalize_segment_value(value):
+		if value is None:
+			return ""
+		text = str(value).strip()
+		if not text or text.lower() == "nan":
+			return ""
+		digits = ''.join(ch for ch in text if ch.isdigit())
+		return digits if digits else text
+
+	@staticmethod
+	def _infer_segment_from_alignment_name(fasta_file):
+		name = os.path.basename(fasta_file)
+		patterns = [
+			r"(?:^|[_-])refset[_-]?(\d+)(?:$|[_-])",
+			r"(?:^|[_-])segment[_-]?(\d+)(?:$|[_-])",
+			r"(?:^|[_-])seg[_-]?(\d+)(?:$|[_-])",
+		]
+		for pattern in patterns:
+			match = re.search(pattern, name, flags=re.IGNORECASE)
+			if match:
+				return match.group(1)
+		return ""
 
 	def load_existing_feature_accessions(self):
 		if not self.update_db:
@@ -67,6 +92,42 @@ class CalculateAlignmentCoordinates:
 				return []
 		else:
 			return [x.strip() for x in self.master_accession.split(',') if x.strip()]
+
+	def load_master_segment_map(self):
+		if not os.path.isfile(self.master_accession):
+			return {}
+		try:
+			ref_df = load_reference_file_table(self.master_accession)
+		except Exception:
+			return {}
+		if ref_df.empty or 'accession_type' not in ref_df.columns:
+			return {}
+		masters = ref_df[
+			ref_df['accession_type'].fillna('').astype(str).str.strip().str.lower() == 'master'
+		].copy()
+		if masters.empty or 'segment' not in masters.columns:
+			return {}
+		masters['segment'] = masters['segment'].map(self._normalize_segment_value)
+		masters['primary_accession'] = masters['primary_accession'].fillna('').astype(str).str.strip()
+		masters = masters[(masters['segment'] != '') & (masters['primary_accession'] != '')]
+		masters = masters.drop_duplicates(subset=['segment'], keep='first')
+		return dict(zip(masters['segment'], masters['primary_accession']))
+
+	def resolve_master_for_alignment(self, fasta_file, masters, master_segment_map=None):
+		for master in masters:
+			if fasta_file.startswith(master):
+				return master
+
+		segment = self._infer_segment_from_alignment_name(fasta_file)
+		if segment and master_segment_map:
+			master = master_segment_map.get(segment)
+			if master:
+				return master
+
+		if len(masters) == 1:
+			return masters[0]
+
+		return None
 
 	def get_gff_for_master(self, master):
 		# Find GFF file in self.master_gff that matches master
@@ -121,16 +182,20 @@ class CalculateAlignmentCoordinates:
 	def recalculate_cds_coordinates_with_span(self, sequence_id, gap_ranges, cds_list, start_offset, genome_cord_start=None, genome_cord_end=None):
 		adjusted_coords = []
 		clamp_to_span = genome_cord_start not in (None, "NA") and genome_cord_end not in (None, "NA")
+		span_start = None
+		span_end = None
 		if clamp_to_span:
-			genome_cord_start = int(genome_cord_start)
-			genome_cord_end = int(genome_cord_end)
+			# After this guard, the span is a concrete integer window on the master/reference.
+			span_start = int(str(genome_cord_start))
+			span_end = int(str(genome_cord_end))
 
 		for cds in cds_list:
 			cds_start = int(cds['start'])
 			cds_end = int(cds['end'])
 			if clamp_to_span:
-				overlap_start = max(cds_start, genome_cord_start)
-				overlap_end = min(cds_end, genome_cord_end)
+				assert span_start is not None and span_end is not None
+				overlap_start = max(cds_start, span_start)
+				overlap_end = min(cds_end, span_end)
 				if overlap_start > overlap_end:
 					continue
 			else:
@@ -140,11 +205,12 @@ class CalculateAlignmentCoordinates:
 			gaps_before_start = self.count_gaps_before_position(gap_ranges, overlap_start)
 			gaps_before_end = self.count_gaps_before_position(gap_ranges, overlap_end)
 
-			adj_start = overlap_start - gaps_before_start + (start_offset - 1)
-			adj_end = overlap_end - gaps_before_end + (start_offset - 1)
+			# OG sequence coordinates are the ungapped query positions covering the overlap.
+			adj_start = overlap_start - gaps_before_start
+			adj_end = overlap_end - gaps_before_end
 			adjusted_entry = {
-				'start': overlap_start,
-				'end': overlap_end,
+				'start': cds_start,
+				'end': cds_end,
 				'og_start': adj_start,
 				'og_end': adj_end,
 				'product': cds['product'],
@@ -201,6 +267,7 @@ class CalculateAlignmentCoordinates:
 
 		blast_dict = self.load_blast_hits()
 		masters = self.get_master_list()
+		master_segment_map = self.load_master_segment_map()
 		if not masters:
 			raise ValueError("No master accession could be resolved from --master_accession")
 
@@ -224,20 +291,10 @@ class CalculateAlignmentCoordinates:
 			out_f.write("\n")
 
 			for fasta_file in fasta_files:
-				
-				current_master = None
-				for m in masters:
-					if fasta_file.startswith(m):
-						current_master = m
-						break
-				
+				current_master = self.resolve_master_for_alignment(fasta_file, masters, master_segment_map)
 				if not current_master:
-					# Fallback for single master case or if filename doesn't start with master
-					if len(masters) == 1:
-						current_master = masters[0]
-					else:
-						print(f"Could not determine master for {fasta_file}. Skipping.")
-						continue
+					print(f"Could not determine master for {fasta_file}. Skipping.")
+					continue
 
 				gff_file = self.get_gff_for_master(current_master)
 				if not gff_file:

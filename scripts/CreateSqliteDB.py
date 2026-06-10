@@ -178,6 +178,39 @@ class CreateSqliteDB:
 				raise ValueError(f"{label} is missing required columns: {', '.join(missing)}")
 		return df
 
+	@staticmethod
+	def _normalize_filtered_reason(reason):
+		text = "" if reason is None else str(reason).strip()
+		if not text:
+			return ""
+		prefix = "alignment_filtering:"
+		if text.startswith(prefix):
+			detail = text[len(prefix):].strip()
+		else:
+			detail = text
+		detail = re.sub(r"^In sequence #\d+\s+['\"][^'\"]+['\"]:\s*", "", detail, flags=re.IGNORECASE)
+		if not detail:
+			return "alignment_filtering"
+		return f"alignment_filtering: {detail}"
+
+	@classmethod
+	def _normalize_summary_reason(cls, reason):
+		text = "" if reason is None else str(reason).strip()
+		if not text:
+			return ""
+		lower_text = text.lower()
+		if (
+			text.startswith("alignment_filtering:")
+			or lower_text.startswith("in sequence #")
+			or "unable to align" in lower_text
+			or "number of seed matches" in lower_text
+			or lower_text == "not significant blast hit"
+			or "reference not present in master-projected reference_aln" in lower_text
+			or lower_text.startswith("filtered against reference")
+		):
+			return cls._normalize_filtered_reason(text)
+		return text
+
 	def _load_filtered_details(self):
 		reasons = {}
 		if not self.filtered_details_file or not os.path.isfile(self.filtered_details_file):
@@ -195,7 +228,7 @@ class CreateSqliteDB:
 			err = str(row.get("error", "")).strip()
 			ref = str(row.get("reference", "")).strip()
 			if err:
-				reason = f"alignment_filtering: {err}"
+				reason = self._normalize_filtered_reason(err)
 			elif ref:
 				reason = f"alignment_filtering: filtered against reference {ref}"
 			else:
@@ -875,17 +908,56 @@ class CreateSqliteDB:
 		reason_counts = pd.Series(dtype=int)
 		detailed_counts = pd.Series(dtype=int)
 		if not df_excluded.empty:
-			df_excluded['base_reason'] = df_excluded['reason'].apply(lambda x: str(x).split(':')[0].strip() if ':' in str(x) else str(x).strip())
-			reason_counts = df_excluded['base_reason'].value_counts()
-			detailed_counts = df_excluded['reason'].value_counts().head(10)
+			normalized_reason = df_excluded['reason'].map(self._normalize_summary_reason)
+			normalized_reason = normalized_reason.mask(normalized_reason == "", "alignment_filtering")
+			reason_counts = normalized_reason.value_counts()
+			detailed_reason = normalized_reason
+			detailed_reason = detailed_reason.mask(detailed_reason == "", "alignment_filtering")
+			detailed_counts = detailed_reason.value_counts().head(10)
 
 		delta_by_table = {row["table_name"]: int(row["delta"]) for row in deltas}
 		summary_lines = []
 		summary_lines.append("\n" + "="*80)
 		summary_lines.append("[CreateSqliteDB] DB Construction Summary:")
 		summary_lines.append("="*80)
-		summary_lines.append(f"Successfully included in DB : {len(df_meta_data)}")
-		summary_lines.append(f"Sequences filtered out      : {len(df_excluded)}")
+		summary_lines.append(f"Total sequences loaded      : {len(df_meta_data)}")
+		summary_lines.append(f"  (includes references/masters and query sequences)")
+		summary_lines.append(f"Query sequences passing QC  : {len(passed_qc_query_accessions)}")
+		summary_lines.append(f"Sequences marked as excluded: {len(df_excluded)}")
+		summary_lines.append(f"  (references/masters + failed QC)")
+
+		segment_summary = None
+		if "segment" in df_meta_data.columns:
+			query_rows = df_meta_data.loc[~is_ref_or_master].copy()
+			query_exclusion_mask = exclusion_mask.loc[query_rows.index]
+			segment_series = query_rows["segment"].fillna("").astype(str).str.strip()
+			nonblank_segment_values = {seg for seg in segment_series.unique() if seg}
+			if len(nonblank_segment_values) > 1:
+				normalized_segment = segment_series.mask(segment_series == "", "NA")
+				segment_frame = pd.DataFrame({
+					"segment": normalized_segment,
+					"included": (~query_exclusion_mask).astype(int),
+					"excluded": query_exclusion_mask.astype(int),
+				})
+				segment_summary = (
+					segment_frame.groupby("segment", as_index=False)[["included", "excluded"]]
+					.sum()
+				)
+				segment_summary["_segment_num"] = pd.to_numeric(segment_summary["segment"], errors="coerce")
+				segment_summary = (
+					segment_summary.sort_values(["_segment_num", "segment"], na_position="last")
+					.drop(columns=["_segment_num"])
+				)
+
+		if segment_summary is not None and not segment_summary.empty:
+			summary_lines.append("-" * 80)
+			summary_lines.append("[CreateSqliteDB] Query Sequences by Segment (passed/failed QC):")
+			summary_lines.append(f"{'Segment':<45} | {'Passed QC':<10} | {'Failed QC':<10}")
+			summary_lines.append("-" * 80)
+			for _, row in segment_summary.iterrows():
+				summary_lines.append(
+					f"{str(row['segment']):<45} | {int(row['included']):<10} | {int(row['excluded']):<10}"
+				)
 		if not reason_counts.empty:
 			summary_lines.append("-" * 80)
 			summary_lines.append(f"{'Category':<45} | {'Count':<10}")

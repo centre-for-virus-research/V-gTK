@@ -253,6 +253,51 @@ def validate_accession_table(conn, expected_accessions, table_name, candidate_co
     return result
 
 
+def validate_sequence_alignment_vs_meta(conn, expected_accessions, accession_column="primary_accession", exclusion_column="exclusion_status", exclude_value="1"):
+    table_name = "sequence_alignment"
+    label = "sequence_alignment vs meta_data"
+    if not table_exists(conn, table_name):
+        return {"ok": False, "error": f"Table '{table_name}' not found.", "table": table_name, "label": label}
+
+    cols = get_table_columns(conn, table_name)
+    col = find_first_present(cols, ["primary_accession", "accession", "sequence_id"])
+    if col is None:
+        return {
+            "ok": False,
+            "error": f"Table '{table_name}' missing any of columns ['primary_accession', 'accession', 'sequence_id']. Columns present: {cols}",
+            "table": table_name,
+            "label": label,
+        }
+
+    meta_cols = get_table_columns(conn, "meta_data") if table_exists(conn, "meta_data") else []
+    if accession_column not in meta_cols:
+        observed = fetch_distinct_values(conn, table_name, col)
+    elif exclusion_column in meta_cols and "accession_type" in meta_cols:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT DISTINCT TRIM(CAST(s.{col} AS TEXT)) AS v
+            FROM {table_name} s
+            LEFT JOIN meta_data m
+              ON TRIM(CAST(m.{accession_column} AS TEXT)) = TRIM(CAST(s.{col} AS TEXT))
+            WHERE TRIM(CAST(s.{col} AS TEXT)) != ''
+              AND (
+                    m.{accession_column} IS NULL
+                                        OR CAST(m.{exclusion_column} AS TEXT) != ?
+                                        OR LOWER(TRIM(COALESCE(CAST(m.accession_type AS TEXT), ''))) NOT IN ('reference', 'master')
+                  )
+            """,
+            (str(exclude_value),),
+        )
+        observed = {row[0] for row in cursor.fetchall() if row and row[0]}
+    else:
+        observed = fetch_distinct_values(conn, table_name, col)
+
+    result = compare_sets(expected_accessions, observed)
+    result.update({"table": table_name, "column": col, "label": label})
+    return result
+
+
 def validate_host_taxa(conn, meta_cols, where_sql=None, params=()):
     if not table_exists(conn, "host_taxa"):
         return {"ok": False, "error": "Table 'host_taxa' not found.", "table": "host_taxa"}
@@ -765,7 +810,8 @@ def validate_feature_projection_integrity(conn):
     offending_rows = []
     unresolved_master_rows = 0
     invalid_aln_rows = 0
-    for accession, master_ref_accession, product, aln_start, aln_end, _, _ in feature_rows:
+    mismatched_cds_rows = 0
+    for accession, master_ref_accession, product, aln_start, aln_end, cds_start, cds_end in feature_rows:
         accession_text = str(accession).strip() if accession is not None else ""
         master_text = str(master_ref_accession).strip() if master_ref_accession is not None else ""
         product_text = str(product).strip() if product is not None else ""
@@ -783,6 +829,29 @@ def validate_feature_projection_integrity(conn):
             unresolved_master_rows += 1
             continue
 
+        cds_start_int = _try_parse_int(cds_start)
+        cds_end_int = _try_parse_int(cds_end)
+        cds_matches_master_feature = (
+            cds_start_int is not None and
+            cds_end_int is not None and
+            any(cds_start_int == master_start and cds_end_int == master_end for master_start, master_end in master_product_spans)
+        )
+        if not cds_matches_master_feature:
+            mismatched_cds_rows += 1
+            offending_rows.append(
+                {
+                    "accession": accession_text,
+                    "master_ref_accession": master_text,
+                    "product": product_text,
+                    "aln_start": str(aln_start),
+                    "aln_end": str(aln_end),
+                    "cds_start": str(cds_start),
+                    "cds_end": str(cds_end),
+                    "reason": "cds_span_mismatch",
+                }
+            )
+            continue
+
         overlaps_master_feature = any(
             aln_end_int >= master_start and aln_start_int <= master_end
             for master_start, master_end in master_product_spans
@@ -795,6 +864,9 @@ def validate_feature_projection_integrity(conn):
                     "product": product_text,
                     "aln_start": str(aln_start),
                     "aln_end": str(aln_end),
+                    "cds_start": str(cds_start),
+                    "cds_end": str(cds_end),
+                    "reason": "aln_span_outside_master_feature",
                 }
             )
 
@@ -805,6 +877,7 @@ def validate_feature_projection_integrity(conn):
         "offending_rows": len(offending_rows),
         "invalid_aln_rows": invalid_aln_rows,
         "unresolved_master_rows": unresolved_master_rows,
+        "mismatched_cds_rows": mismatched_cds_rows,
         "examples": offending_rows[:25],
     }
 
@@ -860,12 +933,13 @@ def format_feature_integrity_result(result, show_n=25):
     lines.append(f"  offending_rows: {result.get('offending_rows', 0)}")
     lines.append(f"  invalid_aln_rows: {result.get('invalid_aln_rows', 0)}")
     lines.append(f"  unresolved_master_rows: {result.get('unresolved_master_rows', 0)}")
+    lines.append(f"  mismatched_cds_rows: {result.get('mismatched_cds_rows', 0)}")
     examples = result.get("examples", [])
     if examples:
         lines.append(f"  Offending examples (up to {show_n}):")
         for example in examples[:show_n]:
             lines.append(
-                "    - accession={accession} product={product} master_ref_accession={master_ref_accession} aln_start={aln_start} aln_end={aln_end}".format(
+                "    - accession={accession} product={product} master_ref_accession={master_ref_accession} aln_start={aln_start} aln_end={aln_end} cds_start={cds_start} cds_end={cds_end} reason={reason}".format(
                     **example
                 )
             )
@@ -975,12 +1049,12 @@ def main(argv=None):
         missing_in_tree = sorted(expected_meta_set - tree_terminals) if tree_available else []
 
         consistency_results = {
-            "sequence_alignment vs meta_data": validate_accession_table(
+            "sequence_alignment vs meta_data": validate_sequence_alignment_vs_meta(
                 conn,
                 expected_meta_set,
-                "sequence_alignment",
-                ["primary_accession", "accession", "sequence_id"],
-                "sequence_alignment vs meta_data",
+                accession_column=args.accession_column,
+                exclusion_column=args.exclusion_column,
+                exclude_value=args.exclude_value,
             ),
             "features vs meta_data": validate_accession_table(
                 conn,
@@ -992,8 +1066,6 @@ def main(argv=None):
             "host_taxa vs meta_data": validate_host_taxa(
                 conn,
                 meta_columns,
-                where_sql=where_sql,
-                params=where_params,
             ),
         }
         mutation_integrity_results = validate_mutation_tables(conn, expected_meta_set)

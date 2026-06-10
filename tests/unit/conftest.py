@@ -36,14 +36,14 @@ def basic_update_db(tmp_path: Path) -> Path:
         )
 
         cur.execute(
-            "CREATE TABLE features (accession TEXT, master_ref_accession TEXT, reference_accession TEXT, aln_start TEXT, aln_end TEXT, cds_start TEXT, cds_end TEXT, product TEXT, segment TEXT)"
+            "CREATE TABLE features (accession TEXT, master_ref_accession TEXT, reference_accession TEXT, aln_start TEXT, aln_end TEXT, cds_start TEXT, cds_end TEXT, cds_start_OG_seq TEXT, cds_end_OG_seq TEXT, product TEXT, segment TEXT)"
         )
         cur.executemany(
-            "INSERT INTO features(accession, master_ref_accession, reference_accession, aln_start, aln_end, cds_start, cds_end, product, segment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO features(accession, master_ref_accession, reference_accession, aln_start, aln_end, cds_start, cds_end, cds_start_OG_seq, cds_end_OG_seq, product, segment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
-                ("REF1", "REF1", "REF1", "1", "4", "1", "4", "P", "1"),
-                ("REF2", "REF2", "REF2", "1", "4", "1", "4", "P", "2"),
-                ("Q_OLD", "REF1", "REF1", "1", "4", "1", "4", "P", "1"),
+                ("REF1", "REF1", "REF1", "1", "4", "1", "4", "1", "4", "P", "1"),
+                ("REF2", "REF2", "REF2", "1", "4", "1", "4", "1", "4", "P", "2"),
+                ("Q_OLD", "REF1", "REF1", "1", "4", "1", "4", "1", "4", "P", "1"),
             ],
         )
 

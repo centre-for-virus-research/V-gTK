@@ -25,7 +25,7 @@ def write_csv(path: Path, rows):
         writer.writerows(rows)
 
 
-def test_collect_filtered_sequences_only_keeps_rows_with_errors(tmp_path: Path):
+def test_collect_filtered_sequences_only_keeps_query_alignment_rows_with_errors(tmp_path: Path):
     nextalign_dir = tmp_path / "Nextalign"
 
     write_csv(
@@ -42,9 +42,9 @@ def test_collect_filtered_sequences_only_keeps_rows_with_errors(tmp_path: Path):
 
     filtered = collect_filtered_sequences(str(nextalign_dir), str(tmp_path / "out.tsv"))
 
-    assert sorted(filtered.keys()) == ["SEQ_1", "SEQ_3"]
+    assert sorted(filtered.keys()) == ["SEQ_1"]
     assert filtered["SEQ_1"]["reference"] == "REF_A"
-    assert filtered["SEQ_3"]["reference"] == "REF_B"
+    assert "SEQ_3" not in filtered
 
 
 def test_write_outputs(tmp_path: Path):

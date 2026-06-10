@@ -21,6 +21,11 @@ def build_reference_map(file_path):
             reference_map[row[0]] = row[1]
     return reference_map
 
+
+def _is_reference_like(row):
+    acc_type = str(row.get('accession_type', '')).strip().lower()
+    return acc_type in {'master', 'reference', 'excluded', 'exclusion_list'}
+
 def annotate_matrix(matrix_file, segment_map, reference_map, output_file, overwrite=False, overwrite_exclusions=False):
     tmp_output = output_file if not overwrite else output_file + ".tmp"
 
@@ -40,6 +45,12 @@ def annotate_matrix(matrix_file, segment_map, reference_map, output_file, overwr
 
         for row in reader:
             primary_accession = row['primary_accession']
+
+            if _is_reference_like(row):
+                row['segment_validated'] = row.get('segment_validated', '') or row.get('segment', '')
+                row['closest_reference'] = row.get('closest_reference', '') or primary_accession
+                writer.writerow(row)
+                continue
 
             row['segment_validated'] = segment_map.get(primary_accession, 'not found')
             row['closest_reference'] = reference_map.get(primary_accession, 'not found')
