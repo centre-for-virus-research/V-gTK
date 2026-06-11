@@ -252,11 +252,47 @@ class CalculateAlignmentCoordinates:
 			acc_dict[query] = ref
 		return acc_dict
 
-	def find_gaps_in_fasta(self): #, fasta_file_dir, gff_file):
+	def load_historical_alignment_lengths(self):
+		"""Returns a dict of {accession: aligned_sequence_length} from the DB."""
+		if not self.update_db or not os.path.isfile(self.update_db):
+			return {}
+		conn = sqlite3.connect(self.update_db)
+		try:
+			# Check if sequence_alignment table exists
+			row = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sequence_alignment'").fetchone()
+			if row is None:
+				return {}
+			
+			# Find the correct column name for the alignment string
+			cols = [r[1] for r in conn.execute("PRAGMA table_info(sequence_alignment)").fetchall()]
+			aln_col = None
+			for candidate in ["alignment", "aligned_seq", "sequence", "aln", "alignment_seq"]:
+				if candidate in cols:
+					aln_col = candidate
+					break
+			
+			if not aln_col:
+				return {}
+				
+			id_col = "primary_accession" if "primary_accession" in cols else "sequence_id" if "sequence_id" in cols else None
+			if not id_col:
+				return {}
+
+			df = pd.read_sql_query(f"SELECT {id_col} as acc, LENGTH({aln_col}) as aln_len FROM sequence_alignment", conn)
+			return dict(zip(df["acc"].astype(str), df["aln_len"]))
+		except Exception as e:
+			print(f"[warn] Could not load historic alignment lengths: {e}", file=sys.stderr)
+			return {}
+		finally:
+			conn.close()
+
+	def find_gaps_in_fasta(self):
 		os.makedirs(join(self.tmp_dir, self.output_dir), exist_ok=True)
-		existing_feature_accessions = self.load_existing_feature_accessions()
 		update_scope_accessions = self.load_update_scope_accessions()
 		segment_map = self.load_segment_map()
+
+		# Load old metrics to evaluate backbone shifts
+		historical_lengths = self.load_historical_alignment_lengths()
 
 		fasta_file_dir = self.paded_alignment
 		if not fasta_file_dir or not os.path.isdir(fasta_file_dir):
@@ -285,10 +321,9 @@ class CalculateAlignmentCoordinates:
 		]
 		if segment_map:
 			header.append("segment")
-		with open(join(self.tmp_dir, self.output_dir, self.output_file), "w") as out_f:
 
-			out_f.write("\t".join(header))
-			out_f.write("\n")
+		with open(join(self.tmp_dir, self.output_dir, self.output_file), "w") as out_f:
+			out_f.write("\t".join(header) + "\n")
 
 			for fasta_file in fasta_files:
 				current_master = self.resolve_master_for_alignment(fasta_file, masters, master_segment_map)
@@ -306,24 +341,32 @@ class CalculateAlignmentCoordinates:
 
 				calc = CalculateGenomeCoordinates(join(fasta_file_dir, fasta_file), current_master)
 				genome_coords = calc.extract_alignment_coordinates()
+				
 				for record in SeqIO.parse(join(fasta_file_dir, fasta_file), "fasta"):
 					record_id = str(record.id).strip()
+					sequence = str(record.seq)
+					current_len = len(sequence)
+					
+					# Detect if a novel insertion expanded this specific file's structural space
+					old_len = historical_lengths.get(record_id)
+					backbone_expanded = old_len is not None and current_len > old_len
+
+					# CONDITIONAL BYPASS:
+					# If the file dictates an update scope, we obey it UNLESS 
+					# a backbone expansion demands coordinate adjustments for historical tracking.
 					if update_scope_accessions and record_id not in update_scope_accessions:
-						continue
-					if existing_feature_accessions and record.id in existing_feature_accessions:
-						continue
+						if not backbone_expanded:
+							continue
+						else:
+							print(f"[info] Forcing coordinate recalculation for historic ID {record_id} due to backbone expansion ({old_len} -> {current_len})")
 
 					if record.id in genome_coords:
 						master_acc, genome_cord_start, genome_cord_end = genome_coords[record.id]
 					else:
-						# Fallback if record not in genome_coords (should not happen if calc worked)
 						genome_cord_start, genome_cord_end = "NA", "NA"
 
-					sequence = str(record.seq)
 					gaps = self.get_gap_ranges(sequence)
-					aligned_length = len(sequence.replace('-', ''))
 
-					# Calculate start offset: just after the first gap
 					if gaps and gaps[0][0] == 1:
 						start_offset = gaps[0][1] + 1
 					else:
@@ -338,7 +381,6 @@ class CalculateAlignmentCoordinates:
 						genome_cord_end=genome_cord_end,
 					)
 
-					#print(f">{record.id}", adjusted)
 					for each_cords in adjusted:
 						reference_acc = blast_dict[record.id] if record.id in blast_dict else current_master
 						if segment_map:
@@ -364,8 +406,7 @@ class CalculateAlignmentCoordinates:
 						]
 						if segment_map:
 							data.append(segment_map.get(record.id, ""))
-						out_f.write('\t'.join(data))
-						out_f.write("\n")
+						out_f.write('\t'.join(data) + "\n")
 if __name__ == "__main__":
 	parser = ArgumentParser(description='Calculates the genome and cds coordinates for a given sequences')
 	parser.add_argument('-i', '--paded_alignment', help='Sequence file directory, it can be single or multiple fasta sequence files.', required=True)

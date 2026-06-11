@@ -217,6 +217,44 @@ def test_create_sqlite_db_update_mode_upserts_without_growth(tmp_path: Path):
     assert "Input query sequences passed QC" in summary
 
 
+def test_create_sqlite_db_update_mode_replaces_shifted_feature_rows(tmp_path: Path):
+    initial = _inputs(tmp_path, "feature_initial", aln_a="ATGC")
+    _build_db(tmp_path, initial, update=False)
+
+    db_path = tmp_path / "SqliteDB" / "upd_db.db"
+
+    update_inputs = _inputs(tmp_path, "feature_update", aln_a="AT--")
+    pd.DataFrame(
+        [["A", "M", "R", "2", "11", "1", "10", "1", "10", "P", "1"]],
+        columns=[
+            "accession",
+            "master_ref_accession",
+            "reference_accession",
+            "aln_start",
+            "aln_end",
+            "cds_start",
+            "cds_end",
+            "cds_start_OG_seq",
+            "cds_end_OG_seq",
+            "product",
+            "segment",
+        ],
+    ).to_csv(update_inputs["features"], sep="\t", index=False)
+
+    _build_db(tmp_path, update_inputs, update=True, update_db=db_path)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT aln_start, aln_end, cds_start_OG_seq, cds_end_OG_seq FROM features WHERE accession='A' AND product='P'"
+        )
+        rows = [tuple(str(value) for value in row) for row in cur.fetchall()]
+        assert rows == [("2", "11", "1", "10")]
+    finally:
+        conn.close()
+
+
 def test_create_sqlite_db_filtered_ids_do_not_exclude_reference_rows(tmp_path: Path):
     inp = _inputs(tmp_path, "filtered_refs", aln_a="ATGC")
 

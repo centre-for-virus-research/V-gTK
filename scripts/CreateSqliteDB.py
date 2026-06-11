@@ -531,7 +531,12 @@ class CreateSqliteDB:
 				key.append("segment")
 			return key
 		if table == "features":
-			key = ["accession", "master_ref_accession", "reference_accession", "aln_start", "aln_end", "cds_start", "cds_end", "product"]
+			key = ["accession"]
+			if "cds_start_OG_seq" in cols and "cds_end_OG_seq" in cols:
+				key.extend(["cds_start_OG_seq", "cds_end_OG_seq"])
+			else:
+				key.extend(["cds_start", "cds_end"])
+			key.append("product")
 			if "segment" in cols:
 				key.append("segment")
 			missing = [c for c in key if c not in cols]
@@ -570,49 +575,50 @@ class CreateSqliteDB:
 			return 0
 		df = df.copy()
 		key_cols = key_cols if key_cols is not None else self._infer_key_cols(table, df)
-		if not key_cols:
-			if not self.update:
-				df.to_sql(table, conn, if_exists="replace", index=False)
-			else:
-				df.to_sql(table, conn, if_exists="append" if self._table_exists(conn, table) else "replace", index=False)
-			return len(df)
-
+		
+		# 1. Align schema and add columns if we are updating an existing table
 		if self.update and self._table_exists(conn, table):
 			self._ensure_update_columns(conn, table, df)
 			df = self._align_df_to_existing_schema(conn, table, df)
 			key_cols = self._resolve_key_cols_for_existing_schema(conn, table, key_cols, set(df.columns))
 
+		# 2. Normalize and deduplicate incoming dataframe rows internally
 		for c in key_cols:
 			if c not in df.columns:
 				raise ValueError(f"Incoming '{table}' dataframe missing key column '{c}'")
 			df[c] = self._normalize_key_series(df[c])
+			
 		df, dropped_internal = self._dedupe_incoming_df(df, key_cols)
 		if dropped_internal:
 			print(f"[CreateSqliteDB] Dropped {dropped_internal} duplicate incoming rows in '{table}' by key {key_cols}")
+
+		# 3. Handle baseline scenario: If it's a completely fresh run (not update mode)
 		if not self.update:
 			df.to_sql(table, conn, if_exists="replace", index=False)
 			return len(df)
+
+		# 4. Handle edge case: If update mode is active, but the table doesn't exist yet
 		if not self._table_exists(conn, table):
 			df.to_sql(table, conn, if_exists="replace", index=False)
 			print(f"[CreateSqliteDB] Created table '{table}' with {len(df)} rows (table did not exist)")
 			return len(df)
-		existing_keys = self._fetch_existing_keys(conn, table, key_cols)
+
+		# 5. Native Atomic SQL UPSERT for the core tracking datasets
 		upsert_tables = {"meta_data", "sequence_alignment", "features", "insertions", "sequences"}
 		if table in upsert_tables:
-			if len(key_cols) == 1:
-				key = key_cols[0]
-				keys_to_replace = sorted(set(df[key].tolist()))
-				if keys_to_replace:
-					placeholders = ",".join(["?"] * len(keys_to_replace))
-					conn.execute(f"DELETE FROM {table} WHERE {key} IN ({placeholders})", keys_to_replace)
-			else:
-				where_clause = " AND ".join([f"{c}=?" for c in key_cols])
-				for key_tuple in set(map(tuple, df[key_cols].itertuples(index=False, name=None))):
-					conn.execute(f"DELETE FROM {table} WHERE {where_clause}", tuple(key_tuple))
-			df.to_sql(table, conn, if_exists="append", index=False)
-			print(f"[CreateSqliteDB] Upserted {len(df)} rows into '{table}' by key {key_cols}")
+			columns = list(df.columns)
+			placeholders = ", ".join(["?"] * len(columns))
+			sql_cols = ", ".join(columns)
+			upsert_sql = f"INSERT OR REPLACE INTO {table} ({sql_cols}) VALUES ({placeholders})"
+			
+			# Execute array payload using high-performance executemany transaction
+			payload = [tuple(x) for x in df.values]
+			conn.executemany(upsert_sql, payload)
+			print(f"[CreateSqliteDB] Atomically upserted {len(df)} rows into '{table}' by key {key_cols}")
 			return len(df)
 
+		# 6. Fallback Append logic for static lookup/metadata asset tables (M49, project settings, etc.)
+		existing_keys = self._fetch_existing_keys(conn, table, key_cols)
 		if len(key_cols) == 1:
 			key = key_cols[0]
 			new_mask = ~df[key].isin(existing_keys)
@@ -622,16 +628,24 @@ class CreateSqliteDB:
 			keep_flags = [k not in existing_keys for k in incoming_keys]
 			new_mask = pd.Series(keep_flags, index=df.index)
 			dup_keys = [k for k, keep in zip(incoming_keys, keep_flags) if not keep]
+			
 		df_new = df.loc[new_mask].copy()
 		if not df_new.empty:
 			df_new.to_sql(table, conn, if_exists="append", index=False)
 			print(f"[CreateSqliteDB] Appended {len(df_new)} new rows into '{table}' (non-redundant)")
 		else:
 			print(f"[CreateSqliteDB] No new rows to append into '{table}' (all duplicates)")
+			
 		if update_exclusions is not None and dup_keys:
 			now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 			for k in dup_keys:
-				update_exclusions.append({"batch_id": self.batch_id, "table_name": table, "key": str(k), "reason": "duplicate_key_in_db", "date": now_str})
+				update_exclusions.append({
+					"batch_id": self.batch_id, 
+					"table_name": table, 
+					"key": str(k), 
+					"reason": "duplicate_key_in_db", 
+					"date": now_str
+				})
 		return len(df_new)
 
 	@staticmethod
@@ -811,7 +825,21 @@ class CreateSqliteDB:
 		cursor.execute("CREATE TABLE IF NOT EXISTS update_batches (batch_id TEXT PRIMARY KEY, started_at TEXT, finished_at TEXT, update_db TEXT, mode TEXT);")
 		cursor.execute("CREATE TABLE IF NOT EXISTS update_table_deltas (batch_id TEXT, table_name TEXT, before_count INTEGER, after_count INTEGER, delta INTEGER);")
 
+		if self.update:
+			cursor.execute("""
+				CREATE UNIQUE INDEX IF NOT EXISTS idx_features_upsert 
+				ON features (accession, cds_start_OG_seq, cds_end_OG_seq, product, segment);
+			""")
+			cursor.execute("""
+				CREATE UNIQUE INDEX IF NOT EXISTS idx_seq_alignment_upsert 
+				ON sequence_alignment (primary_accession, alignment_name, segment);
+			""")
+			cursor.execute("""
+				CREATE UNIQUE INDEX IF NOT EXISTS idx_metadata_upsert 
+				ON meta_data (primary_accession, segment);
+			""")
 		now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+  
 		cursor.execute("INSERT OR REPLACE INTO update_batches (batch_id, started_at, finished_at, update_db, mode) VALUES (?, ?, ?, ?, ?)", (self.batch_id, now_str, None, self.update_db if self.update else None, "update" if self.update else "create"))
 
 		if self._should_force_unsegmented_segment_one(conn, [df_meta_data, df_features, df_aln, df_insertions]):

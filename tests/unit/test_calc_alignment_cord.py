@@ -137,6 +137,34 @@ def test_find_gaps_in_fasta_matches_expected(tmp_path: Path):
     assert actual == expected
 
 
+def test_find_gaps_in_fasta_update_mode_recalculates_existing_accessions(tmp_path: Path):
+    update_db = tmp_path / "update.db"
+    conn = sqlite3.connect(str(update_db))
+    try:
+        conn.execute("CREATE TABLE features (accession TEXT)")
+        conn.execute("INSERT INTO features(accession) VALUES ('Q_A')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    processor = CalculateAlignmentCoordinates(
+        paded_alignment=str(DATA_DIR / "padded_alignment"),
+        master_gff=[str(DATA_DIR / "MASTER1.gff3")],
+        tmp_dir=str(tmp_path),
+        output_dir="Tables",
+        output_file="features.tsv",
+        master_accession=str(DATA_DIR / "master_list.tsv"),
+        blast_uniq_hits=str(DATA_DIR / "query_uniq_tophits.tsv"),
+        update_db=str(update_db),
+    )
+
+    processor.find_gaps_in_fasta()
+
+    actual = read_tsv_as_dicts(tmp_path / "Tables" / "features.tsv")
+    expected = read_tsv_as_dicts(DATA_DIR / "expected_features.tsv")
+    assert actual == expected
+
+
 def test_find_gaps_in_fasta_preserves_projected_product_identity(tmp_path: Path):
     processor = make_processor(tmp_path)
     processor.find_gaps_in_fasta()

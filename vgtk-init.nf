@@ -1032,9 +1032,7 @@ process TEST_DB_VALIDATION {
     if [ "!{params.is_segmented}" = "Y" ]; then
         EXTRA_ARGS="--expect-segment-trees"
     fi
-    if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
-        EXTRA_ARGS="${EXTRA_ARGS} --check-update-integrity"
-    fi
+    EXTRA_ARGS="${EXTRA_ARGS} --check-update-integrity"
     if [ "!{params.tree_free}" = "true" ]; then
         EXTRA_ARGS="${EXTRA_ARGS} --allow-no-trees"
     fi

@@ -557,7 +557,7 @@ def test_download_test_run_uses_configured_test_fetch_count(tmp_path: Path, monk
 
     assert any("retmax=100" in url for url in requested_urls)
     assert sampled == {"population_size": 150, "k": 100}
-    assert captured["markers"] == [10] * 10
+    assert captured["markers"] == [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 
 
 def test_update_does_not_fetch_refs_from_ref_list_in_db_backed_mode(tmp_path: Path, monkeypatch):
