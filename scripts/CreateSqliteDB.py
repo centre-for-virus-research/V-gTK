@@ -399,6 +399,84 @@ class CreateSqliteDB:
         ).fetchone()
         return row is not None
 
+    @staticmethod
+    def _table_columns(conn, table: str) -> list[str]:
+        try:
+            rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        except Exception:
+            return []
+        return [r[1] for r in rows]
+
+    def _migrate_legacy_tree_table(self, conn, created_at: str) -> None:
+        """
+        Older runs accidentally created a table named 'tree'.
+        Move compatible rows into the single canonical 'trees' table, then drop 'tree'.
+        """
+        if not self._table_exists(conn, "tree"):
+            return
+
+        legacy_cols = set(self._table_columns(conn, "tree"))
+        required = {"newick"}
+        if not required.issubset(legacy_cols):
+            print("[CreateSqliteDB][WARN] Dropping legacy 'tree' table because it has no newick column")
+            conn.execute("DROP TABLE IF EXISTS tree;")
+            return
+
+        df_legacy = pd.read_sql_query("SELECT * FROM tree", conn).fillna("")
+        migrated = 0
+
+        for _, row in df_legacy.iterrows():
+            newick = str(row.get("newick", "")).strip()
+            if not newick:
+                continue
+
+            name = str(row.get("name", "")).strip()
+            if not name:
+                name = str(row.get("tree_name", "")).strip()
+            if not name:
+                name = str(row.get("tree_path", "")).strip()
+            if not name:
+                name = "tree_dir_tree"
+
+            source = str(row.get("source", "")).strip()
+            if not source:
+                source = str(row.get("tree_type", "")).strip()
+            if not source:
+                source = "tree_dir"
+
+            segment_key = str(row.get("segment_key", "")).strip()
+            if not segment_key:
+                segment_key = str(row.get("chromosome", "")).strip()
+            segment = str(row.get("segment", "")).strip()
+            if not segment:
+                segment = str(row.get("segment_number", "")).strip()
+
+            existing = conn.execute(
+                """
+                SELECT 1 FROM trees
+                WHERE COALESCE(source, '') = ?
+                  AND COALESCE(name, '') = ?
+                  AND COALESCE(segment_key, '') = ?
+                  AND COALESCE(segment, '') = ?
+                LIMIT 1;
+                """,
+                (source, name, segment_key, segment),
+            ).fetchone()
+
+            if existing:
+                continue
+
+            conn.execute(
+                "INSERT INTO trees (name, source, segment_key, segment, newick, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (name, source, segment_key or None, segment or None, newick, created_at),
+            )
+            migrated += 1
+
+        conn.execute("DROP TABLE IF EXISTS tree;")
+        if migrated:
+            print(f"[CreateSqliteDB] Migrated {migrated} legacy rows from 'tree' into 'trees'")
+        print("[CreateSqliteDB] Removed legacy table 'tree'; using only 'trees'")
+
     #@staticmethod
     #def _normalize_key_series(s: pd.Series) -> pd.Series:
     #   return s.fillna("").astype(str).str.strip()
@@ -610,6 +688,20 @@ class CreateSqliteDB:
 
         return len(df_new)
 
+    def write_table_as_is(self, conn, df: pd.DataFrame, table: str) -> int:
+        if df is None:
+            return 0
+
+        df = df.copy()
+
+        if not self.update:
+            df.to_sql(table, conn, if_exists="replace", index=False)
+            print(f"[CreateSqliteDB] Wrote {len(df)} rows into '{table}' as-is")
+        else:
+            df.to_sql(table, conn, if_exists="append", index=False)
+            print(f"[CreateSqliteDB] Appended {len(df)} rows into '{table}' as-is")
+
+        return len(df)
     # ----------------------
     # DB creation
     # ----------------------
@@ -814,7 +906,7 @@ class CreateSqliteDB:
             "cds_end",
             "product",
         ]
-        #self.merge_table_append_nonredundant(conn, df_features, "features", features_key, update_exclusions)
+        self.merge_table_append_nonredundant(conn, df_features, "features", features_key, update_exclusions)
       
         #self.merge_table_append_nonredundant(conn, df_features, "features", None, update_exclusions)
 
@@ -838,15 +930,18 @@ class CreateSqliteDB:
         self.merge_table_append_nonredundant(conn, df_fasta_sequences, "sequences", ["header"], update_exclusions)
 
         # host tables
-        self.merge_table_append_nonredundant(conn, df_host_taxa, "host_taxa", None, update_exclusions)
-        self.merge_table_append_nonredundant(conn, df_host_lineage, "host_lineage", None, update_exclusions)
-        self.merge_table_append_nonredundant(conn, df_host_children, "host_children", None, update_exclusions)
-        self.merge_table_append_nonredundant(conn, df_host_lineage_lookup, "host_lineage_lookup", None, update_exclusions)
+        self.write_table_as_is(conn, df_host_taxa, "host_taxa")
+        self.write_table_as_is(conn, df_host_lineage, "host_lineage")
+        self.write_table_as_is(conn, df_host_children, "host_children")
+        self.write_table_as_is(conn, df_host_lineage_lookup, "host_lineage_lookup")
 
-        # trees table from directory (optional)
-        if df_trees is not None and not df_trees.empty:
-            # store as separate table "trees_dir" to keep schema clean (since df_trees has many columns)
-           self.merge_table_append_nonredundant(conn, df_trees, "tree", None, update_exclusions)
+        #self.merge_table_append_nonredundant(conn, df_host_taxa, "host_taxa", None, update_exclusions)
+        #self.merge_table_append_nonredundant(conn, df_host_lineage, "host_lineage", None, update_exclusions)
+        #self.merge_table_append_nonredundant(conn, df_host_lineage_lookup, "host_lineage_lookup", None, update_exclusions)
+        ##self.merge_table_append_nonredundant(conn, df_host_children, "host_children", None, update_exclusions)
+
+        # tree_dir rows are handled later by the single canonical "trees" table.
+        # Do not write to a separate "tree" table.
 
         # ----------------------
         # Exclusion tables (your existing behavior)
@@ -871,6 +966,10 @@ class CreateSqliteDB:
         # ----------------------
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+        # If an older run created the accidental singular "tree" table,
+        # move compatible rows into "trees" and remove the duplicate table.
+        self._migrate_legacy_tree_table(conn, now_str)
+
         # build accession->segment mapping from current DB meta_data (best effort)
         accession_to_segment = {}
         try:
@@ -891,6 +990,39 @@ class CreateSqliteDB:
                 pass
 
         tree_records = []
+
+        # Add --tree_dir rows to the same canonical trees table.
+        # The tree_dir manifest has extra fields, so we map them to the common schema:
+        #   tree_name -> name
+        #   tree_type -> source
+        #   chromosome -> segment_key
+        #   segment_number -> segment
+        if df_trees is not None and not df_trees.empty:
+            for _, row in df_trees.iterrows():
+                newick = str(row.get("newick", "")).strip()
+                if not newick:
+                    continue
+
+                tree_name = str(row.get("tree_name", "")).strip()
+                tree_type = str(row.get("tree_type", "")).strip()
+                chromosome = str(row.get("chromosome", "")).strip()
+                segment_number = str(row.get("segment_number", "")).strip()
+                tree_model = str(row.get("tree_model", "")).strip()
+
+                source = tree_type or "tree_dir"
+                if tree_model:
+                    source = f"{source}_{tree_model}"
+
+                tree_records.append(
+                    {
+                        "name": tree_name or "tree_dir_tree",
+                        "source": source,
+                        "segment_key": chromosome or None,
+                        "segment": segment_number or self._segment_from_key(chromosome),
+                        "newick": newick,
+                    }
+                )
+
         for name, source, tree_path in [
             ("veryfasttree", "veryfasttree", self.tree_file),
             ("iqtree", "iqtree", self.iqtree_file),
@@ -1105,7 +1237,7 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output_dir", help="tmp directory where the database is stored", default="SqliteDB")
     parser.add_argument("-rf", "--features", help="Features table", default="tmp/Tables/features.tsv")
     parser.add_argument("-p", "--pad_aln", help="Padded alignment file", default="tmp/Tables/sequence_alignment.tsv")
-    parser.add_argument("-g", "--gene_info", help="Gene table", default="generic/rabv/Tables/gene_info.tsv")
+    parser.add_argument("-g", "--gene_info", help="Gene table", default="generic/gene_info/gene_info.tsv")
     parser.add_argument("-mc", "--m49_countries", help="M49 countries", default="assets/m49_country.csv")
     parser.add_argument(
         "-mir", "--m49_interm_region", help="M49 intermediate regions", default="assets/m49_intermediate_region.csv"
@@ -1146,7 +1278,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--tree_dir",
-        help="Directory containing tree files and a manifest meta_data.tsv (chromosome, segment_number, tree_type, tree_name, tree_model).",
+        help="Directory containing tree files and a manifest meta_data.tsv (chromosome, segment_number, tree_type, tree_name, tree_model, description).",
         default=None,
     )
     parser.add_argument("-ht", "--host_taxa_file", help="Host Taxanomy file", default="tmp/HostTaxa/Host_taxa.tsv")
