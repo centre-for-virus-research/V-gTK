@@ -119,8 +119,20 @@ class GenBankFetcher:
 					page_resp = requests.get(page_url)
 					page_resp.raise_for_status()
 					data = page_resp.json()
+
 					if "esearchresult" not in data:
-						raise ValueError("Incomplete JSON response: missing 'esearchresult'")
+						raise ValueError(
+							f"Incomplete JSON response: missing 'esearchresult'. "
+							f"Response keys: {list(data.keys())}. Response: {str(data)[:500]}"
+						)
+
+					if "idlist" not in data["esearchresult"]:
+						raise ValueError(
+							f"Incomplete JSON response: missing 'esearchresult.idlist'. "
+							f"esearchresult keys: {list(data['esearchresult'].keys())}. "
+							f"Response: {str(data)[:500]}"
+						)
+
 					page = data["esearchresult"]["idlist"]
 					break
 				except (requests.exceptions.JSONDecodeError, requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError, requests.exceptions.HTTPError, ValueError) as e:
@@ -181,8 +193,20 @@ class GenBankFetcher:
 					page_resp = requests.get(page_url)
 					page_resp.raise_for_status()
 					data = page_resp.json()
+
 					if "esearchresult" not in data:
-						raise ValueError("Incomplete JSON response: missing 'esearchresult'")
+						raise ValueError(
+							f"Incomplete JSON response: missing 'esearchresult'. "
+							f"Response keys: {list(data.keys())}. Response: {str(data)[:500]}"
+						)
+
+					if "idlist" not in data["esearchresult"]:
+						raise ValueError(
+							f"Incomplete JSON response: missing 'esearchresult.idlist'. "
+							f"esearchresult keys: {list(data['esearchresult'].keys())}. "
+							f"Response: {str(data)[:500]}"
+						)
+
 					page = data["esearchresult"]["idlist"]
 					break
 				except (requests.exceptions.JSONDecodeError, requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError, requests.exceptions.HTTPError, ValueError) as e:
