@@ -52,21 +52,36 @@ class HostTaxaTable:
   def load_names(self):
     all_names = {}
     sci_names = {}
+    common_names = {}
+
     with open(self.names_file, encoding="utf-8") as f:
       for line in f:
         parts = [p.strip() for p in line.split("|")]
         if len(parts) < 4:
           continue
+
         taxid_str, name_txt, _, class_name = parts[:4]
+
         try:
           taxid = int(taxid_str)
         except ValueError:
           continue
 
+        # Keep every name exactly as present in names.dmp
         all_names.setdefault(taxid, []).append((name_txt, class_name))
+
         if class_name == "scientific name":
           sci_names[taxid] = name_txt
-    return all_names, sci_names
+
+        # Prefer GenBank common name, e.g. taxid 9615 -> dog
+        if class_name == "genbank common name":
+          common_names[taxid] = name_txt
+
+        # Use normal common name only if genbank common name is not already present
+        elif class_name == "common name" and taxid not in common_names:
+          common_names[taxid] = name_txt
+
+    return all_names, sci_names, common_names
 
   def load_nodes(self):
     children_map = {}
@@ -148,7 +163,7 @@ class HostTaxaTable:
     os.makedirs(join(self.base_dir, self.output_dir), exist_ok=True)
 
     children_map, parent_map, rank_map = self.load_nodes()
-    all_names, sci_names = self.load_names()
+    all_names, sci_names, common_names = self.load_names()
     taxa_list = self.load_taxa_ids_from_tsv()
 
     host_op_file = join(self.base_dir, self.output_dir, self.host_output_file)
@@ -159,17 +174,25 @@ class HostTaxaTable:
     # ---- Host_taxa.tsv ----
     with open(host_op_file, "w", encoding="utf-8", newline="") as out_host:
       writer = csv.writer(out_host, delimiter="\t")
-      writer.writerow(["taxa_id", "name", "name_type", "taxonomy_level"])
+      writer.writerow(["taxa_id", "name", "name_type", "taxonomy_level", "common_name"])
 
       for taxid in taxa_list:
         names_for_taxid = all_names.get(taxid, [])
         taxonomy_level = rank_map.get(taxid, "unknown")
+        common_name = common_names.get(taxid, "")
+
         if not names_for_taxid:
-          writer.writerow([taxid, "Unknown", "other", taxonomy_level])
+          writer.writerow([taxid, "Unknown", "other", taxonomy_level, common_name])
         else:
           for name_txt, class_name in names_for_taxid:
             name_type = self._map_name_type(class_name)
-            writer.writerow([taxid, name_txt, name_type, taxonomy_level])
+            writer.writerow([
+              taxid,
+              name_txt,
+              name_type,
+              taxonomy_level,
+              common_name
+            ])
 
     # ---- Host_taxa_children.tsv ----
     with open(child_op_file, "w", encoding="utf-8", newline="") as out_child:
