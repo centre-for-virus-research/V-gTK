@@ -23,7 +23,7 @@ Update mode:
 '''
 
 class GenerateTables:
-	def __init__(self, genbank_matrix, base_dir, output_dir, blast_hits, paded_aln, nextalign_dir, email):
+	def __init__(self, genbank_matrix, base_dir, output_dir, blast_hits, paded_aln, nextalign_dir, email, gff_dir=None):
 		self.genbank_matrix = genbank_matrix
 		self.base_dir = base_dir
 		self.output_dir = output_dir
@@ -31,6 +31,7 @@ class GenerateTables:
 		self.paded_aln = paded_aln
 		self.nextalign_dir = nextalign_dir
 		self.email = email
+		self.gff_dir = gff_dir if gff_dir else join(self.base_dir, "Gff")
 		os.makedirs(join(self.base_dir, self.output_dir), exist_ok=True)
 
 	def fetch_taxonomy_details(self, tax_id, max_retries=5, delay=2):
@@ -270,11 +271,145 @@ class GenerateTables:
 			outfile.writelines(lines_to_write)
 		print(f"Redundancy removed. File updated: {file_path}")
 
+	@staticmethod
+	def parse_gff_attributes(attribute_text):
+		"""
+		Parse GFF/GFF3 attributes into a dictionary.
+
+		Supports both:
+			ID=cds1;gene=N;product=Nucleoprotein
+		and older style:
+			gene "N"; product "Nucleoprotein";
+		"""
+		attrs = {}
+
+		for item in attribute_text.strip().split(";"):
+			item = item.strip()
+			if not item:
+				continue
+
+			if "=" in item:
+				key, value = item.split("=", 1)
+			elif " " in item:
+				key, value = item.split(" ", 1)
+			else:
+				continue
+
+			key = key.strip()
+			value = value.strip().strip('"')
+			value = urllib.parse.unquote(value)
+
+			attrs[key] = value
+
+		return attrs
+
+	@staticmethod
+	def first_available_attribute(attrs, keys, default="NA"):
+		for key in keys:
+			value = attrs.get(key, "").strip()
+			if value:
+				return value
+		return default
+
+	def genes_table(self):
+		"""
+		Create genes.tsv from GFF files in tmp/Gff by default.
+
+		Output columns:
+			accession	category	start	end	gene_name	symbol
+
+		For CDS rows:
+			gene_name = product/protein name
+			symbol = gene symbol
+		"""
+		gff_dir = self.gff_dir
+		output_file = join(self.base_dir, self.output_dir, "genes.tsv")
+
+		header = ["accession", "category", "start", "end", "gene_name", "symbol"]
+
+		if not os.path.isdir(gff_dir):
+			print(f"Warning: GFF directory not found: {gff_dir}. Skipping genes.tsv creation.")
+			return
+
+		gff_files = []
+		for root, dirs, files in os.walk(gff_dir):
+			for filename in files:
+				if filename.lower().endswith((".gff", ".gff3")):
+					gff_files.append(join(root, filename))
+
+		if not gff_files:
+			print(f"Warning: No GFF/GFF3 files found in {gff_dir}. Skipping genes.tsv creation.")
+			return
+
+		seen = set()
+
+		with open(output_file, "w", newline="") as write_file:
+			writer = csv.writer(write_file, delimiter="\t")
+			writer.writerow(header)
+
+			for gff_file in sorted(gff_files):
+				print(f"Reading GFF file: {gff_file}")
+
+				with open(gff_file) as file:
+					for line in file:
+						if not line.strip() or line.startswith("#"):
+							continue
+
+						cols = line.rstrip("\n").split("\t")
+
+						if len(cols) < 9:
+							continue
+
+						accession, source, category, start, end, score, strand, phase, attributes = cols[:9]
+
+						if category != "CDS":
+							continue
+
+						attrs = self.parse_gff_attributes(attributes)
+
+						gene_name = self.first_available_attribute(
+							attrs,
+							["product", "protein", "protein_name", "Name", "note"],
+							default="NA"
+						)
+
+						symbol = self.first_available_attribute(
+							attrs,
+							["gene", "gene_name", "symbol", "locus_tag"],
+							default="NA"
+						)
+
+						# If symbol is missing but Name exists, use Name as fallback.
+						if symbol == "NA":
+							symbol = self.first_available_attribute(
+								attrs,
+								["Name"],
+								default="NA"
+							)
+
+						accession = accession.strip().split()[0]
+
+						# Converts NC_001542.1 to NC_001542, matching your expected output.
+						if "." in accession:
+							accession = accession.rsplit(".", 1)[0]
+
+						row = [accession, category, start, end, gene_name, symbol]
+						row_key = tuple(row)
+
+						if row_key in seen:
+							continue
+
+						seen.add(row_key)
+						writer.writerow(row)
+
+		print(f"genes.tsv created: {output_file}")
+
 	def process(self):
 		
 		blast_dictionary = self.load_blast_hits(self.blast_hits)
 		#self.load_gb_matrix()
 		self.created_alignment_table(blast_dictionary)
+		self.genes_table()
 		#self.host_table()
 
 if __name__ == "__main__":
@@ -287,8 +422,8 @@ if __name__ == "__main__":
 	parser.add_argument('-p', '--paded_aln', help='Paded alignment file', nargs='+', default=["tmp/Pad-alignment/NC_001542.aligned_merged_MSA.fasta"])
 	parser.add_argument('-n', '--nextalign_dir', help='Nextalign aligned directory', default="tmp/Nextalign/")
 	parser.add_argument('-e', '--email', help='Email id', default='your-email@example.com')
-
+	parser.add_argument('--gff_dir', help='GFF directory, default=<base_dir>/Gff', default=None)
 	args = parser.parse_args()
 	
-	processor = GenerateTables(args.genbank_matrix, args.base_dir, args.output_dir, args.blast_hits, args.paded_aln, args.nextalign_dir, args.email)
+	processor = GenerateTables(args.genbank_matrix, args.base_dir, args.output_dir, args.blast_hits, args.paded_aln, args.nextalign_dir, args.email, args.gff_dir)
 	processor.process()
