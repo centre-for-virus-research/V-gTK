@@ -32,9 +32,54 @@ class CalculateAlignmentCoordinates:
 		else:
 			return [x.strip() for x in self.master_accession.split(',') if x.strip()]
 
+	def build_master_coord_to_alignment_index(self, master_alignment):
+		coord_to_aln_index = {}
+		master_pos = 0
+
+		for aln_index, base in enumerate(master_alignment):
+			if base != '-':
+				master_pos += 1
+				coord_to_aln_index[master_pos] = aln_index
+
+		return coord_to_aln_index
+
+	def format_genome_coverage(self, query_alignment, master_coord_to_aln_index, feature_start, feature_end):
+		try:
+			feature_start = int(feature_start)
+			feature_end = int(feature_end)
+		except (TypeError, ValueError):
+			return "NA"
+
+		if feature_start > feature_end:
+			feature_start, feature_end = feature_end, feature_start
+
+		aln_indexes = []
+
+		for master_pos in range(feature_start, feature_end + 1):
+			if master_pos in master_coord_to_aln_index:
+				aln_indexes.append(master_coord_to_aln_index[master_pos])
+
+		if not aln_indexes:
+			return "NA"
+
+		covered = 0
+
+		for aln_index in aln_indexes:
+			if aln_index >= len(query_alignment):
+				continue
+
+			base = query_alignment[aln_index]
+
+			if base != '-' and base.upper() != 'N':
+				covered += 1
+
+		coverage = covered / len(aln_indexes) * 100
+
+		return f"{coverage:.2f}"
+
 
 	def write_row(self, out_f, record_id, current_master, ref_acc, genome_cord_start, genome_cord_end,
-              cds_start="NA", cds_end="NA", product="NA"):
+              cds_start="NA", cds_end="NA", product="NA", genome_coverage="NA"):
 		data = [
 			record_id,
 			current_master,
@@ -44,6 +89,7 @@ class CalculateAlignmentCoordinates:
 			str(cds_start),
 			str(cds_end),
 			str(product),
+			str(genome_coverage),
 		]
 		out_f.write("\t".join(data) + "\n")
 
@@ -122,6 +168,8 @@ class CalculateAlignmentCoordinates:
 				results.append({
 					'start': overlap_start,
 					'end': overlap_end,
+					'feature_start': cds_start,
+					'feature_end': cds_end,
 					'product': cds['product']
 				})
 
@@ -154,7 +202,17 @@ class CalculateAlignmentCoordinates:
 		if not masters:
 			raise ValueError("No master accession could be resolved from --master_accession")
 
-		header = ["accession", "master_ref_accession", "reference_accession", "aln_start", "aln_end", "cds_start", "cds_end", "product"]
+		header = [
+			"accession",
+			"master_ref_accession",
+			"reference_accession",
+			"aln_start",
+			"aln_end",
+			"cds_start",
+			"cds_end",
+			"product",
+			"genome_coverage"
+			]
 		with open(join(self.tmp_dir, self.output_dir, self.output_file), "w") as out_f:
 
 			out_f.write("\t".join(header))
@@ -186,7 +244,22 @@ class CalculateAlignmentCoordinates:
 
 				calc = CalculateGenomeCoordinates(join(fasta_file_dir, fasta_file), current_master)
 				genome_coords = calc.extract_alignment_coordinates()
-				for record in SeqIO.parse(join(fasta_file_dir, fasta_file), "fasta"):
+
+				records = list(SeqIO.parse(join(fasta_file_dir, fasta_file), "fasta"))
+				master_record = None
+				for r in records:
+					if r.id == current_master or r.id.startswith(current_master):
+						master_record = r
+						break
+
+				if master_record is None:
+					print(f"Master sequence {current_master} not found in {fasta_file}. Skipping.")
+					continue
+
+				master_sequence = str(master_record.seq)
+				master_coord_to_aln_index = self.build_master_coord_to_alignment_index(master_sequence)
+
+				for record in records:
 
 					sequence = str(record.seq)
 					gaps = self.get_gap_ranges(sequence)
@@ -200,27 +273,6 @@ class CalculateAlignmentCoordinates:
 
 					adjusted = self.recalculate_cds_coordinates(record.id, gaps, cds_list, start_offset)
 
-					#print(f">{record.id}", adjusted)
-					'''
-					for each_cords in adjusted:
-						product = self.get_products_for_range(cds_list, each_cords)
-						if record.id in genome_coords:
-							master_acc, genome_cord_start, genome_cord_end = genome_coords[record.id]
-						else:
-							# Fallback if record not in genome_coords (should not happen if calc worked)
-							genome_cord_start, genome_cord_end = "NA", "NA"
-
-						for overlap_product in product:
-							if record.id in blast_dict:
-								data = [record.id, current_master, blast_dict[record.id], str(genome_cord_start), str(genome_cord_end), str(each_cords[0]), str(each_cords[1]), overlap_product['product']]
-								out_f.write('\t'.join(data))
-								out_f.write("\n")
-							else:
-								data = [record.id, current_master, current_master, str(genome_cord_start), str(genome_cord_end), str(each_cords[0]), str(each_cords[1]), overlap_product['product']]
-								out_f.write('\t'.join(data))	
-								out_f.write("\n")		
-
-					'''		
 					# Resolve aln coords once
 					if record.id in genome_coords:
 						master_acc, genome_cord_start, genome_cord_end = genome_coords[record.id]
@@ -245,6 +297,12 @@ class CalculateAlignmentCoordinates:
 
 						# Normal case: write full rows (one per overlapping product segment)
 						for overlap_product in product_hits:
+							genome_coverage = self.format_genome_coverage(
+							sequence,
+							master_coord_to_aln_index,
+							overlap_product.get('feature_start', each_cords[0]),
+							overlap_product.get('feature_end', each_cords[1])
+							)
 							self.write_row(
 								out_f,
 								record.id,
@@ -254,7 +312,8 @@ class CalculateAlignmentCoordinates:
 								genome_cord_end,
 								cds_start=each_cords[0],
 								cds_end=each_cords[1],
-								product=overlap_product.get('product', 'NA')
+								product=overlap_product.get('product', 'NA'),
+								genome_coverage=genome_coverage
 							)
 							
 if __name__ == "__main__":
