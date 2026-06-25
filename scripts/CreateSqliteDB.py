@@ -164,7 +164,7 @@ class CreateSqliteDB:
 
         df_manifest = self._read_delimited(manifest_path, dtype=str)
 
-        required = {"chromosome", "segment_number", "tree_type", "tree_name", "tree_model"}
+        required = {"chromosome", "segment_number", "tree_type", "tree_name", "tree_model", "description"}
         missing = required - set(df_manifest.columns)
         if missing:
             raise ValueError(
@@ -477,10 +477,6 @@ class CreateSqliteDB:
             print(f"[CreateSqliteDB] Migrated {migrated} legacy rows from 'tree' into 'trees'")
         print("[CreateSqliteDB] Removed legacy table 'tree'; using only 'trees'")
 
-    #@staticmethod
-    #def _normalize_key_series(s: pd.Series) -> pd.Series:
-    #   return s.fillna("").astype(str).str.strip()
-
     @staticmethod
     def _normalize_key_series(s: pd.Series) -> pd.Series:
         if pd.api.types.is_string_dtype(s) or s.dtype == object:
@@ -543,26 +539,7 @@ class CreateSqliteDB:
             if missing:
                 raise ValueError(f"features.tsv is missing required key columns: {missing}")
             return key
-        '''
-        if table == "features":
-            key = []
-            if "accession" in cols:
-                key.append("accession")
-            if "reference_accession" in cols:
-                key.append("reference_accession")
-            # add a feature identifier if present
-            for c in ["feature_name", "feature", "name", "type"]:
-                if c in cols:
-                    key.append(c)
-                    break
-            # add coordinates if present (helps uniqueness)
-            if "start" in cols and "end" in cols:
-                key.extend(["start", "end"])
-            if key:
-                return key
-            print("[CreateSqliteDB][WARN] features key inference fallback to first 3 columns", file=sys.stderr)
-            return cols[:3] if len(cols) >= 3 else cols[:1]
-        '''
+
         if table == "host_taxa":
             for c in ["host_taxa_id", "tax_id", "id"]:
                 if c in cols:
@@ -831,22 +808,6 @@ class CreateSqliteDB:
         df_trees = None
         if self.tree_dir:
             df_trees = self.load_trees_from_dir(self.tree_dir)
-
-        # Open DB
-        #db_path = self._db_path()
-        #os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        #conn = sqlite3.connect(db_path)
-
-       
-       
-        #db_path = self._db_path()
-        #os.makedirs(os.path.dirname(db_path), exist_ok=True)
-
-
-        #self._backup_existing_db_if_update(db_path)
-        #conn = sqlite3.connect(db_path)
-
-        #cursor = conn.cursor()
         
         db_path = self._db_path()
         db_dir = os.path.dirname(db_path)
@@ -862,7 +823,7 @@ class CreateSqliteDB:
         # Ensure tables for info/trees exist when we need them
         cursor.execute("PRAGMA foreign_keys = ON;")
         cursor.execute(
-            "CREATE TABLE IF NOT EXISTS trees (name TEXT, source TEXT, segment_key TEXT, segment TEXT, newick TEXT, created_at TEXT);"
+            "CREATE TABLE IF NOT EXISTS trees (name TEXT, source TEXT, segment_key TEXT, segment TEXT, newick TEXT, created_at TEXT, description TEXT);"
         )
         cursor.execute(
             "CREATE TABLE IF NOT EXISTS info (creation_type TEXT, date TEXT);"
@@ -918,7 +879,7 @@ class CreateSqliteDB:
         # genes and M49 and project_settings
         #self.merge_table_append_nonredundant(conn, df_gene, "gene_info", None, update_exclusions)
         gene_key = ["accession", "category", "start", "end", "gene_name"]
-        self.merge_table_append_nonredundant(conn, df_gene, "gene_info", gene_key, update_exclusions)
+        self.merge_table_append_nonredundant(conn, df_gene, "genes", gene_key, update_exclusions)
 
         self.merge_table_append_nonredundant(conn, df_m49_country, "m49_country", ["m49_code"], update_exclusions)
         self.merge_table_append_nonredundant(conn, df_m49_interm, "m49_intermediate", None, update_exclusions)
@@ -935,13 +896,6 @@ class CreateSqliteDB:
         self.write_table_as_is(conn, df_host_children, "host_children")
         self.write_table_as_is(conn, df_host_lineage_lookup, "host_lineage_lookup")
 
-        #self.merge_table_append_nonredundant(conn, df_host_taxa, "host_taxa", None, update_exclusions)
-        #self.merge_table_append_nonredundant(conn, df_host_lineage, "host_lineage", None, update_exclusions)
-        #self.merge_table_append_nonredundant(conn, df_host_lineage_lookup, "host_lineage_lookup", None, update_exclusions)
-        ##self.merge_table_append_nonredundant(conn, df_host_children, "host_children", None, update_exclusions)
-
-        # tree_dir rows are handled later by the single canonical "trees" table.
-        # Do not write to a separate "tree" table.
 
         # ----------------------
         # Exclusion tables (your existing behavior)
@@ -1008,6 +962,7 @@ class CreateSqliteDB:
                 chromosome = str(row.get("chromosome", "")).strip()
                 segment_number = str(row.get("segment_number", "")).strip()
                 tree_model = str(row.get("tree_model", "")).strip()
+                description = str(row.get("description", "")).strip()
 
                 source = tree_type or "tree_dir"
                 if tree_model:
@@ -1020,6 +975,7 @@ class CreateSqliteDB:
                         "segment_key": chromosome or None,
                         "segment": segment_number or self._segment_from_key(chromosome),
                         "newick": newick,
+                        "description": description or None,
                     }
                 )
 
@@ -1079,8 +1035,8 @@ class CreateSqliteDB:
                 cursor.execute("DELETE FROM trees;")
                 for _, tr in df_tree_ins.iterrows():
                     cursor.execute(
-                        "INSERT INTO trees (name, source, segment_key, segment, newick, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                        (tr["name"], tr["source"], tr["segment_key"], tr["segment"], tr["newick"], tr["created_at"]),
+                        "INSERT INTO trees (name, source, segment_key, segment, newick, created_at, description) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (tr["name"], tr["source"], tr["segment_key"], tr["segment"], tr["newick"], tr["created_at"], tr.get("description")),
                     )
             else:
                 # fetch existing keys
@@ -1101,8 +1057,8 @@ class CreateSqliteDB:
                     if key in existing:
                         continue
                     cursor.execute(
-                        "INSERT INTO trees (name, source, segment_key, segment, newick, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                        (tr["name"], tr["source"], tr["segment_key"], tr["segment"], tr["newick"], tr["created_at"]),
+                        "INSERT INTO trees (name, source, segment_key, segment, newick, created_at, description) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (tr["name"], tr["source"], tr["segment_key"], tr["segment"], tr["newick"], tr["created_at"], tr["description"]),
                     )
                     appended += 1
                 if appended:
@@ -1237,7 +1193,7 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output_dir", help="tmp directory where the database is stored", default="SqliteDB")
     parser.add_argument("-rf", "--features", help="Features table", default="tmp/Tables/features.tsv")
     parser.add_argument("-p", "--pad_aln", help="Padded alignment file", default="tmp/Tables/sequence_alignment.tsv")
-    parser.add_argument("-g", "--gene_info", help="Gene table", default="generic/gene_info/gene_info.tsv")
+    parser.add_argument("-g", "--gene_info", help="Gene table", default="tmp/Tables/genes.tsv")
     parser.add_argument("-mc", "--m49_countries", help="M49 countries", default="assets/m49_country.csv")
     parser.add_argument(
         "-mir", "--m49_interm_region", help="M49 intermediate regions", default="assets/m49_intermediate_region.csv"
