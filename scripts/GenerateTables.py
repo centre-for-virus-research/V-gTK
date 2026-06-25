@@ -167,47 +167,6 @@ class GenerateTables:
 			acc_dict[query] = ref
 		return acc_dict
 
-	''''
-	def created_alignment_table(self, blast_dict):
-		accessions = {}
-		missing_accs = []
-		seqs = {}
-		header = ["primary_accession", "alignment_name", "alignment"]
-		write_file = open(join(self.base_dir, self.output_dir, "sequence_alignment.tsv"), 'w')
-		write_file.write("\t".join(header) + "\n")
-		
-		# Handle single file or list of files
-		paded_aln_files = self.paded_aln if isinstance(self.paded_aln, list) else [self.paded_aln]
-		
-		for paded_file in paded_aln_files:
-			if not os.path.exists(paded_file):
-				print(f"Warning: Padded alignment file not found: {paded_file}")
-				continue
-			
-			rds = read_file.fasta(paded_file)
-			for rows in rds:
-				
-				if rows[0] not in accessions:
-					seqs[rows[0]] = rows[1]
-					accessions[rows[0]] = 1
-					if rows[0] in blast_dict:
-						write_file.write(rows[0].strip() + '\t' + blast_dict[rows[0].strip()] + '\t' + rows[1] + '\n')
-					else:
-						missing_accs.append(rows[0].strip())
-		
-		for each_ref_aln in os.listdir(join(self.nextalign_dir)):
-			for each_ref_aln_file in os.listdir(join(self.nextalign_dir, each_ref_aln)):
-				rds = read_file.fasta(join(self.nextalign_dir, each_ref_aln, each_ref_aln_file, each_ref_aln_file + ".aligned.fasta"))
-				for rows in rds:
-					if rows[0].strip() in missing_accs:
-						write_file.write(rows[0].strip() + '\t' + each_ref_aln_file + '\t' + seqs[rows[0]] + '\n')
-						accessions[rows[0].strip()] = 1
-
-			
-		write_file.close()
-		print("Removing the Sequence redundancy")
-		self.remove_redundancy_from_alignment(join(self.base_dir, self.output_dir, "sequence_alignment.tsv"))
-	'''
 	def created_alignment_table(self, blast_dict):
 		insertion_map = self.build_insertion_map()  # NEW
 
