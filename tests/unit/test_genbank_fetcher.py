@@ -772,3 +772,72 @@ def test_fetch_genbank_data_does_not_test_sample_when_update_mode(tmp_path: Path
 
     assert sample_called["called"] is False
     assert len(seen) == 1
+
+
+def test_ncbi_api_key_is_appended_to_url(tmp_path: Path, monkeypatch):
+    fetcher = GenBankFetcher(
+        taxid="11292",
+        base_url="https://example/",
+        email="x@y.com",
+        output_dir=str(tmp_path),
+        batch_size=100,
+        sleep_time=0,
+        base_dir="GenBank-XML",
+        update_file=None,
+    )
+    fetcher.api_key = "659abe2378cc400e3863f19865cc2329b208"
+
+    called_urls = []
+    def fake_get(url):
+        called_urls.append(url)
+        return _FakeResponse({"esearchresult": {"count": "42"}})
+
+    monkeypatch.setattr("GenBankFetcher.requests.get", fake_get)
+    count = fetcher.get_record_count()
+
+    assert count == 42
+    assert len(called_urls) == 1
+    assert "api_key=659abe2378cc400e3863f19865cc2329b208" in called_urls[0]
+
+
+def test_load_ncbi_key_validation(tmp_path: Path, monkeypatch):
+    fetcher = GenBankFetcher(
+        taxid="11292",
+        base_url="https://example/",
+        email="x@y.com",
+        output_dir=str(tmp_path),
+        batch_size=100,
+        sleep_time=0,
+        base_dir="GenBank-XML",
+        update_file=None,
+    )
+
+    # Test loading when file does not exist
+    monkeypatch.setattr("os.path.exists", lambda path: False)
+    assert fetcher._load_ncbi_key() is None
+
+    # Test loading valid 36-char key
+    monkeypatch.setattr("os.path.exists", lambda path: True)
+    
+    import builtins
+    original_open = builtins.open
+    
+    def fake_open(file, *args, **kwargs):
+        if "ncbi_key" in str(file):
+            from io import StringIO
+            return StringIO("659abe2378cc400e3863f19865cc2329b208\n")
+        return original_open(file, *args, **kwargs)
+        
+    monkeypatch.setattr(builtins, "open", fake_open)
+    assert fetcher._load_ncbi_key() == "659abe2378cc400e3863f19865cc2329b208"
+
+    # Test loading invalid key (too short)
+    def fake_open_invalid(file, *args, **kwargs):
+        if "ncbi_key" in str(file):
+            from io import StringIO
+            return StringIO("shortkey\n")
+        return original_open(file, *args, **kwargs)
+        
+    monkeypatch.setattr(builtins, "open", fake_open_invalid)
+    assert fetcher._load_ncbi_key() is None
+

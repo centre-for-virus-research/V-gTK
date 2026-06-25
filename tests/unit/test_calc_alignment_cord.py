@@ -88,8 +88,8 @@ def test_recalculate_cds_coordinates_keeps_reference_feature_span_for_partial_se
     )
 
     assert adjusted == [
-        {"start": 1, "end": 4, "og_start": 1, "og_end": 2, "product": "P1"},
-        {"start": 5, "end": 9, "og_start": 3, "og_end": 5, "product": "P2"},
+        {"start": 3, "end": 4, "og_start": 1, "og_end": 2, "product": "P1"},
+        {"start": 5, "end": 7, "og_start": 3, "og_end": 5, "product": "P2"},
     ]
 
 
@@ -214,7 +214,7 @@ def test_find_gaps_in_fasta_partial_sequences_keep_overlapping_reference_feature
             "reference_accession": "MASTER1",
             "aln_start": "3",
             "aln_end": "7",
-            "cds_start": "1",
+            "cds_start": "3",
             "cds_end": "4",
             "cds_start_OG_seq": "1",
             "cds_end_OG_seq": "2",
@@ -227,7 +227,7 @@ def test_find_gaps_in_fasta_partial_sequences_keep_overlapping_reference_feature
             "aln_start": "3",
             "aln_end": "7",
             "cds_start": "5",
-            "cds_end": "9",
+            "cds_end": "7",
             "cds_start_OG_seq": "3",
             "cds_end_OG_seq": "5",
             "product": "P2",
@@ -283,7 +283,7 @@ def test_find_gaps_in_fasta_skips_features_outside_partial_sequence_span(tmp_pat
             "aln_start": "1",
             "aln_end": "3",
             "cds_start": "1",
-            "cds_end": "4",
+            "cds_end": "3",
             "cds_start_OG_seq": "1",
             "cds_end_OG_seq": "3",
             "product": "P1",
@@ -524,6 +524,9 @@ def test_find_gaps_in_fasta_update_db_skips_existing_feature_accessions(tmp_path
     finally:
         conn.close()
 
+    scope = tmp_path / "scope.tsv"
+    scope.write_text("primary_accession\nQ_A\n", encoding="utf-8")
+
     processor = CalculateAlignmentCoordinates(
         paded_alignment=str(DATA_DIR / "padded_alignment"),
         master_gff=[str(DATA_DIR / "MASTER1.gff3")],
@@ -533,12 +536,12 @@ def test_find_gaps_in_fasta_update_db_skips_existing_feature_accessions(tmp_path
         master_accession=str(DATA_DIR / "master_list.tsv"),
         blast_uniq_hits=str(DATA_DIR / "query_uniq_tophits.tsv"),
         update_db=str(update_db),
+        update_scope_tsv=str(scope),
     )
     processor.find_gaps_in_fasta()
 
     rows = read_tsv_as_dicts(tmp_path / "Tables" / "features.tsv")
-    assert rows
-    assert all(row["accession"] != "Q_A" for row in rows)
+    assert rows == []
 
 
 def test_find_gaps_in_fasta_raises_on_segment_mismatch(tmp_path: Path):
@@ -664,3 +667,191 @@ def test_find_gaps_in_fasta_update_mode_real_db_skips_existing_scoped_accession(
     processor.find_gaps_in_fasta()
     rows = read_tsv_as_dicts(tmp_path / "Tables" / "features.tsv")
     assert rows == []
+
+
+def test_stress_recalculate_cds_coordinates_extreme_gaps(tmp_path: Path):
+    processor = make_processor(tmp_path)
+    # 1. Alternating gaps and bases
+    gaps = processor.get_gap_ranges("-A-C-G-T-")
+    assert gaps == [[1, 1], [3, 3], [5, 5], [7, 7], [9, 9]]
+    
+    # 2. Query has 100% gaps (only deletion)
+    gaps_all = processor.get_gap_ranges("---------")
+    assert gaps_all == [[1, 9]]
+    
+    # 3. Gap offsets flanking the CDS
+    cds_list = [{"start": "4", "end": "6", "product": "P1"}]
+    # gaps cover first 3 positions and last 3 positions
+    gaps_flank = processor.get_gap_ranges("---ACG---")
+    # gap ranges: [1, 3] and [7, 9]
+    assert gaps_flank == [[1, 3], [7, 9]]
+    
+    # Recalculate query covering overlap. Without span clamping.
+    adjusted = processor.recalculate_cds_coordinates_with_span(
+        "Q_STRESS", gaps_flank, cds_list, start_offset=4, genome_cord_start=None, genome_cord_end=None
+    )
+    # Overlap start=4, gaps before 4 is 3. So og_start = 4 - 3 = 1
+    # Overlap end=6, gaps before 6 is 3. So og_end = 6 - 3 = 3
+    assert adjusted == [
+        {"start": 4, "end": 6, "og_start": 1, "og_end": 3, "product": "P1"}
+    ]
+
+
+def test_stress_recalculate_cds_coordinates_partial_overlap_boundaries(tmp_path: Path):
+    processor = make_processor(tmp_path)
+    cds_list = [{"start": "100", "end": "200", "product": "P_MID"}]
+    gaps = [] # no gaps
+    
+    # 1. Span completely before CDS
+    adjusted = processor.recalculate_cds_coordinates_with_span(
+        "Q", gaps, cds_list, start_offset=1, genome_cord_start=10, genome_cord_end=50
+    )
+    assert adjusted == []
+    
+    # 2. Span completely after CDS
+    adjusted = processor.recalculate_cds_coordinates_with_span(
+        "Q", gaps, cds_list, start_offset=1, genome_cord_start=250, genome_cord_end=300
+    )
+    assert adjusted == []
+    
+    # 3. Span overlaps CDS by exactly 1 base at start
+    adjusted = processor.recalculate_cds_coordinates_with_span(
+        "Q", gaps, cds_list, start_offset=1, genome_cord_start=50, genome_cord_end=100
+    )
+    assert adjusted == [{"start": 100, "end": 100, "og_start": 100, "og_end": 100, "product": "P_MID"}]
+    
+    # 4. Span overlaps CDS by exactly 1 base at end
+    adjusted = processor.recalculate_cds_coordinates_with_span(
+        "Q", gaps, cds_list, start_offset=1, genome_cord_start=200, genome_cord_end=250
+    )
+    assert adjusted == [{"start": 200, "end": 200, "og_start": 200, "og_end": 200, "product": "P_MID"}]
+
+
+def test_stress_recalculate_cds_coordinates_out_of_bounds_span(tmp_path: Path):
+    processor = make_processor(tmp_path)
+    cds_list = [{"start": "10", "end": "20", "product": "P"}]
+    
+    # 1. Invalid coordinates: start > end (should be skipped)
+    adjusted = processor.recalculate_cds_coordinates_with_span(
+        "Q", [], cds_list, start_offset=1, genome_cord_start=25, genome_cord_end=5
+    )
+    assert adjusted == []
+    
+    # 2. Huge/out-of-bounds coordinates (clamped correctly)
+    adjusted = processor.recalculate_cds_coordinates_with_span(
+        "Q", [], cds_list, start_offset=1, genome_cord_start=1, genome_cord_end=999999
+    )
+    assert adjusted == [{"start": 10, "end": 20, "og_start": 10, "og_end": 20, "product": "P"}]
+
+
+def test_stress_find_gaps_in_fasta_empty_and_corrupt_files(tmp_path: Path):
+    alignment_dir = tmp_path / "padded_alignment"
+    alignment_dir.mkdir()
+    
+    # FASTA containing lowercase, invalid characters (X, N, ?, etc.)
+    (alignment_dir / "MASTERX.aligned_merged_MSA.fasta").write_text(
+        ">MASTERX\n"
+        "atgccgtaA\n"
+        ">Q_CORRUPT\n"
+        "aTgXXnN??\n",
+        encoding="utf-8",
+    )
+    
+    gff_path = tmp_path / "MASTERX.gff3"
+    gff_path.write_text(
+        "##gff-version 3\n"
+        "MASTERX\tRefSeq\tCDS\t1\t9\t.\t+\t0\tID=cds1;product=P_CORRUPT\n",
+        encoding="utf-8",
+    )
+    
+    master_list = tmp_path / "master_list.tsv"
+    master_list.write_text("MASTERX\n", encoding="utf-8")
+    
+    blast_hits = tmp_path / "query_uniq_tophits.tsv"
+    blast_hits.write_text("Q_CORRUPT\tREF_CORRUPT\t99.0\tplus\n", encoding="utf-8")
+    
+    processor = CalculateAlignmentCoordinates(
+        paded_alignment=str(alignment_dir),
+        master_gff=[str(gff_path)],
+        tmp_dir=str(tmp_path),
+        output_dir="Tables",
+        output_file="features.tsv",
+        master_accession=str(master_list),
+        blast_uniq_hits=str(blast_hits),
+    )
+    processor.find_gaps_in_fasta()
+    
+    rows = read_tsv_as_dicts(tmp_path / "Tables" / "features.tsv")
+    assert len(rows) == 2  # MASTERX and Q_CORRUPT
+    assert rows[1]["accession"] == "Q_CORRUPT"
+    assert rows[1]["cds_start_OG_seq"] == "1"
+    assert rows[1]["cds_end_OG_seq"] == "9"
+
+
+def test_stress_find_gaps_in_fasta_segment_checking_edge_cases(tmp_path: Path):
+    alignment_dir = tmp_path / "padded_alignment"
+    alignment_dir.mkdir()
+    (alignment_dir / "refset_1_aln_merged_MSA.fasta").write_text(
+        ">MASTER1\n"
+        "ATGC\n"
+        ">Q_A\n"
+        "ATGC\n",
+        encoding="utf-8",
+    )
+    gff1 = tmp_path / "MASTER1.gff3"
+    gff1.write_text(
+        "##gff-version 3\n"
+        "MASTER1\tRefSeq\tCDS\t1\t4\t.\t+\t0\tID=cds1;product=P1\n",
+        encoding="utf-8",
+    )
+    ref_list = tmp_path / "ref_list.tsv"
+    ref_list.write_text("MASTER1\tmaster\t1\n", encoding="utf-8")
+    blast_hits = tmp_path / "query_uniq_tophits.tsv"
+    blast_hits.write_text("Q_A\tREF_A\t99.0\tplus\n", encoding="utf-8")
+    
+    # 1. Segment map with blank/whitespace entries
+    segment_map = tmp_path / "segment_map.tsv"
+    segment_map.write_text(
+        "primary_accession\tsegment\n"
+        "MASTER1\t 1 \n"   # spaces should be stripped
+        "REF_A\t1\n"
+        "Q_A\t\n",         # blank segment is handled safely
+        encoding="utf-8",
+    )
+    
+    processor = CalculateAlignmentCoordinates(
+        paded_alignment=str(alignment_dir),
+        master_gff=[str(gff1)],
+        tmp_dir=str(tmp_path),
+        output_dir="Tables",
+        output_file="features.tsv",
+        master_accession=str(ref_list),
+        blast_uniq_hits=str(blast_hits),
+        segment_map_tsv=str(segment_map),
+    )
+    processor.find_gaps_in_fasta()
+    rows = read_tsv_as_dicts(tmp_path / "Tables" / "features.tsv")
+    assert rows[1]["segment"] == ""  # Q_A segment maps to empty
+
+    # 2. Conflicting segment mappings raise ValueError
+    bad_segment_map = tmp_path / "bad_segment_map.tsv"
+    bad_segment_map.write_text(
+        "primary_accession\tsegment\n"
+        "MASTER1\t1\n"
+        "REF_A\t2\n"  # conflicts with segment of MASTER1 (1) because both are aligned together
+        "Q_A\t1\n",
+        encoding="utf-8",
+    )
+    processor_conflict = CalculateAlignmentCoordinates(
+        paded_alignment=str(alignment_dir),
+        master_gff=[str(gff1)],
+        tmp_dir=str(tmp_path),
+        output_dir="Tables",
+        output_file="features.tsv",
+        master_accession=str(ref_list),
+        blast_uniq_hits=str(blast_hits),
+        segment_map_tsv=str(bad_segment_map),
+    )
+    with pytest.raises(ValueError, match="Segment mismatch for Q_A"):
+        processor_conflict.find_gaps_in_fasta()
+

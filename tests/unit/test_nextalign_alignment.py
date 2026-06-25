@@ -194,10 +194,53 @@ def test_process_non_reference_alignment_runs_master_path(tmp_path: Path, monkey
     monkeypatch.setattr(processor, "nextalign_master", fake_master)
     monkeypatch.setattr(processor, "update_gb_matrix", fake_update)
     monkeypatch.setattr("NextalignAlignment.RemoveRedundantSequence", _FakeRemoveRedundantSequence)
-
     processor.process()
 
     assert calls["query"] == 1
     assert calls["master"] == 1
     assert calls["dedup"] == 1
     assert calls["update"] == 1
+
+
+def test_validate_alignment_integrity_checks_all_sequences(tmp_path: Path):
+    processor = NextalignAlignment(
+        gb_matrix=str(tmp_path / "gB_matrix.tsv"),
+        query_dir=str(tmp_path / "query"),
+        ref_dir=str(tmp_path / "ref"),
+        ref_fa_file=str(tmp_path / "ref.fa"),
+        master_seq_dir=str(tmp_path / "master"),
+        tmp_dir=str(tmp_path),
+        master_ref="MASTER1",
+        nextalign_dir="Nextalign",
+        reference_alignment=None,
+    )
+
+    # 10 columns total. Conserved region is final 30% (columns 7 to 9, 0-indexed).
+    # Master sequence:
+    # "A T G C G T A A C G" (indices 0 to 9)
+    # Downstream conserved (indices 7, 8, 9): A, C, G
+    
+    # CASE 1: Both queries align perfectly in conserved region
+    clean_fasta = tmp_path / "clean.fasta"
+    clean_fasta.write_text(
+        ">MASTER\nATGCGTAACG\n"
+        ">QUERY1\nATGCGTAACG\n"  # matches ACG -> 100% identity
+        ">QUERY2\nATGCGTAACG\n", # matches ACG -> 100% identity
+        encoding="utf-8",
+    )
+    passed, min_id = processor._validate_alignment_integrity(str(clean_fasta))
+    assert passed is True
+    assert min_id == 1.0
+
+    # CASE 2: One query aligns perfectly, second query is misaligned/gapped in conserved region
+    dirty_fasta = tmp_path / "dirty.fasta"
+    dirty_fasta.write_text(
+        ">MASTER\nATGCGTAACG\n"
+        ">QUERY1\nATGCGTAACG\n"  # matches ACG -> 100% identity
+        ">QUERY2\nATGCGT----\n", # matches --- -> 0% identity (all gaps in conserved region)
+        encoding="utf-8",
+    )
+    passed, min_id = processor._validate_alignment_integrity(str(dirty_fasta))
+    assert passed is False
+    assert min_id == 0.0
+

@@ -276,20 +276,20 @@ def validate_sequence_alignment_vs_meta(conn, expected_accessions, accession_col
         cursor = conn.cursor()
         cursor.execute(
             f"""
-            SELECT DISTINCT TRIM(CAST(s.{col} AS TEXT)) AS v
+            SELECT DISTINCT s.{col} AS v
             FROM {table_name} s
             LEFT JOIN meta_data m
-              ON TRIM(CAST(m.{accession_column} AS TEXT)) = TRIM(CAST(s.{col} AS TEXT))
-            WHERE TRIM(CAST(s.{col} AS TEXT)) != ''
+              ON m.{accession_column} = s.{col}
+            WHERE s.{col} IS NOT NULL AND s.{col} != ''
               AND (
                     m.{accession_column} IS NULL
-                                        OR CAST(m.{exclusion_column} AS TEXT) != ?
-                                        OR LOWER(TRIM(COALESCE(CAST(m.accession_type AS TEXT), ''))) NOT IN ('reference', 'master')
+                    OR m.{exclusion_column} != ?
+                    OR LOWER(COALESCE(m.accession_type, '')) NOT IN ('reference', 'master')
                   )
             """,
             (str(exclude_value),),
         )
-        observed = {row[0] for row in cursor.fetchall() if row and row[0]}
+        observed = {str(row[0]).strip() for row in cursor.fetchall() if row and row[0]}
     else:
         observed = fetch_distinct_values(conn, table_name, col)
 
@@ -831,12 +831,17 @@ def validate_feature_projection_integrity(conn):
 
         cds_start_int = _try_parse_int(cds_start)
         cds_end_int = _try_parse_int(cds_end)
-        cds_matches_master_feature = (
-            cds_start_int is not None and
-            cds_end_int is not None and
-            any(cds_start_int == master_start and cds_end_int == master_end for master_start, master_end in master_product_spans)
-        )
-        if not cds_matches_master_feature:
+        
+        expected_matches = False
+        for master_start, master_end in master_product_spans:
+            expected_start = max(master_start, aln_start_int)
+            expected_end = min(master_end, aln_end_int)
+            if expected_start <= expected_end:
+                if cds_start_int == expected_start and cds_end_int == expected_end:
+                    expected_matches = True
+                    break
+
+        if not expected_matches:
             mismatched_cds_rows += 1
             offending_rows.append(
                 {

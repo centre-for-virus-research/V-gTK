@@ -570,6 +570,31 @@ class CreateSqliteDB:
 			return cols[:1] if cols else []
 		return cols[:1] if cols else []
 
+	def _create_table_unique_indexes(self, conn, table):
+		if not self.update:
+			return
+		if table == "features":
+			cols = self._table_columns(conn, "features")
+			if all(c in cols for c in ["accession", "cds_start_OG_seq", "cds_end_OG_seq", "product", "segment"]):
+				conn.execute("""
+					CREATE UNIQUE INDEX IF NOT EXISTS idx_features_upsert 
+					ON features (accession, cds_start_OG_seq, cds_end_OG_seq, product, segment);
+				""")
+		elif table == "sequence_alignment":
+			cols = self._table_columns(conn, "sequence_alignment")
+			if all(c in cols for c in ["primary_accession", "alignment_name", "segment"]):
+				conn.execute("""
+					CREATE UNIQUE INDEX IF NOT EXISTS idx_seq_alignment_upsert 
+					ON sequence_alignment (primary_accession, alignment_name, segment);
+				""")
+		elif table == "meta_data":
+			cols = self._table_columns(conn, "meta_data")
+			if all(c in cols for c in ["primary_accession", "segment"]):
+				conn.execute("""
+					CREATE UNIQUE INDEX IF NOT EXISTS idx_metadata_upsert 
+					ON meta_data (primary_accession, segment);
+				""")
+
 	def merge_table_append_nonredundant(self, conn, df, table, key_cols=None, update_exclusions=None):
 		if df is None:
 			return 0
@@ -581,6 +606,7 @@ class CreateSqliteDB:
 			self._ensure_update_columns(conn, table, df)
 			df = self._align_df_to_existing_schema(conn, table, df)
 			key_cols = self._resolve_key_cols_for_existing_schema(conn, table, key_cols, set(df.columns))
+			self._create_table_unique_indexes(conn, table)
 
 		# 2. Normalize and deduplicate incoming dataframe rows internally
 		for c in key_cols:
@@ -600,6 +626,7 @@ class CreateSqliteDB:
 		# 4. Handle edge case: If update mode is active, but the table doesn't exist yet
 		if not self._table_exists(conn, table):
 			df.to_sql(table, conn, if_exists="replace", index=False)
+			self._create_table_unique_indexes(conn, table)
 			print(f"[CreateSqliteDB] Created table '{table}' with {len(df)} rows (table did not exist)")
 			return len(df)
 
@@ -778,7 +805,7 @@ class CreateSqliteDB:
 				.str.strip()
 			)
 
-		df_features = self._read_tsv_required(self.features, [], "features")
+		df_features = self._read_tsv_required(self.features, [], "features", dtype=str)
 		if valid_accessions and "accession" in df_features.columns:
 			df_features = df_features[df_features["accession"].astype(str).str.strip().isin(valid_accessions)]
 		elif valid_accessions and "primary_accession" in df_features.columns:
@@ -825,19 +852,7 @@ class CreateSqliteDB:
 		cursor.execute("CREATE TABLE IF NOT EXISTS update_batches (batch_id TEXT PRIMARY KEY, started_at TEXT, finished_at TEXT, update_db TEXT, mode TEXT);")
 		cursor.execute("CREATE TABLE IF NOT EXISTS update_table_deltas (batch_id TEXT, table_name TEXT, before_count INTEGER, after_count INTEGER, delta INTEGER);")
 
-		if self.update:
-			cursor.execute("""
-				CREATE UNIQUE INDEX IF NOT EXISTS idx_features_upsert 
-				ON features (accession, cds_start_OG_seq, cds_end_OG_seq, product, segment);
-			""")
-			cursor.execute("""
-				CREATE UNIQUE INDEX IF NOT EXISTS idx_seq_alignment_upsert 
-				ON sequence_alignment (primary_accession, alignment_name, segment);
-			""")
-			cursor.execute("""
-				CREATE UNIQUE INDEX IF NOT EXISTS idx_metadata_upsert 
-				ON meta_data (primary_accession, segment);
-			""")
+
 		now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   
 		cursor.execute("INSERT OR REPLACE INTO update_batches (batch_id, started_at, finished_at, update_db, mode) VALUES (?, ?, ?, ?, ?)", (self.batch_id, now_str, None, self.update_db if self.update else None, "update" if self.update else "create"))

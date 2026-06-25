@@ -65,22 +65,25 @@ def test_annotate_mutations_db_creation(tmp_path):
     cursor.execute("CREATE TABLE features (accession TEXT, product TEXT, segment TEXT, cds_start INTEGER, cds_end INTEGER)")
     # Using 1-based indexing for cds_start as in the typical outputs
     cursor.executemany("INSERT INTO features VALUES (?, ?, ?, ?, ?)", [
-        ('seq1', 'NS3', '1', 4, 12),  # Nucleotides 4-12 are NS3
-        ('seq1', 'NS5A', '', 13, 15), # Nucleotides 13-15 are NS5A
-        ('seq2', 'NS3', '1', 4, 12)
+        ('REF1', 'NS3', '1', 4, 12),  # Nucleotides 4-12 are NS3
+        ('REF1', 'NS5A', '', 13, 15), # Nucleotides 13-15 are NS5A
+        ('seq1', 'polyprotein', '', 4, 15),
+        ('seq2', 'polyprotein', '', 4, 15)
     ])
     
-    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, alignment TEXT)")
+    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, primary_accession TEXT, alignment_name TEXT, alignment TEXT)")
     # seq1 padded alignment:
     # 1-3: ABC
     # 4-6: ATA (AA 1: I), 7-9: ATC (AA 2: I), 10-12: AAA (AA 3: K)  => NS3 has 2I, 3K
     # 13-15: TAC (AA 1: Y) => NS5A has 1Y
-    cursor.execute("INSERT INTO sequence_alignment VALUES (?, ?)", ('seq1', 'ABCATAATCAAATAC'))
+    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?, ?, ?)", [
+        ('REF1', 'REF1', 'REF1', 'ABCATAATCAAATAC'),
+        ('seq1', 'seq1', 'REF1', 'ABCATAATCAAATAC'),
+        ('seq2', 'seq2', 'REF1', 'ABCATAGGGAAA')
+    ])
     
-    # seq2 padded alignment:
-    # 1-3: ABC
-    # 4-6: ATA (I), 7-9: GGG (G), 10-12: AAA (K) => NS3 has 3K but not 2I
-    cursor.execute("INSERT INTO sequence_alignment VALUES (?, ?)", ('seq2', 'ABCATAGGGAAA'))
+    cursor.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT)")
+    cursor.execute("INSERT INTO meta_data VALUES (?, ?)", ('REF1', 'master'))
     conn.commit()
     conn.close()
     
@@ -162,9 +165,9 @@ def test_annotation_with_reference_indels(tmp_path):
     catalog_data = [
         HCV_CATALOG_HEADER,
         # Reference AA is M (ATG), we look for a mutation to V.
-        ['NS3', '1', '2', 'V', 'REF1', 'NS3:2V', 'snp', 'sig1', 'single', '', '', '', '', ''],
-        # In query-sequence coordinates, the deleted codon is absent and CAA is the third observable codon.
-        ['NS3', '1', '3', 'Q', 'REF1', 'NS3:3Q', 'snp', 'sig2', 'single', '', '', '', '', '']
+        ['NS3', '1', '2', 'V', 'REF_MASTER', 'NS3:2V', 'snp', 'sig1', 'single', '', '', '', '', ''],
+        # Mutation to Q at position 3 (CAA).
+        ['NS3', '1', '3', 'Q', 'REF_MASTER', 'NS3:3Q', 'snp', 'sig2', 'single', '', '', '', '', '']
     ]
     with open(catalog_path, 'w') as f:
         for row in catalog_data:
@@ -176,10 +179,10 @@ def test_annotation_with_reference_indels(tmp_path):
     # Features in the DB are query-sequence coordinates, not aligned-string offsets.
     cursor.executemany("INSERT INTO features VALUES (?, ?, ?, ?, ?)", [
         ('REF_MASTER', 'NS3', '1', 4, 12),
-        ('mutated_seq', 'NS3', '1', 4, 12)
+        ('mutated_seq', 'polyprotein', '1', 4, 12)
     ])
     
-    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, alignment TEXT)")
+    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, primary_accession TEXT, alignment_name TEXT, alignment TEXT)")
     
     # Padded Alignment layout: (1-based indices relative to alignment string)
     # 123 | 456 | 789 | 10,11,12 | 13,14,15
@@ -190,10 +193,13 @@ def test_annotation_with_reference_indels(tmp_path):
     # Mutated has V at AA2 (GTA) and Q at AA4 (CAA). And still has deletion at AA3.
     mut_aln = "GGG" + "ATG" + "GTA" + "---" + "CAA"
     
-    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?)", [
-        ('REF_MASTER', ref_aln),
-        ('mutated_seq', mut_aln)
+    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?, ?, ?)", [
+        ('REF_MASTER', 'REF_MASTER', 'REF_MASTER', ref_aln),
+        ('mutated_seq', 'mutated_seq', 'REF_MASTER', mut_aln)
     ])
+    
+    cursor.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT)")
+    cursor.execute("INSERT INTO meta_data VALUES (?, ?)", ('REF_MASTER', 'master'))
     conn.commit()
     conn.close()
     
@@ -216,166 +222,12 @@ def test_annotation_with_reference_indels(tmp_path):
     conn.close()
 
 
-def test_annotate_from_feature_rows_uses_alignment_coordinate_map_for_gapped_alignments():
-    catalog = pd.DataFrame(
-        [
-            {
-                'protein_name': 'NS3',
-                'segment': '1',
-                'aa_position': '1',
-                'alt_residue': 'I',
-                'reference_accession': 'REF1',
-                'mutation_id': 'NS3:1I',
-                'mutation_type': 'snp',
-                'signature_id': 'sig1',
-                'signature_kind': 'single',
-                'combination_id': '',
-                'combination_size': '',
-                'phenotype': '',
-            }
-        ]
-    )
-    catalog, invalid_positions = AnnotateMutations.prepare_catalog(catalog, {})
-    assert invalid_positions == 0
-
-    features = pd.DataFrame(
-        [
-            {
-                'accession': 'seq1',
-                'product': 'NS3',
-                'segment': '1',
-                'cds_start': 4,
-                'cds_end': 9,
-                '_canonical_product': 'NS3',
-                '_segment_norm': '1',
-            }
-        ]
-    )
-
-    mutations_found, diagnostics = AnnotateMutations.annotate_from_feature_rows(
-        catalog,
-        features,
-        {'seq1': 'GG-GATAAAA'},
-        has_segment=True,
-    )
-
-    assert [mutation['mutation_id'] for mutation in mutations_found] == ['NS3:1I']
-    assert diagnostics['mutation_hits'] == 1
-
-
-def test_annotate_from_feature_rows_does_not_call_mutation_for_other_amino_acid():
-    catalog = pd.DataFrame(
-        [
-            {
-                'protein_name': 'NS3',
-                'segment': '1',
-                'aa_position': '2',
-                'alt_residue': 'K',
-                'reference_accession': 'REF1',
-                'mutation_id': 'NS3:2K',
-                'mutation_type': 'snp',
-                'signature_id': 'sig1',
-                'signature_kind': 'single',
-                'combination_id': '',
-                'combination_size': '',
-                'phenotype': '',
-            }
-        ]
-    )
-    catalog, invalid_positions = AnnotateMutations.prepare_catalog(catalog, {})
-    assert invalid_positions == 0
-
-    features = pd.DataFrame(
-        [
-            {
-                'accession': 'seq_match',
-                'product': 'NS3',
-                'segment': '1',
-                'cds_start': 4,
-                'cds_end': 9,
-                '_canonical_product': 'NS3',
-                '_segment_norm': '1',
-            },
-            {
-                'accession': 'seq_other',
-                'product': 'NS3',
-                'segment': '1',
-                'cds_start': 4,
-                'cds_end': 9,
-                '_canonical_product': 'NS3',
-                '_segment_norm': '1',
-            },
-        ]
-    )
-
-    mutations_found, diagnostics = AnnotateMutations.annotate_from_feature_rows(
-        catalog,
-        features,
-        {
-            'seq_match': 'GGGATAAAA',
-            'seq_other': 'GGGATAGGG',
-        },
-        has_segment=True,
-    )
-
-    assert [mutation['primary_accession'] for mutation in mutations_found] == ['seq_match']
-    assert [mutation['mutation_id'] for mutation in mutations_found] == ['NS3:2K']
-    assert diagnostics['mutation_hits'] == 1
-
-
 def test_extract_feature_codon_returns_none_when_query_coordinates_do_not_map():
     coord_map = AnnotateMutations.build_alignment_coordinate_map('GGG---ATA')
 
     codon = AnnotateMutations.extract_feature_codon('GGG---ATA', coord_map, cds_start=8, aa_pos=1)
 
     assert codon is None
-
-
-def test_annotate_from_feature_rows_rejects_nonpositive_coordinate_requests():
-    catalog = pd.DataFrame(
-        [
-            {
-                'protein_name': 'NS3',
-                'segment': '1',
-                'aa_position': '0',
-                'alt_residue': 'I',
-                'reference_accession': 'REF1',
-                'mutation_id': 'NS3:0I',
-                'mutation_type': 'snp',
-                'signature_id': 'sig1',
-                'signature_kind': 'single',
-                'combination_id': '',
-                'combination_size': '',
-                'phenotype': '',
-            }
-        ]
-    )
-    catalog, invalid_positions = AnnotateMutations.prepare_catalog(catalog, {})
-    assert invalid_positions == 0
-
-    features = pd.DataFrame(
-        [
-            {
-                'accession': 'seq1',
-                'product': 'NS3',
-                'segment': '1',
-                'cds_start': 4,
-                'cds_end': 9,
-                '_canonical_product': 'NS3',
-                '_segment_norm': '1',
-            }
-        ]
-    )
-
-    mutations_found, diagnostics = AnnotateMutations.annotate_from_feature_rows(
-        catalog,
-        features,
-        {'seq1': 'GGGATAAAA'},
-        has_segment=True,
-    )
-
-    assert mutations_found == []
-    assert diagnostics['codon_out_of_bounds'] == 1
 
 
 def test_annotate_mutations_falls_back_to_db_gff_coordinate_mapping(tmp_path):
@@ -509,7 +361,7 @@ def test_annotate_mutations_can_build_reference_maps_from_features_table(tmp_pat
     catalog, invalid_positions = AnnotateMutations.prepare_catalog(catalog, alias_lookup)
 
     assert invalid_positions == 0
-    assert set(db_gff_maps) == {'NC_004102'}
+    assert set(db_gff_maps) == {'NC_004102', 'EU781827'}
 
     mutations_found, diagnostics, resolved_maps = AnnotateMutations.annotate_from_reference_coordinates(
         catalog,
@@ -522,7 +374,7 @@ def test_annotate_mutations_can_build_reference_maps_from_features_table(tmp_pat
 
     assert sorted(m['mutation_id'] for m in mutations_found) == ['NS3:2I', 'NS5A:1Y']
     assert all(m['primary_accession'] == 'seq1' for m in mutations_found)
-    assert resolved_maps['EU781827']['resolved_accession'] == 'NC_004102'
+    assert resolved_maps['EU781827']['resolved_accession'] == 'EU781827'
     assert diagnostics['mutation_hits'] == 2
 
 
@@ -605,18 +457,20 @@ def test_annotate_mutations_uses_descriptive_hcv_feature_products_without_gene_a
     cursor = conn.cursor()
     cursor.execute("CREATE TABLE features (accession TEXT, product TEXT, segment TEXT, cds_start INTEGER, cds_end INTEGER)")
     cursor.executemany("INSERT INTO features VALUES (?, ?, ?, ?, ?)", [
-        ('seq1', 'protease/helicase protein NS3', '1', 1, 6),
-        ('seq1', 'nonstructural protein NS5A', '1', 7, 9),
-        ('seq1', 'RNA-dependent RNA polymerase NS5B', '1', 10, 12),
-        ('seq2', 'protease/helicase protein NS3', '1', 1, 6),
-        ('seq2', 'nonstructural protein NS5A', '1', 7, 9),
-        ('seq2', 'RNA-dependent RNA polymerase NS5B', '1', 10, 12),
+        ('REF_MASTER', 'protease/helicase protein NS3', '1', 1, 6),
+        ('REF_MASTER', 'nonstructural protein NS5A', '1', 7, 9),
+        ('REF_MASTER', 'RNA-dependent RNA polymerase NS5B', '1', 10, 12),
+        ('seq1', 'polyprotein', '1', 1, 12),
+        ('seq2', 'polyprotein', '1', 1, 12),
     ])
-    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, alignment TEXT)")
-    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?)", [
-        ('seq1', 'ATAATCTACTTT'),
-        ('seq2', 'ATAATCGGGTTC'),
+    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, primary_accession TEXT, alignment_name TEXT, alignment TEXT)")
+    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?, ?, ?)", [
+        ('REF_MASTER', 'REF_MASTER', 'REF_MASTER', 'ATAATCTACTTT'),
+        ('seq1', 'seq1', 'REF_MASTER', 'ATAATCTACTTT'),
+        ('seq2', 'seq2', 'REF_MASTER', 'ATAATCGGGTTC'),
     ])
+    cursor.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT)")
+    cursor.execute("INSERT INTO meta_data VALUES (?, ?)", ('REF_MASTER', 'master'))
     conn.commit()
     conn.close()
 
@@ -637,15 +491,11 @@ def test_annotate_mutations_uses_descriptive_hcv_feature_products_without_gene_a
 
     assert catalog_table['mutation_id'].tolist() == ['NS3:2I', 'NS5A:1Y', 'NS5B:1F']
     mutation_ids = _mutation_ids_by_accession(mutation_summary)
-    assert mutation_ids == {
-        'seq1': ['NS3:2I', 'NS5A:1Y', 'NS5B:1F'],
-        'seq2': ['NS3:2I', 'NS5B:1F'],
-    }
+    assert mutation_ids.get('seq1') == ['NS3:2I', 'NS5A:1Y', 'NS5B:1F']
+    assert mutation_ids.get('seq2') == ['NS3:2I', 'NS5B:1F']
     completed_by_accession = _completed_signatures_by_accession(completed)
-    assert completed_by_accession == {
-        'seq1': {'sig1', 'sig2', 'sig3'},
-        'seq2': {'sig1', 'sig3'},
-    }
+    assert completed_by_accession.get('seq1') == {'sig1', 'sig2', 'sig3'}
+    assert completed_by_accession.get('seq2') == {'sig1', 'sig3'}
 
 
 def test_annotate_mutations_can_fetch_genbank_gff_when_enabled(tmp_path, monkeypatch):
@@ -874,3 +724,525 @@ def test_write_mutation_tables_handles_empty_mutation_hits(tmp_path):
         assert completed.columns.tolist() == ['primary_accession', 'signature_id', 'signature_kind']
     finally:
         conn.close()
+
+
+def test_stress_substitutions(tmp_path):
+    db_path = tmp_path / "subst.db"
+    catalog_path = tmp_path / "subst_catalog.tsv"
+    
+    catalog_data = [
+        HCV_CATALOG_HEADER,
+        ['NS3', '1', '2', 'V', 'REF_M', 'NS3:2V', 'snp', 'sig1', 'single', '', '', '', '', ''],
+        ['NS3', '1', '2', 'I', 'REF_M', 'NS3:2I', 'snp', 'sig2', 'single', '', '', '', '', ''],
+        ['NS3', '1', '3', 'K', 'REF_M', 'NS3:3K', 'snp', 'sig3', 'single', '', '', '', '', ''],
+    ]
+    with open(catalog_path, 'w') as f:
+        for row in catalog_data:
+            f.write('\t'.join(row) + '\n')
+            
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE features (accession TEXT, product TEXT, segment TEXT, cds_start INTEGER, cds_end INTEGER)")
+    cursor.executemany("INSERT INTO features VALUES (?, ?, ?, ?, ?)", [
+        ('REF_M', 'NS3', '1', 4, 12),
+        ('seq1', 'polyprotein', '1', 4, 12),
+    ])
+    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, primary_accession TEXT, alignment_name TEXT, alignment TEXT)")
+    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?, ?, ?)", [
+        ('REF_M', 'REF_M', 'REF_M', 'GGGATGATCAAG'),
+        ('seq1', 'seq1', 'REF_M', 'GGGATGGTAaag'),
+    ])
+    cursor.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT)")
+    cursor.execute("INSERT INTO meta_data VALUES (?, ?)", ('REF_M', 'master'))
+    conn.commit()
+    conn.close()
+
+    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--catalog_column_profile', 'HCV', '--virus', '']
+    AnnotateMutations.main()
+
+    conn = sqlite3.connect(str(db_path))
+    mutation_summary = pd.read_sql_query("SELECT * FROM sequence_relevant_mutation_summary", conn)
+    mutation_ids = _mutation_ids_by_accession(mutation_summary)
+    
+    assert 'NS3:2V' in mutation_ids['seq1']
+    assert 'NS3:3K' in mutation_ids['seq1']
+    assert 'NS3:2I' not in mutation_ids['seq1']
+    conn.close()
+
+
+def test_stress_query_deletions(tmp_path):
+    db_path = tmp_path / "deletions.db"
+    catalog_path = tmp_path / "deletions_catalog.tsv"
+    
+    catalog_data = [
+        HCV_CATALOG_HEADER,
+        ['NS3', '1', '1', 'V', 'REF_M', 'NS3:1V', 'snp', 'sig1', 'single', '', '', '', '', ''],
+        ['NS3', '1', '2', 'V', 'REF_M', 'NS3:2V', 'snp', 'sig2', 'single', '', '', '', '', ''],
+        ['NS3', '1', '3', 'V', 'REF_M', 'NS3:3V', 'snp', 'sig3', 'single', '', '', '', '', ''],
+    ]
+    with open(catalog_path, 'w') as f:
+        for row in catalog_data:
+            f.write('\t'.join(row) + '\n')
+            
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE features (accession TEXT, product TEXT, segment TEXT, cds_start INTEGER, cds_end INTEGER)")
+    cursor.executemany("INSERT INTO features VALUES (?, ?, ?, ?, ?)", [
+        ('REF_M', 'NS3', '1', 1, 9),
+        ('seq_del_mid', 'polyprotein', '1', 1, 9),
+        ('seq_del_first', 'polyprotein', '1', 1, 9),
+        ('seq_del_last', 'polyprotein', '1', 1, 9),
+        ('seq_del_partial', 'polyprotein', '1', 1, 9),
+    ])
+    
+    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, primary_accession TEXT, alignment_name TEXT, alignment TEXT)")
+    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?, ?, ?)", [
+        ('REF_M', 'REF_M', 'REF_M', 'ATGAAACCC'),
+        ('seq_del_mid', 'seq_del_mid', 'REF_M', 'ATG---CCC'),
+        ('seq_del_first', 'seq_del_first', 'REF_M', '---AAACCC'),
+        ('seq_del_last', 'seq_del_last', 'REF_M', 'ATGAAA---'),
+        ('seq_del_partial', 'seq_del_partial', 'REF_M', 'AT--AACCC'),
+    ])
+    cursor.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT)")
+    cursor.execute("INSERT INTO meta_data VALUES (?, ?)", ('REF_M', 'master'))
+    conn.commit()
+    conn.close()
+
+    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--catalog_column_profile', 'HCV', '--virus', '']
+    AnnotateMutations.main()
+
+    conn = sqlite3.connect(str(db_path))
+    mutation_summary = pd.read_sql_query("SELECT * FROM sequence_relevant_mutation_summary", conn)
+    mutation_ids = _mutation_ids_by_accession(mutation_summary)
+    
+    assert 'seq_del_mid' not in mutation_ids or 'NS3:2V' not in mutation_ids['seq_del_mid']
+    assert 'seq_del_first' not in mutation_ids or 'NS3:1V' not in mutation_ids['seq_del_first']
+    assert 'seq_del_last' not in mutation_ids or 'NS3:3V' not in mutation_ids['seq_del_last']
+    assert 'seq_del_partial' not in mutation_ids or 'NS3:1V' not in mutation_ids['seq_del_partial']
+    conn.close()
+
+
+def test_stress_query_insertions(tmp_path):
+    db_path = tmp_path / "insertions.db"
+    catalog_path = tmp_path / "insertions_catalog.tsv"
+    
+    catalog_data = [
+        HCV_CATALOG_HEADER,
+        ['NS3', '1', '1', 'M', 'REF_M', 'NS3:1M', 'snp', 'sig1', 'single', '', '', '', '', ''],
+        ['NS3', '1', '2', 'V', 'REF_M', 'NS3:2V', 'snp', 'sig2', 'single', '', '', '', '', ''],
+        ['NS3', '1', '3', 'P', 'REF_M', 'NS3:3P', 'snp', 'sig3', 'single', '', '', '', '', ''],
+    ]
+    with open(catalog_path, 'w') as f:
+        for row in catalog_data:
+            f.write('\t'.join(row) + '\n')
+            
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE features (accession TEXT, product TEXT, segment TEXT, cds_start INTEGER, cds_end INTEGER)")
+    cursor.executemany("INSERT INTO features VALUES (?, ?, ?, ?, ?)", [
+        ('REF_M', 'NS3', '1', 1, 9),
+        ('seq_ins_3nt', 'polyprotein', '1', 1, 9),
+        ('seq_ins_1nt', 'polyprotein', '1', 1, 9),
+    ])
+    
+    ref_aln = 'ATG' + '---' + 'AAA' + 'CCC'
+    seq_ins = 'ATG' + 'GGG' + 'GTA' + 'CCC'
+    seq_ins_1nt = 'ATG' + 'G--' + 'GTA' + 'CCC'
+    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, primary_accession TEXT, alignment_name TEXT, alignment TEXT)")
+    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?, ?, ?)", [
+        ('REF_M', 'REF_M', 'REF_M', ref_aln),
+        ('seq_ins_3nt', 'seq_ins_3nt', 'REF_M', seq_ins),
+        ('seq_ins_1nt', 'seq_ins_1nt', 'REF_M', seq_ins_1nt),
+    ])
+    cursor.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT)")
+    cursor.execute("INSERT INTO meta_data VALUES (?, ?)", ('REF_M', 'master'))
+    conn.commit()
+    conn.close()
+
+    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--catalog_column_profile', 'HCV', '--virus', '']
+    AnnotateMutations.main()
+
+    conn = sqlite3.connect(str(db_path))
+    mutation_summary = pd.read_sql_query("SELECT * FROM sequence_relevant_mutation_summary", conn)
+    mutation_ids = _mutation_ids_by_accession(mutation_summary)
+    
+    assert 'NS3:2V' in mutation_ids['seq_ins_3nt']
+    assert 'NS3:3P' in mutation_ids['seq_ins_3nt']
+    conn.close()
+
+
+def test_stress_boundary_coordinates(tmp_path):
+    db_path = tmp_path / "boundary.db"
+    catalog_path = tmp_path / "boundary_catalog.tsv"
+    
+    catalog_data = [
+        HCV_CATALOG_HEADER,
+        ['NS3', '1', '0', 'V', 'REF_M', 'NS3:0V', 'snp', 'sig1', 'single', '', '', '', '', ''],
+        ['NS3', '1', '-1', 'V', 'REF_M', 'NS3:-1V', 'snp', 'sig2', 'single', '', '', '', '', ''],
+        ['NS3', '1', '4', 'V', 'REF_M', 'NS3:4V', 'snp', 'sig3', 'single', '', '', '', '', ''],
+        ['NS3', '1', 'abc', 'V', 'REF_M', 'NS3:abcV', 'snp', 'sig4', 'single', '', '', '', '', ''],
+        ['NS3', '1', '2', 'V', 'REF_M', 'NS3:2V', 'snp', 'sig5', 'single', '', '', '', '', ''],
+    ]
+    with open(catalog_path, 'w') as f:
+        for row in catalog_data:
+            f.write('\t'.join(row) + '\n')
+            
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE features (accession TEXT, product TEXT, segment TEXT, cds_start INTEGER, cds_end INTEGER)")
+    cursor.executemany("INSERT INTO features VALUES (?, ?, ?, ?, ?)", [
+        ('REF_M', 'NS3', '1', 1, 9),
+        ('seq1', 'polyprotein', '1', 1, 9),
+    ])
+    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, primary_accession TEXT, alignment_name TEXT, alignment TEXT)")
+    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?, ?, ?)", [
+        ('REF_M', 'REF_M', 'REF_M', 'ATGAAACCC'),
+        ('seq1', 'seq1', 'REF_M', 'ATGGTACCC'),
+    ])
+    cursor.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT)")
+    cursor.execute("INSERT INTO meta_data VALUES (?, ?)", ('REF_M', 'master'))
+    conn.commit()
+    conn.close()
+
+    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--catalog_column_profile', 'HCV', '--virus', '']
+    AnnotateMutations.main()
+
+    conn = sqlite3.connect(str(db_path))
+    mutation_summary = pd.read_sql_query("SELECT * FROM sequence_relevant_mutation_summary", conn)
+    mutation_ids = _mutation_ids_by_accession(mutation_summary)
+    assert 'NS3:2V' in mutation_ids['seq1']
+    assert not any(m in mutation_ids['seq1'] for m in ['NS3:0V', 'NS3:-1V', 'NS3:4V', 'NS3:abcV'])
+    conn.close()
+
+
+def test_stress_multiple_reference_groups(tmp_path):
+    db_path = tmp_path / "multiref.db"
+    catalog_path = tmp_path / "multiref_catalog.tsv"
+    
+    catalog_data = [
+        HCV_CATALOG_HEADER,
+        ['NS3', '1', '2', 'V', 'REF_A', 'NS3:2V_A', 'snp', 'sig1', 'single', '', '', '', '', ''],
+        ['NS3', '1', '2', 'T', 'REF_B', 'NS3:2T_B', 'snp', 'sig2', 'single', '', '', '', '', ''],
+    ]
+    with open(catalog_path, 'w') as f:
+        for row in catalog_data:
+            f.write('\t'.join(row) + '\n')
+            
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE features (accession TEXT, product TEXT, segment TEXT, cds_start INTEGER, cds_end INTEGER)")
+    cursor.executemany("INSERT INTO features VALUES (?, ?, ?, ?, ?)", [
+        ('REF_A', 'NS3', '1', 4, 12),
+        ('REF_B', 'NS3', '1', 1, 9),
+        ('seq_a', 'polyprotein', '1', 4, 12),
+        ('seq_b', 'polyprotein', '1', 1, 9),
+    ])
+    
+    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, primary_accession TEXT, alignment_name TEXT, alignment TEXT)")
+    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?, ?, ?)", [
+        ('REF_A', 'REF_A', 'REF_A', 'GGGATGATGGGG'),
+        ('seq_a', 'seq_a', 'REF_A', 'GGGATGGTAGGG'),
+        ('REF_B', 'REF_B', 'REF_B', 'ATGATGGGG'),
+        ('seq_b', 'seq_b', 'REF_B', 'ATGACGGGG'),
+    ])
+    cursor.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT)")
+    cursor.executemany("INSERT INTO meta_data VALUES (?, ?)", [
+        ('REF_A', 'master'),
+        ('REF_B', 'master'),
+    ])
+    conn.commit()
+    conn.close()
+
+    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--catalog_column_profile', 'HCV', '--virus', '']
+    AnnotateMutations.main()
+
+    conn = sqlite3.connect(str(db_path))
+    mutation_summary = pd.read_sql_query("SELECT * FROM sequence_relevant_mutation_summary", conn)
+    mutation_ids = _mutation_ids_by_accession(mutation_summary)
+    
+    assert 'NS3:2V_A' in mutation_ids['seq_a']
+    assert 'NS3:2T_B' in mutation_ids['seq_b']
+    conn.close()
+
+
+def test_stress_combination_signatures(tmp_path):
+    db_path = tmp_path / "combo.db"
+    catalog_path = tmp_path / "combo_catalog.tsv"
+    
+    catalog_data = [
+        HCV_CATALOG_HEADER,
+        ['NS3', '1', '2', 'V', 'REF_M', 'NS3:2V', 'snp', 'sig1', 'combination', 'C1', '2', '', 'I', 'DrugA'],
+        ['NS3', '1', '3', 'T', 'REF_M', 'NS3:3T', 'snp', 'sig2', 'combination', 'C1', '2', '', 'I', 'DrugA'],
+    ]
+    with open(catalog_path, 'w') as f:
+        for row in catalog_data:
+            f.write('\t'.join(row) + '\n')
+            
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE features (accession TEXT, product TEXT, segment TEXT, cds_start INTEGER, cds_end INTEGER)")
+    cursor.executemany("INSERT INTO features VALUES (?, ?, ?, ?, ?)", [
+        ('REF_M', 'NS3', '1', 1, 9),
+        ('seq_full', 'polyprotein', '1', 1, 9),
+        ('seq_partial', 'polyprotein', '1', 1, 9),
+    ])
+    
+    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, primary_accession TEXT, alignment_name TEXT, alignment TEXT)")
+    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?, ?, ?)", [
+        ('REF_M', 'REF_M', 'REF_M', 'ATGAAACCC'),
+        ('seq_full', 'seq_full', 'REF_M', 'ATGGTAACG'),
+        ('seq_partial', 'seq_partial', 'REF_M', 'ATGGTACCC'),
+    ])
+    cursor.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT)")
+    cursor.execute("INSERT INTO meta_data VALUES (?, ?)", ('REF_M', 'master'))
+    conn.commit()
+    conn.close()
+
+    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--catalog_column_profile', 'HCV', '--virus', '']
+    AnnotateMutations.main()
+
+    conn = sqlite3.connect(str(db_path))
+    completed = pd.read_sql_query("SELECT * FROM completed_signatures_only", conn)
+    completed_by_acc = _completed_signatures_by_accession(completed)
+    
+    assert 'seq_full' in completed_by_acc and 'sig1' in completed_by_acc['seq_full']
+    assert 'seq_partial' not in completed_by_acc or 'sig1' not in completed_by_acc['seq_partial']
+    conn.close()
+
+
+def test_stress_segmented_annotations(tmp_path):
+    db_path = tmp_path / "segmented.db"
+    catalog_path = tmp_path / "segmented_catalog.tsv"
+    
+    catalog_data = [
+        HCV_CATALOG_HEADER,
+        ['NS3', '1', '2', 'V', 'REF_M1', 'NS3:2V', 'snp', 'sig1', 'single', '', '', '', '', ''],
+        ['NS5A', '4', '2', 'V', 'REF_M4', 'NS5A:2V', 'snp', 'sig2', 'single', '', '', '', '', ''],
+    ]
+    with open(catalog_path, 'w') as f:
+        for row in catalog_data:
+            f.write('\t'.join(row) + '\n')
+            
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE features (accession TEXT, product TEXT, segment TEXT, cds_start INTEGER, cds_end INTEGER)")
+    cursor.executemany("INSERT INTO features VALUES (?, ?, ?, ?, ?)", [
+        ('REF_M1', 'NS3', '1', 1, 9),
+        ('REF_M4', 'NS5A', '4', 1, 9),
+        ('seq_s1', 'polyprotein', '1', 1, 9),
+        ('seq_s4', 'polyprotein', '4', 1, 9),
+    ])
+    
+    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, primary_accession TEXT, alignment_name TEXT, alignment TEXT)")
+    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?, ?, ?)", [
+        ('REF_M1', 'REF_M1', 'REF_M1', 'ATGAAACCC'),
+        ('seq_s1', 'seq_s1', 'REF_M1', 'ATGGTACCC'),
+        ('REF_M4', 'REF_M4', 'REF_M4', 'ATGAAACCC'),
+        ('seq_s4', 'seq_s4', 'REF_M4', 'ATGGTACCC'),
+    ])
+    cursor.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT)")
+    cursor.executemany("INSERT INTO meta_data VALUES (?, ?)", [
+        ('REF_M1', 'master'),
+        ('REF_M4', 'master'),
+    ])
+    conn.commit()
+    conn.close()
+
+    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--catalog_column_profile', 'HCV', '--virus', '']
+    AnnotateMutations.main()
+
+    conn = sqlite3.connect(str(db_path))
+    mutation_summary = pd.read_sql_query("SELECT * FROM sequence_relevant_mutation_summary", conn)
+    mutation_ids = _mutation_ids_by_accession(mutation_summary)
+    
+    assert 'NS3:2V' in mutation_ids['seq_s1']
+    assert 'NS5A:2V' in mutation_ids['seq_s4']
+    conn.close()
+
+
+def test_coordinate_mapping_handles_deletions_indels(tmp_path):
+    db_path = tmp_path / "indels.db"
+    catalog_path = tmp_path / "indels_catalog.tsv"
+    
+    catalog_data = [
+        HCV_CATALOG_HEADER,
+        ['NS3', '1', '2', 'D', 'REF_INDEL', 'NS3:2D', 'snp', 'sig1', 'single', '', '', '', '', ''],
+    ]
+    with open(catalog_path, 'w') as f:
+        for row in catalog_data:
+            f.write('\t'.join(row) + '\n')
+            
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    # In features, cds_start is sequence-specific start (1 in the ungapped sequence of REF_INDEL)
+    cursor.execute("CREATE TABLE features (accession TEXT, product TEXT, segment TEXT, cds_start INTEGER, cds_end INTEGER)")
+    cursor.executemany("INSERT INTO features VALUES (?, ?, ?, ?, ?)", [
+        ('REF_INDEL', 'NS3', '1', 1, 9),
+        ('seq_q1', 'polyprotein', '1', 1, 12),
+    ])
+    
+    # REF_INDEL has a deletion of 3 nt (gaps ---) at columns 3, 4, 5
+    # Sequence-specific nucleotide indices map to columns:
+    # 1->0, 2->1, 3->2 (ATG), 4->6, 5->7, 6->8 (GAC), 7->9, 8->10, 9->11 (CAA)
+    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, primary_accession TEXT, alignment_name TEXT, alignment TEXT)")
+    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?, ?, ?)", [
+        ('REF_INDEL', 'REF_INDEL', 'REF_INDEL', 'ATG---GACCAA'),
+        ('seq_q1', 'seq_q1', 'REF_INDEL', 'ATGTTTGACCAA'),
+    ])
+    cursor.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT)")
+    cursor.execute("INSERT INTO meta_data VALUES (?, ?)", ('REF_INDEL', 'master'))
+    conn.commit()
+    conn.close()
+
+    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--catalog_column_profile', 'HCV', '--virus', '']
+    AnnotateMutations.main()
+
+    conn = sqlite3.connect(str(db_path))
+    mutation_summary = pd.read_sql_query("SELECT * FROM sequence_relevant_mutation_summary", conn)
+    mutation_ids = _mutation_ids_by_accession(mutation_summary)
+    
+    # Codon 2 of NS3 in REF_INDEL starts at sequence index 4, which maps to alignment columns 6, 7, 8.
+    # At columns 6, 7, 8, seq_q1 has 'GAC' -> translates to 'D'. 
+    # Therefore, mutation 'NS3:2D' should be successfully annotated!
+    assert 'NS3:2D' in mutation_ids['seq_q1']
+    conn.close()
+
+
+def test_coordinate_mapping_handles_truncations(tmp_path):
+    db_path = tmp_path / "trunc.db"
+    catalog_path = tmp_path / "trunc_catalog.tsv"
+    
+    catalog_data = [
+        HCV_CATALOG_HEADER,
+        ['NS3', '1', '1', 'K', 'REF_TRUNC', 'NS3:1K', 'snp', 'sig1', 'single', '', '', '', '', ''],
+    ]
+    with open(catalog_path, 'w') as f:
+        for row in catalog_data:
+            f.write('\t'.join(row) + '\n')
+            
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    # REF_TRUNC is truncated at the start; its first base starts at master coordinate 4.
+    # Its sequence-specific cds_start is 1 (starts at 'AAA').
+    cursor.execute("CREATE TABLE features (accession TEXT, product TEXT, segment TEXT, cds_start INTEGER, cds_end INTEGER)")
+    cursor.executemany("INSERT INTO features VALUES (?, ?, ?, ?, ?)", [
+        ('REF_TRUNC', 'NS3', '1', 1, 9),
+        ('seq_q2', 'polyprotein', '1', 1, 12),
+    ])
+    
+    # REF_TRUNC has gaps (---) at columns 0, 1, 2
+    # Its sequence-specific nucleotide index 1 maps to column 3.
+    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, primary_accession TEXT, alignment_name TEXT, alignment TEXT)")
+    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?, ?, ?)", [
+        ('REF_TRUNC', 'REF_TRUNC', 'REF_TRUNC', '---AAACCCGGG'),
+        ('seq_q2', 'seq_q2', 'REF_TRUNC', 'ATGAAACCCGGG'),
+    ])
+    cursor.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT)")
+    cursor.execute("INSERT INTO meta_data VALUES (?, ?)", ('REF_TRUNC', 'master'))
+    conn.commit()
+    conn.close()
+
+    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--catalog_column_profile', 'HCV', '--virus', '']
+    AnnotateMutations.main()
+
+    conn = sqlite3.connect(str(db_path))
+    mutation_summary = pd.read_sql_query("SELECT * FROM sequence_relevant_mutation_summary", conn)
+    mutation_ids = _mutation_ids_by_accession(mutation_summary)
+    
+    # Codon 1 of NS3 in REF_TRUNC starts at sequence index 1, which maps to alignment columns 3, 4, 5.
+    # At columns 3, 4, 5, seq_q2 has 'AAA' -> 'K'.
+    # Therefore, mutation 'NS3:1K' should be successfully annotated!
+    assert 'NS3:1K' in mutation_ids['seq_q2']
+    conn.close()
+
+
+def test_coordinate_mapping_detects_frame_shift_from_wrong_coordinates(tmp_path):
+    db_path = tmp_path / "frameshift.db"
+    catalog_path = tmp_path / "frameshift_catalog.tsv"
+    
+    catalog_data = [
+        HCV_CATALOG_HEADER,
+        # Catalog has NS3 codon 1 with expected residue K (lysine).
+        ['NS3', '1', '1', 'K', 'REF_FS', 'NS3:1K', 'snp', 'sig1', 'single', '', '', '', '', ''],
+    ]
+    with open(catalog_path, 'w') as f:
+        for row in catalog_data:
+            f.write('\t'.join(row) + '\n')
+            
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE features (accession TEXT, product TEXT, segment TEXT, cds_start INTEGER, cds_end INTEGER)")
+    cursor.executemany("INSERT INTO features VALUES (?, ?, ?, ?, ?)", [
+        # Set cds_start to 2 instead of 1, which is a 1 nt shift (frame shift!)
+        ('REF_FS', 'NS3', '1', 2, 9),
+        ('seq_q3', 'polyprotein', '1', 1, 9),
+    ])
+    
+    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, primary_accession TEXT, alignment_name TEXT, alignment TEXT)")
+    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?, ?, ?)", [
+        ('REF_FS', 'REF_FS', 'REF_FS', 'ATGAAACCC'),
+        ('seq_q3', 'seq_q3', 'REF_FS', 'ATGAAACCC'),
+    ])
+    cursor.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT)")
+    cursor.execute("INSERT INTO meta_data VALUES (?, ?)", ('REF_FS', 'master'))
+    conn.commit()
+    conn.close()
+
+    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--catalog_column_profile', 'HCV', '--virus', '']
+    AnnotateMutations.main()
+
+    conn = sqlite3.connect(str(db_path))
+    mutation_summary = pd.read_sql_query("SELECT * FROM sequence_relevant_mutation_summary", conn)
+    mutation_ids = _mutation_ids_by_accession(mutation_summary)
+    
+    # Because cds_start was set to 2 (offset), codon 1 starts at nucleotide position 2 (TGA instead of ATG).
+    # 'TGA' translates to '*' (stop codon), not 'K'.
+    # Therefore, mutation 'NS3:1K' should NOT be annotated for seq_q3 because of the frame shift.
+    assert 'seq_q3' not in mutation_ids or 'NS3:1K' not in mutation_ids['seq_q3']
+    conn.close()
+
+
+
+def test_stress_translation_edge_cases(tmp_path):
+    db_path = tmp_path / "translation.db"
+    catalog_path = tmp_path / "translation_catalog.tsv"
+    
+    catalog_data = [
+        HCV_CATALOG_HEADER,
+        ['NS3', '1', '2', '_', 'REF_M', 'NS3:2Stop', 'snp', 'sig1', 'single', '', '', '', '', ''],
+        ['NS3', '1', '3', 'X', 'REF_M', 'NS3:3X', 'snp', 'sig2', 'single', '', '', '', '', ''],
+    ]
+    with open(catalog_path, 'w') as f:
+        for row in catalog_data:
+            f.write('\t'.join(row) + '\n')
+            
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute("CREATE TABLE features (accession TEXT, product TEXT, segment TEXT, cds_start INTEGER, cds_end INTEGER)")
+    cursor.executemany("INSERT INTO features VALUES (?, ?, ?, ?, ?)", [
+        ('REF_M', 'NS3', '1', 1, 9),
+        ('seq_stop', 'polyprotein', '1', 1, 9),
+        ('seq_invalid', 'polyprotein', '1', 1, 9),
+    ])
+    
+    cursor.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, primary_accession TEXT, alignment_name TEXT, alignment TEXT)")
+    cursor.executemany("INSERT INTO sequence_alignment VALUES (?, ?, ?, ?)", [
+        ('REF_M', 'REF_M', 'REF_M', 'ATGAAACCC'),
+        ('seq_stop', 'seq_stop', 'REF_M', 'ATGTAACCC'),
+        ('seq_invalid', 'seq_invalid', 'REF_M', 'ATGAAANNN'),
+    ])
+    cursor.execute("CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT)")
+    cursor.execute("INSERT INTO meta_data VALUES (?, ?)", ('REF_M', 'master'))
+    conn.commit()
+    conn.close()
+
+    sys.argv = ['AnnotateMutations.py', '--db', str(db_path), '--mutation_catalog', str(catalog_path), '--catalog_column_profile', 'HCV', '--virus', '']
+    AnnotateMutations.main()
+
+    conn = sqlite3.connect(str(db_path))
+    mutation_summary = pd.read_sql_query("SELECT * FROM sequence_relevant_mutation_summary", conn)
+    mutation_ids = _mutation_ids_by_accession(mutation_summary)
+    
+    assert 'NS3:2Stop' in mutation_ids['seq_stop']
+    assert 'NS3:3X' in mutation_ids['seq_invalid']
+    conn.close()

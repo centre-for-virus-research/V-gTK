@@ -49,13 +49,40 @@ class GenBankFetcher:
 		self.test_fetch_count = test_fetch_count
 		self.update_log = "update_accessions.tsv"
 		
+		# Load NCBI API key if available and not in pytest
+		import sys
+		if "pytest" not in sys.modules:
+			self.api_key = self._load_ncbi_key()
+		else:
+			self.api_key = None
+		
 		# Ensure output directories exist immediately
 		os.makedirs(self.output_dir, exist_ok=True)
 		os.makedirs(join(self.output_dir, self.base_dir), exist_ok=True)
 
+	def _load_ncbi_key(self):
+		key_path = "/home3/oml4h/RABV-gTK/dev/ncbi_key"
+		if os.path.exists(key_path):
+			try:
+				with open(key_path, "r", encoding="utf-8") as f:
+					key = f.read().strip()
+				if key and len(key) == 36 and all(c.isalnum() or c in "-_" for c in key):
+					return key
+			except Exception as e:
+				print(f"Warning: Could not read NCBI key from {key_path}: {e}")
+		return None
+
+	def _get(self, url):
+		if self.api_key:
+			if "?" in url:
+				url += f"&api_key={self.api_key}"
+			else:
+				url += f"?api_key={self.api_key}"
+		return requests.get(url)
+
 	def get_record_count(self):
 		search_url = f"{self.base_url}esearch.fcgi?db=nucleotide&term=txid{self.taxid}[Organism:exp]&retmode=json&email={self.email}"
-		response = requests.get(search_url)
+		response = self._get(search_url)
 		response.raise_for_status()
 		data = response.json()
 		return int(data['esearchresult']['count'])
@@ -71,7 +98,7 @@ class GenBankFetcher:
 			f"&retmax=0&idtype=acc"
 			f"&usehistory=y&email={self.email}&retmode=json"
 		)
-		resp = requests.get(hist_url)
+		resp = self._get(hist_url)
 		resp.raise_for_status()
 		hist = resp.json()["esearchresult"]
 		
@@ -98,7 +125,7 @@ class GenBankFetcher:
 			max_retries = 5
 			for attempt in range(max_retries):
 				try:
-					page_resp = requests.get(page_url)
+					page_resp = self._get(page_url)
 					page_resp.raise_for_status()
 					data = page_resp.json()
 					if "esearchresult" not in data:
@@ -134,7 +161,7 @@ class GenBankFetcher:
 			f"&retmax=0&idtype=acc"
 			f"&usehistory=y&email={self.email}&retmode=json"
 		)
-		resp = requests.get(hist_url)
+		resp = self._get(hist_url)
 		resp.raise_for_status()
 		hist = resp.json()["esearchresult"]
 
@@ -160,7 +187,7 @@ class GenBankFetcher:
 			max_retries = 5
 			for attempt in range(max_retries):
 				try:
-					page_resp = requests.get(page_url)
+					page_resp = self._get(page_url)
 					page_resp.raise_for_status()
 					data = page_resp.json()
 					if "esearchresult" not in data:
@@ -196,7 +223,7 @@ class GenBankFetcher:
 			hist = None
 			for attempt in range(max_retries):
 				try:
-					resp = requests.get(hist_url)
+					resp = self._get(hist_url)
 					resp.raise_for_status()
 					
 					# Sanitise control characters if any exist before decoding JSON
@@ -240,7 +267,7 @@ class GenBankFetcher:
 				max_retries = 5
 				for attempt in range(max_retries):
 					try:
-						page_resp = requests.get(page_url)
+						page_resp = self._get(page_url)
 						page_resp.raise_for_status()
 						
 						# Apply identical sanitisation to the chunk results
@@ -298,7 +325,7 @@ class GenBankFetcher:
 			max_retries = 5
 			for attempt in range(max_retries):
 				try:
-					resp = requests.get(url)
+					resp = self._get(url)
 					resp.raise_for_status()
 
 					# Pass batch_n here to name the file as before
@@ -345,7 +372,7 @@ class GenBankFetcher:
 					f"&retmax={self.test_fetch_count}&idtype=acc"
 					f"&usehistory=y&email={self.email}&retmode=json"
 				)
-				response = requests.get(search_url)
+				response = self._get(search_url)
 				response.raise_for_status()
 				data = response.json()
 				ids = data["esearchresult"]["idlist"]

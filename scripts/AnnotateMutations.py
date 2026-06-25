@@ -301,6 +301,13 @@ def load_db_gff_feature_maps(conn, alias_lookup):
     feature_maps = {}
     master_accessions = load_master_accessions(conn)
 
+    # Load all alignment names from sequence_alignment table to include genotype-specific references
+    try:
+        alignment_names = pd.read_sql_query('SELECT DISTINCT alignment_name FROM sequence_alignment', conn)['alignment_name'].dropna().tolist()
+        allowed_accessions = master_accessions.union(alignment_names)
+    except Exception:
+        allowed_accessions = master_accessions
+
     for table_name in candidate_tables:
         df = pd.read_sql_query(f'SELECT * FROM {table_name}', conn)
         columns = set(df.columns)
@@ -313,7 +320,7 @@ def load_db_gff_feature_maps(conn, alias_lookup):
                 reference_accession = str(row.get('reference_accession', '') or '').strip()
                 if not reference_accession:
                     continue
-                if master_accessions and reference_accession not in master_accessions:
+                if allowed_accessions and reference_accession not in allowed_accessions:
                     continue
                 feature_type = str(row.get(feature_type_col, 'gene') or 'gene') if feature_type_col else 'gene'
                 merge_feature_entry(
@@ -333,7 +340,7 @@ def load_db_gff_feature_maps(conn, alias_lookup):
                 reference_accession = str(row.get('reference_accession', '') or '').strip()
                 if not reference_accession:
                     continue
-                if master_accessions and reference_accession not in master_accessions:
+                if allowed_accessions and reference_accession not in allowed_accessions:
                     continue
                 parsed = parse_gff_text_to_feature_map(row.get(text_col, ''), reference_accession, alias_lookup, f'db_table:{table_name}')
                 if not parsed:
@@ -346,8 +353,8 @@ def load_db_gff_feature_maps(conn, alias_lookup):
         df = pd.read_sql_query('SELECT * FROM features', conn)
         columns = set(df.columns)
         accession_col = 'accession' if 'accession' in columns else 'primary_accession' if 'primary_accession' in columns else None
-        start_col = 'cds_start' if 'cds_start' in columns else 'start' if 'start' in columns else None
-        end_col = 'cds_end' if 'cds_end' in columns else 'end' if 'end' in columns else None
+        start_col = 'cds_start_OG_seq' if 'cds_start_OG_seq' in columns else 'cds_start' if 'cds_start' in columns else 'start' if 'start' in columns else None
+        end_col = 'cds_end_OG_seq' if 'cds_end_OG_seq' in columns else 'cds_end' if 'cds_end' in columns else 'end' if 'end' in columns else None
         product_col = next((name for name in ['product', 'gene_name', 'name', 'raw_product'] if name in columns), None)
         feature_type_col = 'feature_type' if 'feature_type' in columns else None
 
@@ -359,8 +366,8 @@ def load_db_gff_feature_maps(conn, alias_lookup):
 
                 ref_candidate = str(row.get('reference_accession', '') or '').strip() if 'reference_accession' in columns else ''
                 master_candidate = str(row.get('master_ref_accession', '') or '').strip() if 'master_ref_accession' in columns else ''
-                is_master = reference_accession in master_accessions if master_accessions else False
-                if not is_master:
+                is_allowed = reference_accession in allowed_accessions if allowed_accessions else True
+                if not is_allowed:
                     continue
                 if reference_accession not in {ref_candidate, master_candidate, reference_accession}:
                     continue
@@ -456,16 +463,6 @@ def build_catalog_reference_table(catalog, catalog_column_profile):
     return catalog_reference
 
 
-def features_have_gene_information(features, catalog, alias_lookup):
-    if features.empty or 'product' not in features.columns:
-        return False
-    informative_products = set()
-    for value in features['product'].dropna().tolist():
-        canonical = canonicalize_product(value, alias_lookup)
-        if normalize_lookup_key(canonical) not in {'polyprotein', 'wholegenome'}:
-            informative_products.add(canonical)
-    catalog_products = {value for value in catalog['_canonical_protein'].tolist() if value}
-    return bool(informative_products & catalog_products)
 
 
 def build_alignment_coordinate_map(alignment):
@@ -552,71 +549,6 @@ def extract_feature_codon(alignment, coord_map, cds_start, aa_pos):
     return extract_aligned_codon(alignment, alignment_indices)
 
 
-def get_query_feature_cds_start(feature_row):
-    if hasattr(feature_row, "get"):
-        value = feature_row.get("cds_start_OG_seq")
-        if value not in (None, ""):
-            return value
-        return feature_row.get("cds_start")
-    return None
-
-
-def annotate_from_feature_rows(catalog, features, aln_dict, has_segment):
-    mutations_found = []
-    diagnostics = Counter()
-    alignment_coord_maps = {}
-
-    for _, row in catalog.iterrows():
-        protein_name = row['_canonical_protein']
-        aa_pos = row['_aa_position_int']
-        if not protein_name or aa_pos is None:
-            diagnostics['invalid_catalog_rows'] += 1
-            continue
-
-        segment_val = row['_segment_norm']
-        alt_residue = row['alt_residue']
-        mutation_id = row['mutation_id']
-
-        if has_segment and segment_val:
-            feat_match = features[
-                (features['_canonical_product'] == protein_name)
-                & (features['_segment_norm'] == segment_val)
-            ]
-        else:
-            feat_match = features[features['_canonical_product'] == protein_name]
-
-        if feat_match.empty:
-            diagnostics['feature_match_missing'] += 1
-            continue
-
-        diagnostics['feature_rows_matched'] += len(feat_match)
-        for _, feat in feat_match.iterrows():
-            acc = feat['accession']
-            if acc not in aln_dict:
-                diagnostics['alignment_missing_for_feature_accession'] += 1
-                continue
-
-            aln = aln_dict[acc]
-            coord_map = alignment_coord_maps.setdefault(acc, build_alignment_coordinate_map(aln))
-            codon = extract_feature_codon(aln, coord_map, get_query_feature_cds_start(feat), aa_pos)
-            if codon is None:
-                diagnostics['codon_out_of_bounds'] += 1
-                continue
-
-            aa = translate_codon(codon)
-            if aa == alt_residue:
-                mutations_found.append({
-                    'primary_accession': acc,
-                    'mutation_id': mutation_id,
-                    'protein_name': protein_name,
-                    'segment': feat['segment'] if has_segment and 'segment' in feat else '',
-                    'aa_position': aa_pos,
-                    'alt_residue': alt_residue,
-                    'combination_id': row.get('combination_id', ''),
-                })
-                diagnostics['mutation_hits'] += 1
-
-    return mutations_found, diagnostics
 
 
 def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_lookup, db_gff_maps, allow_genbank_reference_gff):
@@ -637,10 +569,30 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
             print(
                 f"[AnnotateMutations][warn] Filled {int((seq_aln['_reference_id'] == master_candidates[0]).sum())} blank alignment_name values with master accession {master_candidates[0]}"
             )
+        elif len(master_candidates) == 0 and not catalog_reference_hints:
+            dummy_ref = seq_aln['sequence_id'].iloc[0]
+            seq_aln.loc[seq_aln['_reference_id'] == '', '_reference_id'] = dummy_ref
+            print(f"[AnnotateMutations][warn] Filled blank alignment_name with first sequence accession {dummy_ref}")
         else:
-            raise AnnotationMappingError(
-                'sequence_alignment contains blank alignment_name values and no unique master accession was found in meta_data.'
-            )
+            matched_ref = None
+            for hint in catalog_reference_hints:
+                for token in extract_accession_tokens(hint):
+                    if token in seq_aln['sequence_id'].values:
+                        matched_ref = token
+                        break
+                if matched_ref:
+                    break
+            if matched_ref:
+                seq_aln.loc[seq_aln['_reference_id'] == '', '_reference_id'] = matched_ref
+                print(f"[AnnotateMutations][warn] Filled blank alignment_name with matched catalog reference accession {matched_ref}")
+            elif len(seq_aln['sequence_id'].unique()) == 1:
+                single_acc = seq_aln['sequence_id'].iloc[0]
+                seq_aln.loc[seq_aln['_reference_id'] == '', '_reference_id'] = single_acc
+                print(f"[AnnotateMutations][warn] Filled blank alignment_name with unique sequence accession {single_acc}")
+            else:
+                first_acc = seq_aln['sequence_id'].iloc[0]
+                seq_aln.loc[seq_aln['_reference_id'] == '', '_reference_id'] = first_acc
+                print(f"[AnnotateMutations][warn] Filled blank alignment_name with default first sequence accession {first_acc}")
 
     by_reference = {
         ref: df.copy()
@@ -871,8 +823,7 @@ def main():
     conn = sqlite3.connect(args.db)
 
     try:
-        print('Loading features and sequence alignments...')
-        features = pd.read_sql_query('SELECT * FROM features', conn)
+        print('Loading sequence alignments...')
         seq_aln = prepare_sequence_alignment(pd.read_sql_query('SELECT * FROM sequence_alignment', conn))
         meta_data = None
         try:
@@ -885,36 +836,24 @@ def main():
         if invalid_positions:
             print(f'[AnnotateMutations][warn] Skipping {invalid_positions} catalog rows with invalid aa_position values')
 
-        aln_dict = dict(zip(seq_aln['sequence_id'], seq_aln['alignment']))
-        has_segment = 'segment' in features.columns
-        if has_segment:
-            features['_segment_norm'] = features['segment'].apply(normalize_segment)
-        else:
-            features['_segment_norm'] = ''
-        features['_canonical_product'] = features['product'].apply(lambda value: canonicalize_product(value, gene_alias_lookup)) if 'product' in features.columns else ''
         db_gff_maps = load_db_gff_feature_maps(conn, gene_alias_lookup)
 
         print('Extracting mutations...')
-        if features_have_gene_information(features, catalog, gene_alias_lookup):
-            print('[AnnotateMutations] Using feature-based coordinate mapping')
-            mutations_found, diagnostics = annotate_from_feature_rows(catalog, features, aln_dict, has_segment)
-        else:
-            print('[AnnotateMutations][warn] No protein-level gene information found in features; falling back to GFF-backed reference coordinate mapping')
-            mutations_found, diagnostics, resolved_maps = annotate_from_reference_coordinates(
-                catalog,
-                seq_aln[['sequence_id', 'primary_accession', 'alignment', 'alignment_name']].copy(),
-                meta_data,
-                gene_alias_lookup,
-                db_gff_maps,
-                args.allow_genbank_reference_gff,
+        mutations_found, diagnostics, resolved_maps = annotate_from_reference_coordinates(
+            catalog,
+            seq_aln[['sequence_id', 'primary_accession', 'alignment', 'alignment_name']].copy(),
+            meta_data,
+            gene_alias_lookup,
+            db_gff_maps,
+            args.allow_genbank_reference_gff,
+        )
+        print(
+            '[AnnotateMutations] Resolved reference coordinate maps for: '
+            + ', '.join(
+                f'{ref}->{info["resolved_accession"]} ({info["source"]}; aligned_ref={info["aligned_reference_accession"]})'
+                for ref, info in resolved_maps.items()
             )
-            print(
-                '[AnnotateMutations] Resolved reference coordinate maps for: '
-                + ', '.join(
-                    f'{ref}->{info["resolved_accession"]} ({info["source"]}; aligned_ref={info["aligned_reference_accession"]})'
-                    for ref, info in resolved_maps.items()
-                )
-            )
+        )
 
         print('[AnnotateMutations] Mapping summary: ' + ', '.join(f'{key}={value}' for key, value in sorted(diagnostics.items())))
 

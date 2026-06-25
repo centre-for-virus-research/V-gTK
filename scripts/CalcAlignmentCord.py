@@ -179,7 +179,7 @@ class CalculateAlignmentCoordinates:
 			genome_cord_end=None,
 		)
 
-	def recalculate_cds_coordinates_with_span(self, sequence_id, gap_ranges, cds_list, start_offset, genome_cord_start=None, genome_cord_end=None):
+	def recalculate_cds_coordinates_with_span(self, sequence_id, gap_ranges, cds_list, start_offset, genome_cord_start=None, genome_cord_end=None, master_coord_to_aln_pos=None):
 		adjusted_coords = []
 		clamp_to_span = genome_cord_start not in (None, "NA") and genome_cord_end not in (None, "NA")
 		span_start = None
@@ -208,9 +208,18 @@ class CalculateAlignmentCoordinates:
 			# OG sequence coordinates are the ungapped query positions covering the overlap.
 			adj_start = overlap_start - gaps_before_start
 			adj_end = overlap_end - gaps_before_end
+
+			# Map to alignment column coordinates
+			if master_coord_to_aln_pos is not None:
+				aln_start = master_coord_to_aln_pos.get(overlap_start, overlap_start)
+				aln_end = master_coord_to_aln_pos.get(overlap_end, overlap_end)
+			else:
+				aln_start = overlap_start
+				aln_end = overlap_end
+
 			adjusted_entry = {
-				'start': cds_start,
-				'end': cds_end,
+				'start': aln_start,
+				'end': aln_end,
 				'og_start': adj_start,
 				'og_end': adj_end,
 				'product': cds['product'],
@@ -289,6 +298,7 @@ class CalculateAlignmentCoordinates:
 	def find_gaps_in_fasta(self):
 		os.makedirs(join(self.tmp_dir, self.output_dir), exist_ok=True)
 		update_scope_accessions = self.load_update_scope_accessions()
+		existing_features = self.load_existing_feature_accessions()
 		segment_map = self.load_segment_map()
 
 		# Load old metrics to evaluate backbone shifts
@@ -342,6 +352,19 @@ class CalculateAlignmentCoordinates:
 				calc = CalculateGenomeCoordinates(join(fasta_file_dir, fasta_file), current_master)
 				genome_coords = calc.extract_alignment_coordinates()
 				
+				# Build map from master coordinate to 1-based alignment position
+				fasta_records = list(SeqIO.parse(join(fasta_file_dir, fasta_file), "fasta"))
+				master_record = next((r for r in fasta_records if r.id == current_master), None)
+				if not master_record:
+					master_record = fasta_records[0]
+				master_alignment = str(master_record.seq)
+				master_coord_to_aln_pos = {}
+				master_res_count = 0
+				for align_pos, base in enumerate(master_alignment, start=1):
+					if base != "-":
+						master_res_count += 1
+						master_coord_to_aln_pos[master_res_count] = align_pos
+
 				for record in SeqIO.parse(join(fasta_file_dir, fasta_file), "fasta"):
 					record_id = str(record.id).strip()
 					sequence = str(record.seq)
@@ -359,6 +382,9 @@ class CalculateAlignmentCoordinates:
 							continue
 						else:
 							print(f"[info] Forcing coordinate recalculation for historic ID {record_id} due to backbone expansion ({old_len} -> {current_len})")
+
+					if update_scope_accessions and record_id in existing_features and not backbone_expanded:
+						continue
 
 					if record.id in genome_coords:
 						master_acc, genome_cord_start, genome_cord_end = genome_coords[record.id]
@@ -379,6 +405,7 @@ class CalculateAlignmentCoordinates:
 						start_offset,
 						genome_cord_start=genome_cord_start,
 						genome_cord_end=genome_cord_end,
+						master_coord_to_aln_pos=master_coord_to_aln_pos,
 					)
 
 					for each_cords in adjusted:

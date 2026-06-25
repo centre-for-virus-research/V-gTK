@@ -1,6 +1,7 @@
 import os
 import re
 import csv
+import sys
 import read_file
 import pandas as pd
 from Bio import SeqIO
@@ -21,11 +22,17 @@ class NextalignAlignment:
 		self.master_ref = master_ref
 		self.update_db = update_db
 		self.tmp_dir = tmp_dir
-		self.min_seed = "44"
-		self.seed_spacing = "50"
-		self.min_match_rate = "0.1"
 		self.reference_alignment = reference_alignment
 		self.nextalign_dir = nextalign_dir
+		
+		# Cascading parameter profiles for dynamic relaxation
+		self.relaxation_profiles = [
+			{"min_seeds": 44, "seed_spacing": 50, "min_match_rate": 0.1},
+			{"min_seeds": 30, "seed_spacing": 40, "min_match_rate": 0.1},
+			{"min_seeds": 20, "seed_spacing": 30, "min_match_rate": 0.05},
+			{"min_seeds": 10, "seed_spacing": 20, "min_match_rate": 0.05},
+			{"min_seeds": 5,  "seed_spacing": 15, "min_match_rate": 0.01}
+		]
 	
 	@staticmethod
 	def path_to_basename(file_path):
@@ -45,50 +52,116 @@ class NextalignAlignment:
 		else:
 			return [x.strip() for x in self.master_ref.split(',') if x.strip()]
 
+	def _validate_alignment_integrity(self, aligned_fasta_path):
+		"""
+		Evaluates the structural validity of the alignment by checking nucleotide
+		identity in the final 30% of the alignment window (conserved downstream genes)
+		for all query sequences in the alignment against the reference sequence.
+		Returns (bool_passed, min_calculated_identity).
+		"""
+		if not os.path.exists(aligned_fasta_path):
+			return False, 0.0
+			
+		records = list(SeqIO.parse(aligned_fasta_path, "fasta"))
+		if len(records) < 2:
+			return False, 0.0
+			
+		ref_seq = str(records[0].seq).upper()
+		total_columns = len(ref_seq)
+		start_idx = int(total_columns * 0.70) # Target the 3' conserved regions
+		
+		min_identity = 1.0
+		all_passed = True
+		
+		for r_idx in range(1, len(records)):
+			query_seq = str(records[r_idx].seq).upper()
+			
+			matches = 0
+			valid_positions = 0
+			
+			for i in range(start_idx, total_columns):
+				n1 = ref_seq[i]
+				n2 = query_seq[i]
+				if n1 == '-' and n2 == '-':
+					continue
+				valid_positions += 1
+				if n1 == n2 and n1 != '-':
+					matches += 1
+					
+			if valid_positions == 0:
+				identity = 0.0
+			else:
+				identity = matches / valid_positions
+				
+			if identity < min_identity:
+				min_identity = identity
+				
+			if identity < 0.50:
+				all_passed = False
+				print(f"[validation] Sequence {records[r_idx].id} failed frame validation against reference {records[0].id}. Downstream Identity: {identity:.2%}")
+				
+		return all_passed, min_identity
+
 	def nextalign_master(self, query_acc_path, ref_acc_path, query_aln_op):
 		accession = self.path_to_basename(ref_acc_path)
-		command = [
-			'nextalign', 'run',
-			'--min-seeds', f'{self.min_seed}',
-			'--seed-spacing', f'{self.seed_spacing}',
-			'--min-match-rate', f'{self.min_match_rate}',
-			'--input-ref', ref_acc_path,
-			'--output-all', join(query_aln_op, f'{accession}'),
-			'--output-basename', f'{accession}',
-			'--include-reference',
-			query_acc_path
+		output_subdir = join(query_aln_op, f'{accession}')
+		aligned_fasta = join(output_subdir, f'{accession}.aligned.fasta')
+		
+		# Loop dynamically through relaxation parameters
+		for attempt, profile in enumerate(self.relaxation_profiles, 1):
+			command = [
+				'nextalign', 'run',
+				'--min-seeds', str(profile["min_seeds"]),
+				'--seed-spacing', str(profile["seed_spacing"]),
+				'--min-match-rate', str(profile["min_match_rate"]),
+				'--input-ref', ref_acc_path,
+				'--output-all', output_subdir,
+				'--output-basename', f'{accession}',
+				'--include-reference',
+				query_acc_path
 			]
 
-		command_str = " ".join(command)
-		print(f"Executing command: {command_str}")
-
-		return_code = os.system(command_str)
-		if return_code == 0:
-			print(f"{accession} completed successfully.")
-		else:
-			print(f"{accession} failed with return code {return_code}")
+			command_str = " ".join(command)
+			print(f"Executing Master Alignment (Attempt {attempt}): {command_str}")
+			
+			return_code = os.system(command_str)
+			
+			if return_code == 0:
+				passed, identity = self._validate_alignment_integrity(aligned_fasta)
+				if passed:
+					print(f"SUCCESS: {accession} aligned cleanly (Downstream Identity: {identity:.2%}) using seeds={profile['min_seeds']}.")
+					return
+				else:
+					print(f"WARNING: Nextalign completed for {accession} but failed frame validation. Downstream Identity: {identity:.2%}. Frame-shift suspected near hypervariable locus.")
+			else:
+				print(f"WARNING: Nextalign process execution failed for {accession} on attempt {attempt}.")
+				
+		# If all relaxation attempts fail, crash hard to preserve database parity
+		print(f"\nCRITICAL ERROR: Fundamental alignment failure for reference sequence: {accession}")
+		print(f"Reason: Out-of-frame insertions/deletions or extreme sequence divergence could not be resolved across all heuristic profiles.")
+		print(f"Aborting execution to protect SQLite coordinate lookups.")
+		raise RuntimeError(f"Alignment Frame Failure: {accession} aborted pipeline execution.")
 
 	def nextalign_query(self, query_acc_path, ref_acc_path, query_aln_op):
 		accession = self.path_to_basename(query_acc_path)
+		# Use baseline profile for intra-group queries as they are tightly clustered
+		base_profile = self.relaxation_profiles[0]
 		command = [
 			'nextalign', 'run',
-			'--min-seeds', f'{self.min_seed}',
-			'--seed-spacing', f'{self.seed_spacing}',
-			'--min-match-rate', f'{self.min_match_rate}',
+			'--min-seeds', str(base_profile["min_seeds"]),
+			'--seed-spacing', str(base_profile["seed_spacing"]),
+			'--min-match-rate', str(base_profile["min_match_rate"]),
 			'--input-ref', ref_acc_path,
 			'--output-all', join(query_aln_op, f'{accession}'),
 			'--output-basename', f'{accession}',
 			'--include-reference',
 			query_acc_path
 		]
-        
+		
 		command_str = " ".join(command)
-        
 		return_code = os.system(command_str)
-		if return_code == 0:
-			print(f"{accession} completed successfully.")
-		else:
-			print(f"{accession} failed with return code {return_code}")
+		if return_code != 0:
+			print(f"Query alignment error: {accession} exited with code {return_code}")
 
 	@staticmethod
 	def _read_nextalign_errors(error_file_path, reference_accession):
@@ -105,7 +178,6 @@ class NextalignAlignment:
 					failed.setdefault(acc, []).append(error)
 				return failed
 
-		# Backward-compatible fallback for older/headerless test fixtures.
 		handle.seek(0)
 		reader = csv.reader(handle)
 		for row in reader:
@@ -167,11 +239,8 @@ class NextalignAlignment:
 		
 		os.makedirs(query_aln_output_dir, exist_ok=True)
 		os.makedirs(ref_aln_output_dir, exist_ok=True)
-
-		#query_table = join(self.table_dir, "query_features.tsv")
 		
 		if self.reference_alignment:
-			#self.master_feature_table(self.reference_alignment)
 			for each_query_file in os.listdir(self.query_dir):
 				ref_file = each_query_file
 				self.nextalign_query(
@@ -182,14 +251,12 @@ class NextalignAlignment:
 			self.update_gb_matrix([query_aln_output_dir], self.gb_matrix)
 		
 		else:
-			#align query against reference sequence alignment
 			for each_query_file in os.listdir(self.query_dir):
 				ref_file = each_query_file
-				self.nextalign_query(join(self.query_dir, each_query_file),join(self.ref_dir, ref_file), query_aln_output_dir)
+				self.nextalign_query(join(self.query_dir, each_query_file), join(self.ref_dir, ref_file), query_aln_output_dir)
 		
-			#align master and reference sequence alignment
 			for each_ref in os.listdir(self.master_seq_dir):
-				self.nextalign_master(self.ref_fa_file,join(self.master_seq_dir, each_ref),ref_aln_output_dir)
+				self.nextalign_master(self.ref_fa_file, join(self.master_seq_dir, each_ref), ref_aln_output_dir)
 
 			masters = self.get_master_list()
 			for master in masters:
@@ -202,17 +269,17 @@ class NextalignAlignment:
 			self.update_gb_matrix([query_aln_output_dir, ref_aln_output_dir], self.gb_matrix)
 
 if __name__ == "__main__":
-	parser = ArgumentParser(description='Performs the nextalign of each sequence')
-	parser.add_argument('-g', '--gB_matrix', help='GenBank matrix (meta data) file.', default="tmp/GenBank-matrix/gB_matrix_raw.tsv")
+	parser = ArgumentParser(description='Performs the nextalign of each sequence with adaptive step-down error control.')
+	parser.add_argument('-g', '--gB_matrix', help='GenBank matrix file.', default="tmp/GenBank-matrix/gB_matrix_raw.tsv")
 	parser.add_argument('-q', '--query_dir', help='Query file directory.', default="tmp/Blast/grouped_fasta")
 	parser.add_argument('-r', '--ref_dir', help='Reference fasta directory', default="tmp/Blast/ref_seqs")
 	parser.add_argument('-f', '--ref_fa_file', help='Reference fasta sequences', default="tmp/Sequences/ref_seq.fa")
 	parser.add_argument('-ms', '--master_seq_dir', help='Master sequence directory', default="tmp/Blast/master_seq")
-	parser.add_argument('-t', '--tmp_dir', help='Temp directory to process the data', default="tmp")
-	parser.add_argument('-m', '--master_ref', help='Master reference accession. Generally, the Ref Seq accession. In case of Rabies it is NC_001542', required=True)
-	parser.add_argument('-n', '--nextalign_dir', help='Nextalign output to be saved', default="Nextalign")
-	parser.add_argument('-ra', '--ref_alignment_file', help='Use your own reference alignment file instead of Nextalign perfoms the alignment of reference against the master reference sequence')
-	parser.add_argument('--update_db', help='Existing update DB; when set, derive master accession IDs from DB', default=None)
+	parser.add_argument('-t', '--tmp_dir', help='Temp directory', default="tmp")
+	parser.add_argument('-m', '--master_ref', help='Master reference accession.', required=True)
+	parser.add_argument('-n', '--nextalign_dir', help='Nextalign output directory', default="Nextalign")
+	parser.add_argument('-ra', '--ref_alignment_file', help='Use custom reference alignment file')
+	parser.add_argument('--update_db', help='Existing update DB', default=None)
 	args = parser.parse_args()
 
 	processor = NextalignAlignment(args.gB_matrix, args.query_dir, args.ref_dir, args.ref_fa_file, args.master_seq_dir, args.tmp_dir, args.master_ref, args.nextalign_dir, args.ref_alignment_file, args.update_db)
