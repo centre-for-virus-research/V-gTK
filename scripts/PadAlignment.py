@@ -308,8 +308,8 @@ class PadAlignment:
 			return updated_sequences
 
 		nextalign_ref_seq = str(nextalign_ref_rec.seq)
-		master_dq_raw = ref_aligned_str.replace('-', '')
-		query_dq_raw = nextalign_ref_seq.replace('-', '')
+		master_dq_raw = ref_aligned_str.upper().replace('-', '')
+		query_dq_raw = nextalign_ref_seq.upper().replace('-', '')
 
 		# Map master raw coordinates (subsequence) to nextalign raw coordinates
 		n, m = len(master_dq_raw), len(query_dq_raw)
