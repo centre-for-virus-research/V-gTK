@@ -981,13 +981,18 @@ process CREATE_SQLITE_DB {
         UPDATE_ARGS="--update --update_db !{params.update_db} --batch_id nf_!{workflow.runName}"
     fi
 
+    GENE_ARG=""
+    if [ "!{params.gene_info}" != "null" ] && [ -n "!{params.gene_info}" ]; then
+        GENE_ARG="-g !{params.gene_info}"
+    fi
+
     set -o pipefail
 
     python !{scripts_dir}/CreateSqliteDB.py -m !{meta_data} \
     -rf !{features} -p !{sequence_alignment} \
     -i !{insertions} -ht !{host_taxa} \
     -s !{software_info} -fa !{fasta_sequences} \
-    -g !{params.gene_info} \
+    ${GENE_ARG} \
     -mc !{projectDir}/assets/m49_country.csv \
     -mir !{projectDir}/assets/m49_intermediate_region.csv \
     -mr !{projectDir}/assets/m49_region.csv \
@@ -1176,7 +1181,6 @@ workflow {
     if( !params.tax_id ) missingParams << 'tax_id'
     if( !params.db_name ) missingParams << 'db_name'
     if( !params.ref_list ) missingParams << 'ref_list'
-    if( !params.gene_info ) missingParams << 'gene_info'
     if( params.mmseqs_min_seq_id == null ) missingParams << 'mmseqs_min_seq_id'
     if( missingParams ){
         error("ERROR: Missing required parameter(s): ${missingParams.join(', ')}")
@@ -1211,9 +1215,7 @@ workflow {
             error("ERROR: update DB path matches output DB path. Use a different --publish_dir or --db_name for update runs.")
         }
     }
-    if( !params.gene_info ){
-        error("ERROR: params.gene_info is required. Provide a gene_info TSV with columns: description, display_name, name, parent_name")
-    }
+
 
     // decide on run mode, update or initial run
 
