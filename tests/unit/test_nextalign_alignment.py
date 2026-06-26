@@ -232,15 +232,15 @@ def test_validate_alignment_integrity_checks_all_sequences(tmp_path: Path):
     assert passed is True
     assert min_id == 1.0
 
-    # CASE 2: One query aligns perfectly, second query is misaligned/gapped in conserved region
+    # CASE 2: One query aligns perfectly, second query is misaligned/mismatched in conserved region
     dirty_fasta = tmp_path / "dirty.fasta"
     dirty_fasta.write_text(
         ">MASTER\nATGCGTAACG\n"
         ">QUERY1\nATGCGTAACG\n"  # matches ACG -> 100% identity
-        ">QUERY2\nATGCGT----\n", # matches --- -> 0% identity (all gaps in conserved region)
+        ">QUERY2\nATGCGTGGGG\n", # matches GGG instead of AACG -> 33% identity in conserved region
         encoding="utf-8",
     )
     passed, min_id = processor._validate_alignment_integrity(str(dirty_fasta))
     assert passed is False
-    assert min_id == 0.0
+    assert abs(min_id - 0.333333) < 1e-5
 

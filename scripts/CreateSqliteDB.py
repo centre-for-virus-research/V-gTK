@@ -48,7 +48,7 @@ class CreateSqliteDB:
 		self.meta_data = meta_data
 		self.features = features
 		self.pad_aln = pad_aln
-		self.gene_info = gene_info
+		self.gene_info = gene_info if gene_info not in {None, "", "None", "null"} else None
 		self.m49_countries = m49_countries
 		self.m49_interm_region = m49_interm_region
 		self.m49_regions = m49_regions
@@ -706,7 +706,8 @@ class CreateSqliteDB:
 		self._require_file(self.meta_data, "meta_data")
 		self._require_file(self.features, "features")
 		self._require_file(self.pad_aln, "pad_aln")
-		self._require_file(self.gene_info, "gene_info")
+		if self.gene_info is not None:
+			self._require_file(self.gene_info, "gene_info")
 		self._require_file(self.m49_countries, "m49_countries")
 		self._require_file(self.m49_interm_region, "m49_interm_region")
 		self._require_file(self.m49_regions, "m49_regions")
@@ -815,7 +816,30 @@ class CreateSqliteDB:
 		elif valid_accessions and "primary_accession" in df_aln.columns:
 			df_aln = df_aln[df_aln["primary_accession"].astype(str).str.strip().isin(valid_accessions)]
 
-		df_gene = self._read_tsv_required(self.gene_info, [], "gene_info")
+		if self.gene_info is not None:
+			df_gene = self._read_tsv_required(self.gene_info, [], "gene_info")
+		else:
+			unique_products = []
+			if "product" in df_features.columns:
+				unique_products = df_features["product"].dropna().unique()
+			elif "feature" in df_features.columns:
+				unique_products = df_features["feature"].dropna().unique()
+			unique_products = [str(p).strip() for p in unique_products if str(p).strip()]
+			gene_records = []
+			for p in unique_products:
+				gene_records.append({
+					"description": p,
+					"display_name": p,
+					"name": p,
+					"parent_name": "whole_genome"
+				})
+			gene_records.append({
+				"description": "Whole genome",
+				"display_name": "Whole genome",
+				"name": "whole_genome",
+				"parent_name": "NULL"
+			})
+			df_gene = pd.DataFrame(gene_records)
 		df_m49_country = self._read_csv_required(self.m49_countries, ["m49_code"], "m49_countries", dtype={"m49_code": str})
 		df_m49_interm = self._read_csv_required(self.m49_interm_region, [], "m49_interm_region")
 		df_m49_region = self._read_csv_required(self.m49_regions, [], "m49_regions")
@@ -1072,7 +1096,7 @@ if __name__ == "__main__":
 	parser.add_argument('-o', '--output_dir', help='tmp directory where the database is stored', default="SqliteDB")
 	parser.add_argument('-rf', '--features', help='Features table', default="tmp/Tables/features.tsv")
 	parser.add_argument('-p', '--pad_aln', help='Padded alignment file', default="tmp/Tables/sequence_alignment.tsv")
-	parser.add_argument('-g', '--gene_info', help='Gene table', default="generic/rabv/Tables/gene_info.csv")
+	parser.add_argument('-g', '--gene_info', help='Gene table', default=None)
 	parser.add_argument('-mc', '--m49_countries', help='M49 countries', default="assets/m49_country.csv")
 	parser.add_argument('-mir', '--m49_interm_region', help='M49 intermediate regions', default="assets/m49_intermediate_region.csv")
 	parser.add_argument('-mr', '--m49_regions', help='M49 regions', default="assets/m49_region.csv")

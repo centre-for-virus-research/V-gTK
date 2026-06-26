@@ -1255,3 +1255,74 @@ def test_create_sqlite_db_accepts_headerless_reference_tsv(tmp_path: Path):
     conn.close()
 
     assert rows == [("NC_004102", "1", "a"), ("seq1", "1", "a")]
+
+
+def test_create_sqlite_db_with_none_gene_info(tmp_path):
+    meta = tmp_path / "meta.tsv"
+    features = tmp_path / "features.tsv"
+    aln = tmp_path / "aln.tsv"
+    m49_country = tmp_path / "m49_country.csv"
+    m49_inter = tmp_path / "m49_inter.csv"
+    m49_region = tmp_path / "m49_region.csv"
+    m49_sub = tmp_path / "m49_sub.csv"
+    proj = tmp_path / "software.tsv"
+    insertions = tmp_path / "insertions.tsv"
+    host_taxa = tmp_path / "host.tsv"
+    fasta = tmp_path / "seqs.fa"
+
+    write_tsv(meta, [["NC_004102", "master"], ["seq1", ""]], ["primary_accession", "accession_type"])
+    write_tsv(
+        features,
+        [
+            ["NC_004102", "NC_004102", "NC_004102", "1", "9", "1", "4", "1", "4", "G"],
+            ["NC_004102", "NC_004102", "NC_004102", "1", "9", "5", "9", "5", "9", "L"]
+        ],
+        ["accession", "master_ref_accession", "reference_accession", "aln_start", "aln_end", "cds_start", "cds_end", "cds_start_OG_seq", "cds_end_OG_seq", "product"]
+    )
+    write_tsv(
+        aln,
+        [["NC_004102", "NC_004102", "ATGC"], ["seq1", "NC_004102", "ATGC"]],
+        ["primary_accession", "alignment_name", "aligned_seq"],
+    )
+    write_csv(m49_country, [["001", "World"]], ["m49_code", "name"])
+    write_csv(m49_inter, [["X", "Inter"]], ["code", "name"])
+    write_csv(m49_region, [["Y", "Region"]], ["code", "name"])
+    write_csv(m49_sub, [["Z", "SubRegion"]], ["code", "name"])
+    write_tsv(proj, [["Python", "3.11"]], ["Software", "Version"])
+    write_tsv(insertions, [["NC_004102", "none"]], ["primary_accession", "insertions"])
+    write_tsv(host_taxa, [["NC_004102", "host1"]], ["primary_accession", "host"])
+    fasta.write_text(">NC_004102\nATGC\n>seq1\nATGC\n", encoding="utf-8")
+
+    db = CreateSqliteDB(
+        meta_data=str(meta),
+        features=str(features),
+        pad_aln=str(aln),
+        gene_info=None,
+        m49_countries=str(m49_country),
+        m49_interm_region=str(m49_inter),
+        m49_regions=str(m49_region),
+        m49_sub_regions=str(m49_sub),
+        proj_settings=str(proj),
+        fasta_sequence_file=str(fasta),
+        insertions=str(insertions),
+        host_taxa_file=str(host_taxa),
+        base_dir=str(tmp_path),
+        output_dir="SqliteDB",
+        db_name="test_none_gene_info",
+        db_status="new db",
+    )
+
+    db.create_db()
+
+    conn = sqlite3.connect(tmp_path / "SqliteDB" / "test_none_gene_info.db")
+    cur = conn.cursor()
+    cur.execute("SELECT description, display_name, name, parent_name FROM genes ORDER BY name")
+    rows = cur.fetchall()
+    conn.close()
+
+    assert set(rows) == {
+        ("G", "G", "G", "whole_genome"),
+        ("L", "L", "L", "whole_genome"),
+        ("Whole genome", "Whole genome", "whole_genome", "NULL")
+    }
+

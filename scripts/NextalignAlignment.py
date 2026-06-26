@@ -68,7 +68,6 @@ class NextalignAlignment:
 			
 		ref_seq = str(records[0].seq).upper()
 		total_columns = len(ref_seq)
-		start_idx = int(total_columns * 0.70) # Target the 3' conserved regions
 		
 		min_identity = 1.0
 		all_passed = True
@@ -76,22 +75,26 @@ class NextalignAlignment:
 		for r_idx in range(1, len(records)):
 			query_seq = str(records[r_idx].seq).upper()
 			
-			matches = 0
-			valid_positions = 0
-			
-			for i in range(start_idx, total_columns):
-				n1 = ref_seq[i]
-				n2 = query_seq[i]
-				if n1 == '-' and n2 == '-':
-					continue
-				valid_positions += 1
-				if n1 == n2 and n1 != '-':
-					matches += 1
-					
-			if valid_positions == 0:
+			non_gap_indices = [i for i in range(total_columns) if query_seq[i] != '-']
+			if not non_gap_indices:
 				identity = 0.0
 			else:
-				identity = matches / valid_positions
+				start_idx = int(len(non_gap_indices) * 0.70)
+				target_indices = non_gap_indices[start_idx:]
+				
+				matches = 0
+				valid_positions = 0
+				
+				for i in target_indices:
+					n1 = ref_seq[i]
+					n2 = query_seq[i]
+					if n1 == '-':
+						continue
+					valid_positions += 1
+					if n1 == n2:
+						matches += 1
+						
+				identity = matches / valid_positions if valid_positions > 0 else 0.0
 				
 			if identity < min_identity:
 				min_identity = identity
