@@ -1019,7 +1019,10 @@ def main(argv=None):
         tree_terminals = set()
         if tree_available:
             tree = Phylo.read(StringIO(newick), "newick")
-            tree_terminals = {t.name for t in tree.get_terminals() if t.name}
+            all_trees = fetch_trees(conn, source=tree_source)
+            for tr in all_trees:
+                t = Phylo.read(StringIO(tr["newick"]), "newick")
+                tree_terminals.update(tip.name for tip in t.get_terminals() if tip.name)
 
         meta_accessions = [x for x in fetch_table_column(conn, "meta_data", args.accession_column) if x]
         seq_headers = [x for x in fetch_table_column(conn, "sequences", "header") if x]
