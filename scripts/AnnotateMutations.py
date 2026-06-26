@@ -594,59 +594,107 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
                 seq_aln.loc[seq_aln['_reference_id'] == '', '_reference_id'] = first_acc
                 print(f"[AnnotateMutations][warn] Filled blank alignment_name with default first sequence accession {first_acc}")
 
-    by_reference = {
-        ref: df.copy()
-        for ref, df in seq_aln.groupby('_reference_id', dropna=False)
-        if str(ref or '').strip()
-    }
-    if not by_reference:
+    if seq_aln.empty:
         raise AnnotationMappingError('No usable reference identifiers were found in sequence_alignment.alignment_name.')
 
     diagnostics = Counter()
-    resolved_maps = {}
-    unresolved_references = {}
     mutations_found = []
 
-    for reference_id in by_reference:
-        try:
-            reference_candidates = []
-            for candidate in [reference_id] + master_candidates + catalog_reference_hints:
-                candidate = str(candidate or '').strip()
-                if candidate and candidate not in reference_candidates:
-                    reference_candidates.append(candidate)
-            resolved_accession, feature_map, attempted, source = resolve_reference_feature_map(
-                reference_candidates[0] if reference_candidates else reference_id,
-                reference_candidates[1:],
-                db_gff_maps,
-                alias_lookup,
-                allow_genbank_reference_gff,
-            )
-            reference_row, aligned_accession = find_reference_alignment_row(by_reference[reference_id], reference_id, [resolved_accession] + master_candidates)
-            if reference_row is None:
-                raise AnnotationMappingError(
-                    f'No aligned reference sequence row was found in sequence_alignment for group {reference_id}. '
-                    f'Candidates tried: {attempted}'
-                )
-            aligned_reference_map = build_alignment_coordinate_map(reference_row['alignment'])
-            resolved_maps[reference_id] = {
-                'resolved_accession': resolved_accession,
-                'feature_map': feature_map,
-                'attempted': attempted,
-                'source': source,
-                'aligned_reference_accession': aligned_accession,
-                'aligned_reference_map': aligned_reference_map,
-            }
-        except AnnotationMappingError as exc:
-            unresolved_references[reference_id] = str(exc)
+    # -----------------------------------------------------------------------
+    # Resolve the master reference's alignment and feature map.
+    #
+    # All catalog positions (aa_position) are defined relative to the master
+    # reference (e.g. NC_004102 for HCV).  Because every sequence in the DB
+    # is padded to the SAME alignment width as the master, the master's column
+    # positions apply universally.  We must NOT use per-genotype-reference OG
+    # coordinates to resolve catalog positions — those produce shifted column
+    # indices for sequences aligned to divergent genotype references (e.g.
+    # D10988 NS3 cds_start_OG=3345 vs NC_004102 cds_start=3420 shifts all
+    # downstream column positions by ~71 bp relative to the master numbering).
+    # -----------------------------------------------------------------------
+    coord_candidates = []
+    for cand in list(master_candidates) + catalog_reference_hints:
+        for token in extract_accession_tokens(cand):
+            if token and token not in coord_candidates:
+                coord_candidates.append(token)
 
-    if not resolved_maps:
-        detail = '; '.join(f'{ref}: {msg}' for ref, msg in unresolved_references.items())
-        raise AnnotationMappingError(
-            'No reference CDS maps could be resolved from sequence_alignment.alignment_name or mutation catalog references. '
-            + detail
+    master_coord_ref_acc = None
+    master_coord_map = None
+    master_feature_map = None
+
+    for cand in coord_candidates:
+        mask = (
+            seq_aln['sequence_id'].astype(str).str.strip() == cand
+        ) | (
+            seq_aln['primary_accession'].astype(str).str.strip() == cand
         )
+        if not mask.any():
+            continue
+        cand_coord_map = build_alignment_coordinate_map(seq_aln.loc[mask].iloc[0]['alignment'])
+        for token in extract_accession_tokens(cand):
+            if token in db_gff_maps and feature_map_has_gene_information(db_gff_maps[token]):
+                master_coord_ref_acc = cand
+                master_coord_map = cand_coord_map
+                master_feature_map = db_gff_maps[token]
+                break
+        if master_coord_map is not None:
+            break
 
-    grouped_catalog = {}
+    if master_coord_map is None or master_feature_map is None:
+        # Fallback: try any reference group row with a usable feature map
+        for ref_id in seq_aln['_reference_id'].dropna().unique():
+            mask = seq_aln['sequence_id'].astype(str).str.strip() == str(ref_id).strip()
+            if not mask.any():
+                continue
+            for token in extract_accession_tokens(str(ref_id)):
+                if token in db_gff_maps and feature_map_has_gene_information(db_gff_maps[token]):
+                    master_coord_ref_acc = str(ref_id)
+                    master_coord_map = build_alignment_coordinate_map(seq_aln.loc[mask].iloc[0]['alignment'])
+                    master_feature_map = db_gff_maps[token]
+                    break
+            if master_coord_map is not None:
+                break
+
+    if master_coord_map is None or master_feature_map is None:
+        if not allow_genbank_reference_gff:
+            raise AnnotationMappingError(
+                'Could not resolve a master reference alignment + feature map. '
+                f'Candidates tried: {coord_candidates}. Re-run with --allow_genbank_reference_gff to fetch from NCBI.'
+            )
+        # Try fetching from NCBI
+        for cand in coord_candidates:
+            mask = (
+                seq_aln['sequence_id'].astype(str).str.strip() == cand
+            ) | (
+                seq_aln['primary_accession'].astype(str).str.strip() == cand
+            )
+            if not mask.any():
+                continue
+            try:
+                fetched_map = fetch_reference_gff_map(cand, alias_lookup)
+                if fetched_map:
+                    master_coord_ref_acc = cand
+                    master_coord_map = build_alignment_coordinate_map(seq_aln.loc[mask].iloc[0]['alignment'])
+                    master_feature_map = fetched_map
+                    break
+            except Exception:
+                continue
+        if master_coord_map is None or master_feature_map is None:
+            raise AnnotationMappingError(
+                'Could not resolve a master reference alignment + feature map. '
+                f'Candidates tried: {coord_candidates}'
+            )
+
+    print(
+        f'[AnnotateMutations] Coordinate reference: {master_coord_ref_acc} '
+        f"(all catalog positions resolved using this sequence's alignment column space)"
+    )
+
+    # -----------------------------------------------------------------------
+    # Build a single catalog position lookup using universal alignment column
+    # indices derived from the master reference coordinate system.
+    # -----------------------------------------------------------------------
+    grouped_positions = {}   # (protein_name, aa_pos, alignment_indices_tuple) -> {alt_residue: [catalog_rows]}
     proteins_missing_from_reference = Counter()
     mappable_catalog_rows = 0
 
@@ -657,79 +705,83 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
             diagnostics['invalid_catalog_rows'] += 1
             continue
 
-        for reference_id, resolved in resolved_maps.items():
-            gene_entry = resolved['feature_map'].get(protein_name)
-            if gene_entry is None:
-                proteins_missing_from_reference[(reference_id, protein_name)] += 1
-                continue
+        gene_entry = master_feature_map.get(protein_name)
+        if gene_entry is None:
+            proteins_missing_from_reference[protein_name] += 1
+            continue
 
-            alignment_indices = resolve_aligned_codon_indices(
-                resolved['aligned_reference_map'],
-                gene_entry['cds_start'],
-                aa_pos,
-            )
-            if alignment_indices is None:
-                diagnostics['reference_coordinate_missing_in_alignment'] += 1
-                continue
+        alignment_indices = resolve_aligned_codon_indices(
+            master_coord_map,
+            gene_entry['cds_start'],
+            aa_pos,
+        )
+        if alignment_indices is None:
+            diagnostics['reference_coordinate_missing_in_alignment'] += 1
+            continue
 
-            reference_catalog = grouped_catalog.setdefault(reference_id, {})
-            position_catalog = reference_catalog.setdefault((protein_name, aa_pos, tuple(alignment_indices)), {})
-            position_catalog.setdefault(row['alt_residue'], []).append(row)
-            mappable_catalog_rows += 1
+        position_catalog = grouped_positions.setdefault(
+            (protein_name, aa_pos, tuple(alignment_indices)), {}
+        )
+        position_catalog.setdefault(row['alt_residue'], []).append(row)
+        mappable_catalog_rows += 1
 
     if mappable_catalog_rows == 0:
         missing_summary = ', '.join(
-            f'{ref}:{protein}' for (ref, protein), _ in proteins_missing_from_reference.most_common(10)
+            protein for protein, _ in proteins_missing_from_reference.most_common(10)
         )
         raise AnnotationMappingError(
-            'No catalog coordinates could be mapped onto resolved reference CDS annotations. '
-            f'Examples of missing protein mappings: {missing_summary}'
+            'No catalog coordinates could be mapped onto master reference CDS annotations. '
+            f'Proteins not found in master feature map: {missing_summary}'
         )
 
-    for reference_id, group in by_reference.items():
-        if reference_id not in resolved_maps:
-            diagnostics['reference_groups_skipped'] += len(group)
-            continue
-        grouped_positions = grouped_catalog.get(reference_id, {})
-        if not grouped_positions:
-            diagnostics['reference_groups_without_positions'] += len(group)
-            continue
-
-        for _, seq_row in group.iterrows():
-            alignment = seq_row['alignment']
-            primary_accession = seq_row['sequence_id']
-            for (protein_name, aa_pos, alignment_indices), alt_lookup in grouped_positions.items():
-                codon = extract_aligned_codon(alignment, alignment_indices)
-                if codon is None:
-                    diagnostics['codon_out_of_bounds'] += 1
-                    continue
-                aa = translate_codon(codon)
-                matched_rows = alt_lookup.get(aa, [])
-                if not matched_rows:
-                    continue
-                for row in matched_rows:
-                    mutations_found.append({
-                        'primary_accession': primary_accession,
-                        'mutation_id': row['mutation_id'],
-                        'protein_name': protein_name,
-                        'segment': row['_segment_norm'],
-                        'aa_position': aa_pos,
-                        'alt_residue': row['alt_residue'],
-                        'combination_id': row.get('combination_id', ''),
-                    })
-                    diagnostics['mutation_hits'] += 1
-
-    if unresolved_references:
-        for reference_id, message in unresolved_references.items():
-            print(f'[AnnotateMutations][warn] Reference {reference_id} could not be mapped: {message}')
+    # -----------------------------------------------------------------------
+    # Annotate every sequence using the master-derived universal column
+    # positions.  Because all padded alignments share the same column space,
+    # these indices are valid for every row regardless of alignment_name.
+    # -----------------------------------------------------------------------
+    for _, seq_row in seq_aln.iterrows():
+        alignment = seq_row['alignment']
+        primary_accession = seq_row['sequence_id']
+        for (protein_name, aa_pos, alignment_indices), alt_lookup in grouped_positions.items():
+            codon = extract_aligned_codon(alignment, alignment_indices)
+            if codon is None:
+                diagnostics['codon_out_of_bounds'] += 1
+                continue
+            aa = translate_codon(codon)
+            matched_rows = alt_lookup.get(aa, [])
+            if not matched_rows:
+                continue
+            for row in matched_rows:
+                mutations_found.append({
+                    'primary_accession': primary_accession,
+                    'mutation_id': row['mutation_id'],
+                    'protein_name': protein_name,
+                    'segment': row['_segment_norm'],
+                    'aa_position': aa_pos,
+                    'alt_residue': row['alt_residue'],
+                    'combination_id': row.get('combination_id', ''),
+                })
+                diagnostics['mutation_hits'] += 1
 
     if proteins_missing_from_reference:
         preview = ', '.join(
-            f'{ref}:{protein}' for (ref, protein), _ in proteins_missing_from_reference.most_common(10)
+            protein for protein, _ in proteins_missing_from_reference.most_common(10)
         )
-        print(f'[AnnotateMutations][warn] Missing protein annotations for some reference groups: {preview}')
+        print(f'[AnnotateMutations][warn] Missing protein annotations in master feature map: {preview}')
+
+    resolved_maps = {
+        master_coord_ref_acc: {
+            'resolved_accession': master_coord_ref_acc,
+            'feature_map': master_feature_map,
+            'attempted': coord_candidates,
+            'source': 'master_coord_ref',
+            'aligned_reference_accession': master_coord_ref_acc,
+            'aligned_reference_map': master_coord_map,
+        }
+    }
 
     return mutations_found, diagnostics, resolved_maps
+
 def write_mutation_tables(conn, catalog, mutations_found, catalog_column_profile):
     df_mut = pd.DataFrame(
         mutations_found,

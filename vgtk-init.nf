@@ -1017,6 +1017,26 @@ process CREATE_SQLITE_DB {
     '''
 }
 
+process VERIFY_MUTATIONS {
+    publishDir "${params.publish_dir}/tests", mode: 'copy'
+
+    input:
+        path sqlite_db
+        path mutation_catalog
+
+    output:
+        path "mutation_verification.txt", emit: verification_txt
+
+    shell:
+    '''
+    set -o pipefail
+
+    python !{scripts_dir}/VerifyMutations.py \
+        --db !{sqlite_db} \
+        --mutation_catalog !{mutation_catalog} 2>&1 | tee mutation_verification.txt
+    '''
+}
+
 process TEST_DB_VALIDATION {
     publishDir "${params.publish_dir}/tests" 
     when:
@@ -1448,6 +1468,10 @@ workflow {
     }
 
     TEST_DB_VALIDATION(CREATE_SQLITE_DB.out.sqlite_db)
+
+    if (params.mutation_catalog != null && params.mutation_catalog != "" && params.mutation_catalog != "null") {
+        VERIFY_MUTATIONS(CREATE_SQLITE_DB.out.sqlite_db, file(params.mutation_catalog))
+    }
 }
 
 workflow.onComplete {

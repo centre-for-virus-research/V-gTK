@@ -169,10 +169,133 @@ def test_insert_gaps_pads_when_sequence_shorter_than_reference(tmp_path: Path):
     reference_aligned = "ACGT--ACGT"
     subalignment = [SeqRecord(Seq("ACGTAC"), id="Q1")]
 
-    updated = processor.insert_gaps(reference_aligned, subalignment)
+    updated = processor.insert_gaps(reference_aligned, subalignment, "Q1")
     assert len(updated) == 1
     assert str(updated[0].seq) == "ACGT--AC--"
     assert len(str(updated[0].seq)) == len(reference_aligned)
+
+
+def test_insert_gaps_with_insertion_coordinate_shift(tmp_path: Path):
+    processor = _make_processor(tmp_path)
+
+    # reference_aligned has length 10, ungapped length 8: 'ACGTACGT'
+    reference_aligned = "ACGT--ACGT"
+    
+    # Subalignment has:
+    # 1. The genotype-specific reference containing insertions relative to master:
+    #    'AA-CGTACGT' -> ungapped sequence 'AACGTACGT' (has extra 'AA' at start)
+    # 2. A query sequence aligned to it, starting after the extra 'AA':
+    #    '---CGTAC--' -> representing the query aligned
+    subalignment = [
+        SeqRecord(Seq("AA-CGTACGT"), id="REF1"),
+        SeqRecord(Seq("---CGTAC--"), id="Q1"),
+    ]
+
+    updated = processor.insert_gaps(reference_aligned, subalignment, "REF1")
+    assert len(updated) == 2
+    
+    # We expect Q1 to align correctly relative to the master-aligned reference coordinates.
+    # Master-aligned reference starts with 'A' (of 'ACGT...').
+    # But Q1's first matching nucleotide ('C' at index 3 of '---CGT...') aligns to the 'C' of 'REF1'
+    # which is the third nucleotide of 'REF1' (non-gap coordinate 2, since first is 'A' (0), second 'A' (1), third 'C' (2)).
+    # So 'C' should map to the third nucleotide of master_dq_raw ('C' of 'ACGT...'),
+    # which is at index 1 of reference_aligned ('A'(0), 'C'(1)).
+    # So gapped Q1 should start at index 1 of the projected sequence!
+    # Expected alignment:
+    # reference_aligned: A C G T - - A C G T
+    # projected Q1:      - C G T - - A C - -
+    assert str(updated[1].seq) == "-CGT--AC--"
+    assert len(str(updated[1].seq)) == len(reference_aligned)
+
+
+def test_insert_gaps_with_subalignment_fallback(tmp_path: Path):
+    processor = _make_processor(tmp_path)
+
+    reference_aligned = "ACGT--ACGT"
+    # Q1 is in subalignment but ref_id is passed as 'NON_EXISTENT'
+    subalignment = [SeqRecord(Seq("ACGTAC"), id="Q1")]
+
+    # Should fall back to subalignment[0] ('Q1') as the nextalign reference and run cleanly
+    updated = processor.insert_gaps(reference_aligned, subalignment, "NON_EXISTENT")
+    assert len(updated) == 1
+    assert str(updated[0].seq) == "ACGT--AC--"
+
+
+def test_insert_gaps_exact_match(tmp_path: Path):
+    processor = _make_processor(tmp_path)
+    reference_aligned = "ACGTACGT"
+    subalignment = [
+        SeqRecord(Seq("ACGTACGT"), id="REF1"),
+        SeqRecord(Seq("ACGTACGT"), id="Q1")
+    ]
+    updated = processor.insert_gaps(reference_aligned, subalignment, "REF1")
+    assert len(updated) == 2
+    assert str(updated[0].seq) == "ACGTACGT"
+    assert str(updated[1].seq) == "ACGTACGT"
+
+
+def test_insert_gaps_with_deletion_in_subalignment_ref(tmp_path: Path):
+    processor = _make_processor(tmp_path)
+    reference_aligned = "ACGT--ACGT"
+    subalignment = [
+        SeqRecord(Seq("AC--ACGT"), id="REF1"),
+        SeqRecord(Seq("AC--ACGT"), id="Q1")
+    ]
+    updated = processor.insert_gaps(reference_aligned, subalignment, "REF1")
+    assert len(updated) == 2
+    assert str(updated[1].seq) == "AC----ACGT"
+
+
+def test_insert_gaps_multiple_queries(tmp_path: Path):
+    processor = _make_processor(tmp_path)
+    reference_aligned = "ACGT--ACGT"
+    subalignment = [
+        SeqRecord(Seq("AA-CGTACGT"), id="REF1"),
+        SeqRecord(Seq("---CGTAC--"), id="Q1"),
+        SeqRecord(Seq("AA-CGT----"), id="Q2"),
+        SeqRecord(Seq("------ACGT"), id="Q3"),
+    ]
+    updated = processor.insert_gaps(reference_aligned, subalignment, "REF1")
+    assert len(updated) == 4
+    assert str(updated[1].seq) == "-CGT--AC--"
+    assert str(updated[2].seq) == "ACGT------"
+    assert str(updated[3].seq) == "------ACGT"
+
+
+def test_insert_gaps_query_ends_early(tmp_path: Path):
+    processor = _make_processor(tmp_path)
+    reference_aligned = "ACGT--ACGT"
+    subalignment = [
+        SeqRecord(Seq("AA-CGTACGT"), id="REF1"),
+        SeqRecord(Seq("AA-CGT----"), id="Q1"),
+    ]
+    updated = processor.insert_gaps(reference_aligned, subalignment, "REF1")
+    assert len(updated) == 2
+    assert str(updated[1].seq) == "ACGT------"
+
+
+def test_insert_gaps_query_starts_late(tmp_path: Path):
+    processor = _make_processor(tmp_path)
+    reference_aligned = "ACGT--ACGT"
+    subalignment = [
+        SeqRecord(Seq("AA-CGTACGT"), id="REF1"),
+        SeqRecord(Seq("------ACGT"), id="Q1"),
+    ]
+    updated = processor.insert_gaps(reference_aligned, subalignment, "REF1")
+    assert len(updated) == 2
+    assert str(updated[1].seq) == "------ACGT"
+
+
+def test_insert_gaps_with_multiple_complex_shifts(tmp_path: Path):
+    processor = _make_processor(tmp_path)
+    reference_aligned = "ACGT--ACGTACGT"
+    subalignment = [
+        SeqRecord(Seq("AA-CGT--AC--ACGT"), id="REF1"),
+        SeqRecord(Seq("---CGT--AC--ACGT"), id="Q1"),
+    ]
+    updated = processor.insert_gaps(reference_aligned, subalignment, "REF1")
+    assert len(updated) == 2
+    assert str(updated[1].seq) == "-CGT--AC--ACGT"
 
 
 def test_process_all_masters_strict_mode_fails_when_db_segment_backbone_missing(tmp_path: Path):

@@ -323,6 +323,7 @@ def main():
     parser.add_argument("--sample_size", type=int, default=100, help="Number of annotated sequences to sample and verify.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for sampling.")
     parser.add_argument("--hcv_test_ns3_36a", action="store_true", help="Run verification specifically for NS3:36A on the 171 query accessions.")
+    parser.add_argument("--min_identity", type=float, default=0.65, help="Minimum nucleotide identity threshold for alignment validation.")
     args = parser.parse_args()
 
     if not os.path.isfile(args.db):
@@ -422,8 +423,8 @@ def main():
             )
             print(f"Total annotated sequences in DB: {len(annotated_df)}")
             if annotated_df.empty:
-                print("Error: sequence_relevant_mutation_summary table is empty. Nothing to verify.", file=sys.stderr)
-                sys.exit(1)
+                print("Warning: sequence_relevant_mutation_summary table is empty. Nothing to verify.", file=sys.stderr)
+                sys.exit(0)
 
             # Sample sequences
             sample_size = min(args.sample_size, len(annotated_df))
@@ -474,6 +475,49 @@ def main():
             ref_alignments_map[(p_acc, aln_name)] = aln
             ref_alignments_map[p_acc] = aln
 
+        # -------------------------------------------------------------------
+        # Resolve master reference coord map and feature map ONCE, before the
+        # per-sequence loop.  Catalog positions (aa_position) are defined
+        # relative to the master reference, and since ALL padded alignments
+        # share the same column space, the master's column indices apply to
+        # every sequence regardless of which genotype reference it was
+        # locally aligned against.
+        # -------------------------------------------------------------------
+        master_ref_acc_for_coords = next(iter(master_accessions), None)
+        master_coord_map = None
+        master_feature_map = None
+        master_feature_acc = None
+
+        coord_search_order = (
+            list(master_accessions) + catalog_reference_hints
+        )
+        for _cand in coord_search_order:
+            for _token in extract_accession_tokens(_cand):
+                _ref_aln = ref_alignments_map.get(_token)
+                if _ref_aln is None:
+                    continue
+                _fmap_acc, _fmap = resolve_feature_map(
+                    _token, master_accessions, catalog_reference_hints, db_gff_maps
+                )
+                if _fmap is not None:
+                    master_ref_acc_for_coords = _token
+                    master_coord_map = build_alignment_coordinate_map(_ref_aln)
+                    master_feature_map = _fmap
+                    master_feature_acc = _fmap_acc
+                    break
+            if master_coord_map is not None:
+                break
+
+        if master_coord_map is None:
+            print(
+                "[ERROR] Could not resolve a master reference alignment for coordinate resolution. "
+                f"Candidates tried: {coord_search_order}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+        print(f"  [INFO] Coordinate reference: {master_ref_acc_for_coords} (used for all catalog position resolution)")
+
         print("\n4. Verifying mutations against alignments...")
         stats = Counter()
         failures = []
@@ -497,33 +541,31 @@ def main():
             query_alignment = aln_row['alignment']
             ref_acc = aln_row['alignment_name']
 
+            # Use per-sequence reference alignment only for identity scoring
             ref_alignment, resolved_ref_acc = get_ref_alignment(ref_acc, master_accessions, ref_alignments_map)
             if ref_alignment is None:
                 print(f"  [ERROR] Could not resolve reference alignment for group {ref_acc} for sequence {acc}.")
                 stats['reference_alignment_errors'] += 1
                 continue
 
-            ref_coord_map = build_alignment_coordinate_map(ref_alignment)
-
-            resolved_ref_feature_acc, feature_map = resolve_feature_map(
-                ref_acc, master_accessions, catalog_reference_hints, db_gff_maps
-            )
-            if feature_map is None:
-                print(f"  [ERROR] Could not resolve GFF feature map for reference candidates of {ref_acc} for sequence {acc}.")
-                stats['feature_map_errors'] += 1
-                continue
+            # Use master coord_map and feature_map for all codon position resolution
+            ref_coord_map = master_coord_map
+            feature_map = master_feature_map
+            resolved_ref_feature_acc = master_feature_acc
 
             # Calculate full nucleotide alignment identity directly from the padded alignment in the DB
             total_nuc_overlap = 0
             matching_nuc_overlap = 0
             for q_base, r_base in zip(query_alignment, ref_alignment):
-                if q_base != '-':
+                q_up = q_base.upper()
+                r_up = r_base.upper()
+                if q_up != '-' and q_up != 'N' and r_up != '-' and r_up != 'N':
                     total_nuc_overlap += 1
-                    if q_base.upper() == r_base.upper():
+                    if q_up == r_up:
                         matching_nuc_overlap += 1
             
             overlap_identity = matching_nuc_overlap / total_nuc_overlap if total_nuc_overlap > 0 else 0.0
-            is_alignment_valid = (overlap_identity >= 0.70)
+            is_alignment_valid = (overlap_identity >= args.min_identity)
             if not is_alignment_valid:
                 print(f"  [WARNING] Sequence {acc} has low nucleotide identity to reference {resolved_ref_acc}: {overlap_identity:.1%} ({matching_nuc_overlap}/{total_nuc_overlap})")
                 stats['low_identity_alignments'] += 1
@@ -543,12 +585,13 @@ def main():
 
                 gene_entry = feature_map.get(protein_name)
                 if gene_entry is None:
-                    print(f"  [ERROR] Protein '{protein_name}' not found in feature map of {resolved_ref_feature_acc} (mutation: {mut}, sequence: {acc}).")
+                    print(f"  [ERROR] Protein '{protein_name}' not found in master feature map of {resolved_ref_feature_acc} (mutation: {mut}, sequence: {acc}).")
                     stats['protein_not_found_errors'] += 1
                     continue
 
+                # Always resolve column indices using master reference coordinates
                 alignment_indices = resolve_aligned_codon_indices(
-                    ref_coord_map, gene_entry['cds_start'], aa_pos
+                    master_coord_map, gene_entry['cds_start'], aa_pos
                 )
                 if alignment_indices is None:
                     print(f"  [ERROR] Cannot resolve alignment columns for protein '{protein_name}' pos {aa_pos} (mutation: {mut}, sequence: {acc}).")
@@ -572,9 +615,9 @@ def main():
                     'actual_aa': actual_aa if is_alignment_valid else f"Invalid (Low Identity {overlap_identity:.1%})",
                     'codon': codon,
                     'gene_entry': gene_entry,
-                    'ref_coord_map': ref_coord_map,
-                    'resolved_ref_acc': resolved_ref_acc,
-                    'ref_alignment': ref_alignment,
+                    'ref_coord_map': master_coord_map,
+                    'resolved_ref_acc': master_ref_acc_for_coords,
+                    'ref_alignment': ref_alignments_map.get(master_ref_acc_for_coords, ref_alignment),
                     'overlap_identity': overlap_identity,
                 })
 

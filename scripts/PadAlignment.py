@@ -278,24 +278,112 @@ class PadAlignment:
 				if self.strict_segment_backbone:
 					raise FileNotFoundError(f"Reference alignment missing for master {master} segment {segment_val}: {ref_aln_file}")
 
-	def insert_gaps(self, reference_aligned, subalignment_seqs):
-		ref_with_gaps_list = list(reference_aligned)
+	def insert_gaps(self, reference_aligned, subalignment_seqs, ref_id):
+		ref_aligned_str = str(reference_aligned)
+		nextalign_ref_rec = None
+		for r in subalignment_seqs:
+			if r.id.split('.')[0] == ref_id:
+				nextalign_ref_rec = r
+				break
+		if not nextalign_ref_rec:
+			# Fallback to sequential index matching if reference sequence is not in subalignment
+			ref_with_gaps_list = list(reference_aligned)
+			updated_sequences = []
+			for seq_record in subalignment_seqs:
+				sequence = list(str(seq_record.seq))
+				gapped_sequence = []
+				seq_idx = 0
+				for char in ref_with_gaps_list:
+					if char == '-':
+						gapped_sequence.append('-')
+					else:
+						if seq_idx < len(sequence):
+							gapped_sequence.append(sequence[seq_idx])
+							seq_idx += 1
+						else:
+							gapped_sequence.append('-')
+				gapped_seq_str = ''.join(gapped_sequence)
+				seq_record.seq = Seq(gapped_seq_str)
+				updated_sequences.append(seq_record)
+			return updated_sequences
+
+		nextalign_ref_seq = str(nextalign_ref_rec.seq)
+		master_dq_raw = ref_aligned_str.replace('-', '')
+		query_dq_raw = nextalign_ref_seq.replace('-', '')
+
+		# Map master raw coordinates (subsequence) to nextalign raw coordinates
+		n, m = len(master_dq_raw), len(query_dq_raw)
+		width = max(100, abs(n - m) + 50)
+		dp = [[-999999] * (2 * width + 1) for _ in range(n + 1)]
+		dp[0][width] = 0
+		for j in range(1, min(width + 1, m + 1)):
+			dp[0][j + width] = -j
+		for i in range(1, n + 1):
+			for offset in range(2 * width + 1):
+				j = i + offset - width
+				if j < 0 or j > m:
+					continue
+				val1 = -999999
+				if offset + 1 <= 2 * width:
+					val1 = dp[i-1][offset+1] - 1
+				val2 = -999999
+				if offset - 1 >= 0:
+					val2 = dp[i][offset-1] - 1
+				val3 = -999999
+				if j > 0:
+					match_score = 1 if master_dq_raw[i-1] == query_dq_raw[j-1] else -1
+					val3 = dp[i-1][offset] + match_score
+				dp[i][offset] = max(val1, val2, val3)
+		mapping = {x: None for x in range(n)}
+		i = n
+		offset = m - n + width
+		while i > 0 and 0 <= offset <= 2 * width:
+			j = i + offset - width
+			val = dp[i][offset]
+			if j > 0:
+				match_score = 1 if master_dq_raw[i-1] == query_dq_raw[j-1] else -1
+				if val == dp[i-1][offset] + match_score:
+					if master_dq_raw[i-1] == query_dq_raw[j-1]:
+						mapping[i-1] = j-1
+					i -= 1
+					continue
+			if offset + 1 <= 2 * width and val == dp[i-1][offset+1] - 1:
+				i -= 1
+				offset += 1
+				continue
+			if offset - 1 >= 0 and val == dp[i][offset-1] - 1:
+				offset -= 1
+				continue
+			break
+
+		# Map nextalign raw coordinates to nextalign column indices
+		nextalign_raw_to_col = {}
+		raw_idx = 0
+		for col_idx, char in enumerate(nextalign_ref_seq):
+			if char != '-':
+				nextalign_raw_to_col[raw_idx] = col_idx
+				raw_idx += 1
+
 		updated_sequences = []
 		for seq_record in subalignment_seqs:
-			sequence = list(str(seq_record.seq))
+			query_seq = str(seq_record.seq)
 			gapped_sequence = []
-			seq_idx = 0
-			for char in ref_with_gaps_list:
+			master_raw_idx = 0
+			for char in ref_aligned_str:
 				if char == '-':
 					gapped_sequence.append('-')
 				else:
-					if seq_idx < len(sequence):
-						gapped_sequence.append(sequence[seq_idx])
-						seq_idx += 1
+					query_raw_idx = mapping.get(master_raw_idx)
+					if query_raw_idx is not None:
+						col_nextalign = nextalign_raw_to_col.get(query_raw_idx)
+						if col_nextalign is not None and col_nextalign < len(query_seq):
+							gapped_sequence.append(query_seq[col_nextalign])
+						else:
+							gapped_sequence.append('-')
 					else:
 						gapped_sequence.append('-')
-			gapped_seq_str = ''.join(gapped_sequence)
-			seq_record.seq = Seq(gapped_seq_str)
+					master_raw_idx += 1
+			seq_record.seq = Seq(''.join(gapped_sequence))
 			updated_sequences.append(seq_record)
 		return updated_sequences
 
@@ -352,7 +440,7 @@ class PadAlignment:
 					skipped = before - len(subalignment_seqs)
 					if skipped:
 						print(f"[skip_ids] Skipped {skipped} sequence(s) from {ref_id} subalignment")
-				updated_seqs = self.insert_gaps(ref_aligned, subalignment_seqs)
+				updated_seqs = self.insert_gaps(ref_aligned, subalignment_seqs, ref_id)
 				
 				# Add the reference sequence to the list of sequences
 				updated_seqs.insert(0, ref_record)

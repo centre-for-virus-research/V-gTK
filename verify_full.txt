@@ -1,0 +1,174 @@
+1. Loading mutation catalog...
+Reference accessions in catalog: ['REF_MASTER_NC_004102']
+Master reference accessions in DB: ['NC_004102']
+
+2. Checking reference sequence flagging...
+  [OK] Catalog reference 'REF_MASTER_NC_004102' maps to DB master accession 'NC_004102'.
+
+3. Loading annotated sequences from database...
+Total annotated sequences in DB: 265
+Sampled 265 sequences (seed=42) for verification.
+Preloading reference alignments...
+
+4. Verifying mutations against alignments...
+  [WARNING] Sequence AB661388 has low nucleotide identity to reference NC_004102: 69.6% (6112/8776)
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+  [MISMATCH] Sequence AB661388 fails alignment validation: low nucleotide identity (69.6%) to reference NC_004102.
+
+====================================================================================================
+5. VISUAL VERIFICATION: ALIGNMENT SNIPPETS FOR RANDOM MUTATION SIGNATURES
+====================================================================================================
+
+Mutation Signature: NS5A:93S
+Reference: NC_004102 (NS5A CDS: 6258-7601)
+Window: AA positions 84 to 103 (Target: 93)
+---------------------------------------------------------------------------------------------------------------------------------------
+Sequence ID          | Type      | Win Identity    | Full Nuc Identity  | Amino Acid Window (20 AA)                                   
+---------------------------------------------------------------------------------------------------------------------------------------
+NC_004102            | Reference | 100.0% (Ref)    | 100.0% (Ref)       |  W  S  G  T  F  P  I  N  A [Y] T  T  G  P  C  T  P  L  P  A 
+MH492361             | Mutated   | 70.0% (14/20)   | 72.3%              |  W  H  G  T  F  P  I  N  A [S] T  T  G  P  S  V  P  I  P  E 
+MH590701             | Mutated   | 65.0% (13/20)   | 73.1%              |  W  R  N  T  F  P  I  N  S [S] T  T  G  P  S  V  P  V  P  A 
+EF424627             | Mutated   | 70.0% (14/20)   | 72.7%              |  W  H  G  T  F  P  I  N  A [S] T  T  G  P  S  V  P  I  P  E 
+MH590699             | Mutated   | 65.0% (13/20)   | 72.6%              |  W  R  N  T  F  P  I  N  S [S] T  T  G  P  S  V  P  V  P  A 
+KM252792             | Mutated   | 70.0% (14/20)   | 72.5%              |  W  H  G  T  F  P  I  N  A [S] T  T  G  P  S  V  P  I  P  E 
+---------------------------------------------------------------------------------------------------------------------------------------
+Alignment verification: PASS (target codon correct for all displayed sequences)
+---------------------------------------------------------------------------------------------------------------------------------------
+
+Mutation Signature: NS5A:56R
+Reference: NC_004102 (NS5A CDS: 6258-7601)
+Window: AA positions 47 to 66 (Target: 56)
+---------------------------------------------------------------------------------------------------------------------------------------
+Sequence ID          | Type      | Win Identity    | Full Nuc Identity  | Amino Acid Window (20 AA)                                   
+---------------------------------------------------------------------------------------------------------------------------------------
+NC_004102            | Reference | 100.0% (Ref)    | 100.0% (Ref)       |  W  R  G  D  G  I  M  H  T [R] C  H  C  G  A  E  I  T  G  H 
+D63821               | Mutated   | 65.0% (13/20)   | 71.7%              |  W  R  G  D  G  V  V  S  T [R] C  P  C  G  A  L  L  S  G  H 
+HM777358             | Mutated   | 65.0% (13/20)   | 71.1%              |  W  S  G  T  G  I  M  T  T [R] C  P  C  G  A  N  I  S  G  N 
+MW041298             | Mutated   | 65.0% (13/20)   | 71.0%              |  W  A  G  T  G  I  M  T  T [R] C  P  C  G  A  T  I  S  G  N 
+KJ470622             | Mutated   | 70.0% (14/20)   | 72.6%              |  W  R  G  D  X  G  V  H  T [R] C  P  C  G  A  D  I  A  G  H 
+KJ439774             | Mutated   | 90.0% (18/20)   | 84.1%              |  W  R  G  D  G  I  M  N  T [R] C  P  C  G  A  E  I  T  G  H 
+---------------------------------------------------------------------------------------------------------------------------------------
+Alignment verification: PASS (target codon correct for all displayed sequences)
+---------------------------------------------------------------------------------------------------------------------------------------
+
+Mutation Signature: NS5A:56R
+Reference: D28917 (NS5A CDS: 6152-7455)
+Window: AA positions 47 to 66 (Target: 56)
+---------------------------------------------------------------------------------------------------------------------------------------
+Sequence ID          | Type      | Win Identity    | Full Nuc Identity  | Amino Acid Window (20 AA)                                   
+---------------------------------------------------------------------------------------------------------------------------------------
+D28917               | Reference | 100.0% (Ref)    | 100.0% (Ref)       |  W  R  G  D  G  V  M  S  T [R] C  P  C  G  A  S  I  A  G  H 
+D28917               | Mutated   | 100.0% (20/20)  | 100.0%             |  W  R  G  D  G  V  M  S  T [R] C  P  C  G  A  S  I  A  G  H 
+PZ133624             | Mutated   | 95.0% (19/20)   | 91.9%              |  W  R  G  D  G  V  M  S  T [R] C  P  C  G  A  S  I  T  G  H 
+PZ133625             | Mutated   | 100.0% (20/20)  | 92.4%              |  W  R  G  D  G  V  M  S  T [R] C  P  C  G  A  S  I  A  G  H 
+PZ133635             | Mutated   | 100.0% (20/20)  | 92.4%              |  W  R  G  D  G  V  M  S  T [R] C  P  C  G  A  S  I  A  G  H 
+---------------------------------------------------------------------------------------------------------------------------------------
+Alignment verification: PASS (target codon correct for all displayed sequences)
+---------------------------------------------------------------------------------------------------------------------------------------
+
+Mutation Signature: NS5A:62A
+Reference: D17763 (NS5A CDS: 6173-7490)
+Window: AA positions 53 to 72 (Target: 62)
+---------------------------------------------------------------------------------------------------------------------------------------
+Sequence ID          | Type      | Win Identity    | Full Nuc Identity  | Amino Acid Window (20 AA)                                   
+---------------------------------------------------------------------------------------------------------------------------------------
+D17763               | Reference | 100.0% (Ref)    | 100.0% (Ref)       |  M  S  T  R  C  P  C  G  A [A] I  T  G  H  V  K  N  G  S  M 
+D17763               | Mutated   | 100.0% (20/20)  | 100.0%             |  M  S  T  R  C  P  C  G  A [A] I  T  G  H  V  K  N  G  S  M 
+PZ133626             | WT/Other  | 95.0% (19/20)   | 92.3%              |  M  S  T  R  C  P  C  G  A [L] I  T  G  H  V  K  N  G  S  M 
+PZ133634             | WT/Other  | 90.0% (18/20)   | 92.8%              |  M  S  T  R  C  P  C  G  A [S] I  A  G  H  V  K  N  G  S  M 
+PZ133629             | WT/Other  | 95.0% (19/20)   | 92.5%              |  M  S  T  R  C  P  C  G  A [T] I  T  G  H  V  K  N  G  S  M 
+PZ133639             | WT/Other  | 90.0% (18/20)   | 91.3%              |  M  S  T  R  C  P  C  G  A [T] I  A  G  H  V  K  N  G  S  M 
+---------------------------------------------------------------------------------------------------------------------------------------
+Alignment verification: PASS (target codon correct for all displayed sequences)
+---------------------------------------------------------------------------------------------------------------------------------------
+
+Mutation Signature: NS5B:316N
+Reference: NC_004102 (NS5B CDS: 7602-9374)
+Window: AA positions 307 to 326 (Target: 316)
+---------------------------------------------------------------------------------------------------------------------------------------
+Sequence ID          | Type      | Win Identity    | Full Nuc Identity  | Amino Acid Window (20 AA)                                   
+---------------------------------------------------------------------------------------------------------------------------------------
+NC_004102            | Reference | 100.0% (Ref)    | 100.0% (Ref)       |  G  L  Q  D  C  T  M  L  V [C] G  D  D  L  V  V  I  C  E  S 
+EU392174             | Mutated   | 85.0% (17/20)   | 74.3%              |  G  L  K  D  C  T  M  L  V [N] G  D  D  L  V  V  I  T  E  S 
+EF589161             | Mutated   | 80.0% (16/20)   | 73.8%              |  G  L  K  N  C  T  M  L  V [N] G  D  D  L  V  V  I  A  E  S 
+M58335               | Mutated   | 90.0% (18/20)   | 79.3%              |  K  L  Q  D  C  T  M  L  V [N] G  D  D  L  V  V  I  C  E  S 
+D90208               | Mutated   | 90.0% (18/20)   | 79.4%              |  K  L  Q  D  C  T  M  L  V [N] G  D  D  L  V  V  I  C  E  S 
+KJ439777             | Mutated   | 90.0% (18/20)   | 83.5%              |  G  L  R  D  C  T  M  L  V [N] G  D  D  L  V  V  I  C  E  S 
+---------------------------------------------------------------------------------------------------------------------------------------
+Alignment verification: PASS (target codon correct for all displayed sequences)
+---------------------------------------------------------------------------------------------------------------------------------------
+
+Mutation Signature: NS3:168D
+Reference: EF407457 (NS3 CDS: 3222-5114)
+Window: AA positions 159 to 178 (Target: 168)
+---------------------------------------------------------------------------------------------------------------------------------------
+Sequence ID          | Type      | Win Identity    | Full Nuc Identity  | Amino Acid Window (20 AA)                                   
+---------------------------------------------------------------------------------------------------------------------------------------
+EF407457             | Reference | 100.0% (Ref)    | 100.0% (Ref)       |  C  T  R  G  V  A  K  A  V [D] F  I  P  V  E  N  L  E  T  T 
+EF407457             | Mutated   | 100.0% (20/20)  | 100.0%             |  C  T  R  G  V  A  K  A  V [D] F  I  P  V  E  N  L  E  T  T 
+---------------------------------------------------------------------------------------------------------------------------------------
+Alignment verification: PASS (target codon correct for all displayed sequences)
+---------------------------------------------------------------------------------------------------------------------------------------
+
+Mutation Signature: NS5A:37V
+Reference: NC_004102 (NS5A CDS: 6258-7601)
+Window: AA positions 28 to 47 (Target: 37)
+---------------------------------------------------------------------------------------------------------------------------------------
+Sequence ID          | Type      | Win Identity    | Full Nuc Identity  | Amino Acid Window (20 AA)                                   
+---------------------------------------------------------------------------------------------------------------------------------------
+NC_004102            | Reference | 100.0% (Ref)    | 100.0% (Ref)       |  M  P  Q  L  P  G  I  P  F [V] S  C  Q  R  G  Y  R  G  V  W 
+KC248199             | Mutated   | 80.0% (16/20)   | 79.4%              |  L  P  R  L  P  G  L  P  F [V] S  C  Q  R  G  Y  K  G  V  W 
+MW041298             | Mutated   | 75.0% (15/20)   | 71.0%              |  L  P  K  M  P  G  L  P  F [V] S  C  Q  K  G  Y  R  G  V  W 
+JF735115             | Mutated   | 80.0% (16/20)   | 72.4%              |  F  P  K  M  P  G  I  P  F [V] S  C  Q  K  G  Y  R  G  V  W 
+AY051292             | Mutated   | 95.0% (19/20)   | 80.3%              |  V  P  Q  L  P  G  I  P  F [V] S  C  Q  R  G  Y  R  G  V  W 
+KC248198             | Mutated   | 80.0% (16/20)   | 79.6%              |  L  P  R  L  P  G  L  P  F [V] S  C  Q  R  G  Y  K  G  V  W 
+---------------------------------------------------------------------------------------------------------------------------------------
+Alignment verification: PASS (target codon correct for all displayed sequences)
+---------------------------------------------------------------------------------------------------------------------------------------
+
+Mutation Signature: NS3:122N
+Reference: NC_004102 (NS3 CDS: 3420-5312)
+Window: AA positions 113 to 132 (Target: 122)
+---------------------------------------------------------------------------------------------------------------------------------------
+Sequence ID          | Type      | Win Identity    | Full Nuc Identity  | Amino Acid Window (20 AA)                                   
+---------------------------------------------------------------------------------------------------------------------------------------
+NC_004102            | Reference | 100.0% (Ref)    | 100.0% (Ref)       |  V  I  P  V  R  R  R  G  D [S] R  G  S  L  L  S  P  R  P  I 
+KJ470623             | Mutated   | 50.0% (10/20)   | 72.2%              |  V  V  P  A  R  R  R  G  D [N] R  A  G  X  X  S  P  T  A  V 
+EU246930             | Mutated   | 80.0% (16/20)   | 72.5%              |  V  I  P  A  R  R  R  G  D [N] R  A  A  L  L  S  P  R  P  I 
+KJ470622             | Mutated   | 80.0% (16/20)   | 72.6%              |  V  I  P  A  R  R  R  G  D [N] R  A  G  L  L  S  P  R  P  I 
+JX183558             | Mutated   | 80.0% (16/20)   | 72.3%              |  L  I  P  A  R  R  R  G  D [N] R  A  S  L  L  S  P  R  P  I 
+DQ835761             | Mutated   | 80.0% (16/20)   | 72.4%              |  V  I  P  A  R  R  R  G  D [N] R  A  A  L  L  S  P  R  P  I 
+---------------------------------------------------------------------------------------------------------------------------------------
+Alignment verification: PASS (target codon correct for all displayed sequences)
+---------------------------------------------------------------------------------------------------------------------------------------
+
+Verification Summary:
+  Sequences Checked: 265
+  Mutations Checked: 5294
+  Matches:           5270
+  Mismatches:        24
+
+Result: VERIFICATION FAILED
+ERROR conda.cli.main_run:execute(142): `conda run python scripts/VerifyMutations.py --db test_out/HCV_OM_test/HCV_OM_test.db --mutation_catalog generic/hcv/Tables/generalized_mutation_catalog_with_extra_info.tsv --sample_size 10000` failed. (See above for error)
