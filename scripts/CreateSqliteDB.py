@@ -75,6 +75,18 @@ class CreateSqliteDB:
 		self.batch_id = batch_id or datetime.now().strftime("batch_%Y%m%d_%H%M%S")
 
 	@staticmethod
+	def _normalize_segment_value(value):
+		if value is None:
+			return ""
+		text = str(value).strip()
+		if not text or text.lower() == "nan":
+			return ""
+		digits = ''.join(ch for ch in text if ch.isdigit())
+		if digits:
+			return str(int(digits))
+		return text
+
+	@staticmethod
 	def _read_tree_file(tree_path):
 		if not tree_path:
 			return None
@@ -168,7 +180,13 @@ class CreateSqliteDB:
 
 	@staticmethod
 	def _normalize_alignment_columns(df, label):
-		if "primary_accession" not in df.columns and "sequence_id" in df.columns:
+		if "sequence_id" in df.columns and "primary_accession" in df.columns:
+			# Enforce sequence_id as the primary query key. 
+			# Preserve the reference target name in alignment_name if not already present.
+			if "alignment_name" not in df.columns:
+				df["alignment_name"] = df["primary_accession"]
+			df["primary_accession"] = df["sequence_id"]
+		elif "primary_accession" not in df.columns and "sequence_id" in df.columns:
 			df["primary_accession"] = df["sequence_id"]
 		elif "primary_accession" in df.columns and "sequence_id" not in df.columns:
 			df["sequence_id"] = df["primary_accession"]
@@ -446,12 +464,6 @@ class CreateSqliteDB:
 		return df2, (before - len(df2))
 
 	def _align_df_to_existing_schema(self, conn, table, df):
-		"""Align incoming dataframe to an existing SQLite table schema.
-
-		- Drops incoming columns absent from existing table (warn)
-		- Fails if any existing table columns are missing in incoming dataframe
-		- Reorders to existing table column order
-		"""
 		existing_cols = self._table_columns(conn, table)
 		if not existing_cols:
 			return df
@@ -522,7 +534,7 @@ class CreateSqliteDB:
 		if table == "meta_data":
 			return ["primary_accession", "segment"] if "segment" in cols else ["primary_accession"]
 		if table == "sequences":
-			return ["header"]
+			return ["header", "segment"] if "segment" in cols else ["header"]
 		if table == "sequence_alignment":
 			key = ["primary_accession"]
 			if "alignment_name" in cols:
@@ -601,14 +613,12 @@ class CreateSqliteDB:
 		df = df.copy()
 		key_cols = key_cols if key_cols is not None else self._infer_key_cols(table, df)
 		
-		# 1. Align schema and add columns if we are updating an existing table
 		if self.update and self._table_exists(conn, table):
 			self._ensure_update_columns(conn, table, df)
 			df = self._align_df_to_existing_schema(conn, table, df)
 			key_cols = self._resolve_key_cols_for_existing_schema(conn, table, key_cols, set(df.columns))
 			self._create_table_unique_indexes(conn, table)
 
-		# 2. Normalize and deduplicate incoming dataframe rows internally
 		for c in key_cols:
 			if c not in df.columns:
 				raise ValueError(f"Incoming '{table}' dataframe missing key column '{c}'")
@@ -618,19 +628,16 @@ class CreateSqliteDB:
 		if dropped_internal:
 			print(f"[CreateSqliteDB] Dropped {dropped_internal} duplicate incoming rows in '{table}' by key {key_cols}")
 
-		# 3. Handle baseline scenario: If it's a completely fresh run (not update mode)
 		if not self.update:
 			df.to_sql(table, conn, if_exists="replace", index=False)
 			return len(df)
 
-		# 4. Handle edge case: If update mode is active, but the table doesn't exist yet
 		if not self._table_exists(conn, table):
 			df.to_sql(table, conn, if_exists="replace", index=False)
 			self._create_table_unique_indexes(conn, table)
 			print(f"[CreateSqliteDB] Created table '{table}' with {len(df)} rows (table did not exist)")
 			return len(df)
 
-		# 5. Native Atomic SQL UPSERT for the core tracking datasets
 		upsert_tables = {"meta_data", "sequence_alignment", "features", "insertions", "sequences"}
 		if table in upsert_tables:
 			columns = list(df.columns)
@@ -638,13 +645,11 @@ class CreateSqliteDB:
 			sql_cols = ", ".join(columns)
 			upsert_sql = f"INSERT OR REPLACE INTO {table} ({sql_cols}) VALUES ({placeholders})"
 			
-			# Execute array payload using high-performance executemany transaction
 			payload = [tuple(x) for x in df.values]
 			conn.executemany(upsert_sql, payload)
 			print(f"[CreateSqliteDB] Atomically upserted {len(df)} rows into '{table}' by key {key_cols}")
 			return len(df)
 
-		# 6. Fallback Append logic for static lookup/metadata asset tables (M49, project settings, etc.)
 		existing_keys = self._fetch_existing_keys(conn, table, key_cols)
 		if len(key_cols) == 1:
 			key = key_cols[0]
@@ -721,12 +726,40 @@ class CreateSqliteDB:
 		update_exclusions = []
 		filtered_ids = self._load_filtered_ids()
 		filtered_details = self._load_filtered_details()
-		if filtered_ids:
-			print(f"[CreateSqliteDB] Excluding {len(filtered_ids)} filtered sequences from DB")
-			for fid in filtered_ids:
-				excluded_records.append({"primary_accession": fid, "reason": filtered_details.get(fid, "alignment_filtering")})
 
 		df_meta_data = self._read_tsv_required(self.meta_data, ["primary_accession"], "meta_data", dtype=str)
+		if "segment" not in df_meta_data.columns:
+			df_meta_data["segment"] = ""
+
+		# Strict baseline normalisation for metadata fields
+		df_meta_data["primary_accession"] = df_meta_data["primary_accession"].fillna("").astype(str).str.strip()
+		df_meta_data["segment"] = df_meta_data["segment"].fillna("").astype(str).str.strip().map(self._normalize_segment_value)
+
+		# Build reference segment mapping from reference_tsv to backfill missing metadata segments
+		ref_to_seg = {}
+		if self.reference_tsv:
+			try:
+				ref_df = load_reference_file_table(self.reference_tsv)
+				if "primary_accession" in ref_df.columns and "segment" in ref_df.columns:
+					for _, row in ref_df.iterrows():
+						acc = str(row["primary_accession"]).strip()
+						seg = str(row["segment"]).strip()
+						digits = ''.join(ch for ch in seg if ch.isdigit())
+						normalized_seg = digits if digits else seg
+						if acc and normalized_seg:
+							ref_to_seg[acc] = normalized_seg
+			except Exception as e:
+				print(f"[warn] Failed to load segments from reference_tsv: {e}")
+
+		if ref_to_seg:
+			missing_seg_mask = df_meta_data["segment"] == ""
+			if missing_seg_mask.any():
+				mapped_segs = df_meta_data.loc[missing_seg_mask, "primary_accession"].map(ref_to_seg).fillna("")
+				df_meta_data.loc[missing_seg_mask, "segment"] = mapped_segs
+
+		# Build absolute reference mapping dictionary based on metadata
+		acc_to_seg_map = dict(zip(df_meta_data["primary_accession"], df_meta_data["segment"]))
+
 		if "exclusion_status" not in df_meta_data.columns:
 			df_meta_data["exclusion_status"] = ""
 		if "exclusion_criteria" not in df_meta_data.columns:
@@ -735,25 +768,40 @@ class CreateSqliteDB:
 			raw_exclusion = df_meta_data["exclusion"].fillna("").astype(str).str.strip()
 			existing_criteria = df_meta_data["exclusion_criteria"].fillna("").astype(str).str.strip()
 			df_meta_data["exclusion_criteria"] = existing_criteria.mask(existing_criteria == "", raw_exclusion)
+		
 		acc_type_col = "accession_type" if "accession_type" in df_meta_data.columns else None
 		if acc_type_col:
 			acc_type_norm = df_meta_data[acc_type_col].fillna("").str.strip().str.lower()
 			is_ref_or_master = acc_type_norm.isin(["reference", "master"])
 		else:
 			is_ref_or_master = pd.Series(False, index=df_meta_data.index)
-		if filtered_ids and "primary_accession" in df_meta_data.columns:
-			filtered_mask = df_meta_data["primary_accession"].astype(str).str.strip().isin(filtered_ids) & (~is_ref_or_master)
+
+		if filtered_ids:
+			print(f"[CreateSqliteDB] Processing {len(filtered_ids)} alignment filtering rules...")
+			acc_series = df_meta_data["primary_accession"]
+			seg_series = df_meta_data["segment"]
+			composite_ids = acc_series + "_" + seg_series
+			
+			filtered_mask = (acc_series.isin(filtered_ids) | composite_ids.isin(filtered_ids)) & (~is_ref_or_master)
+			
 			if filtered_mask.any():
-				filtered_acc = df_meta_data.loc[filtered_mask, "primary_accession"].astype(str).str.strip()
-				reason_map = filtered_acc.map(lambda acc: str(filtered_details.get(acc, "alignment_filtering")).strip())
+				filtered_acc = df_meta_data.loc[filtered_mask, "primary_accession"]
+				filtered_seg = df_meta_data.loc[filtered_mask, "segment"]
+				
+				def get_reason(acc, seg):
+					return str(filtered_details.get(f"{acc}_{seg}", filtered_details.get(acc, "alignment_filtering"))).strip()
+				
+				reason_map = pd.Series([get_reason(a, s) for a, s in zip(filtered_acc, filtered_seg)], index=filtered_acc.index)
 				reason_map = reason_map.mask(reason_map == "", "alignment_filtering")
+				
 				existing_criteria = df_meta_data.loc[filtered_mask, "exclusion_criteria"].fillna("").astype(str).str.strip()
 				df_meta_data.loc[filtered_mask, "exclusion_criteria"] = existing_criteria.where(
 					existing_criteria != "",
 					reason_map,
 				)
 				df_meta_data.loc[filtered_mask, "exclusion_status"] = "1"
-				print(f"[CreateSqliteDB] Marked {int(filtered_mask.sum())} filtered non-reference sequences as excluded in meta_data")
+				print(f"[CreateSqliteDB] Marked {int(filtered_mask.sum())} filtered segments as excluded in meta_data")
+
 		is_ref_or_master = is_ref_or_master.reindex(df_meta_data.index, fill_value=False)
 		exclusion_reason = pd.Series("", index=df_meta_data.index, dtype=str)
 		for col in ["exclusion", "exclusion_criteria"]:
@@ -775,46 +823,70 @@ class CreateSqliteDB:
 		incoming_query_accessions = set()
 		passed_qc_query_accessions = set()
 		if "primary_accession" in df_meta_data.columns:
-			incoming_query_accessions = set(
-				df_meta_data.loc[~is_ref_or_master, "primary_accession"].dropna().astype(str).str.strip()
-			)
+			incoming_query_accessions = set(df_meta_data.loc[~is_ref_or_master, "primary_accession"])
 			incoming_query_accessions.discard("")
-			passed_qc_query_accessions = set(
-				df_meta_data.loc[(~is_ref_or_master) & (~exclusion_mask), "primary_accession"].dropna().astype(str).str.strip()
-			)
+			passed_qc_query_accessions = set(df_meta_data.loc[(~is_ref_or_master) & (~exclusion_mask), "primary_accession"])
 			passed_qc_query_accessions.discard("")
 		excluded_rows = df_meta_data[exclusion_mask]
 		if not excluded_rows.empty:
-			print(f"[CreateSqliteDB] Found {len(excluded_rows)} rows with exclusions in meta_data")
+			print(f"[CreateSqliteDB] Found {len(excluded_rows)} segment rows with exclusions in meta_data")
 			for idx, row in excluded_rows.iterrows():
 				acc = str(row.get("primary_accession", "")).strip()
 				reason = str(exclusion_reason.loc[idx]).strip()
 				if acc:
 					excluded_records.append({"primary_accession": acc, "reason": reason})
 
-		df_aln = self._read_tsv_required(self.pad_aln, [], "pad_aln")
+		# Load alignment data with strict string type casting
+		df_aln = self._read_tsv_required(self.pad_aln, [], "pad_aln", dtype=str)
 		df_aln = self._normalize_alignment_columns(df_aln, "pad_aln")
+		df_aln["primary_accession"] = df_aln["primary_accession"].fillna("").astype(str).str.strip()
+		df_aln["sequence_id"] = df_aln["sequence_id"].fillna("").astype(str).str.strip()
+
+		# Ingest and normalise/backfill segment values safely within df_aln
+		if "segment" not in df_aln.columns:
+			df_aln["segment"] = df_aln["primary_accession"].map(acc_to_seg_map).fillna("")
+		else:
+			df_aln["segment"] = df_aln["segment"].fillna("").astype(str).str.strip()
+			df_aln["segment"] = df_aln["segment"].replace("", float("NaN")).fillna(df_aln["primary_accession"].map(acc_to_seg_map)).fillna("")
+		df_aln["segment"] = df_aln["segment"].map(self._normalize_segment_value)
 
 		df_meta_data = self._add_cluster_column(df_meta_data)
 		df_meta_data = self._add_reference_columns(df_meta_data, df_aln)
-		valid_accessions = set()
-		if "primary_accession" in df_meta_data.columns:
-			valid_accessions = set(
-				df_meta_data.loc[(~exclusion_mask) | is_ref_or_master, "primary_accession"]
-				.dropna()
-				.astype(str)
-				.str.strip()
-			)
+		
+		# Establish reference sets using pure python string primitives
+		valid_df = df_meta_data.loc[(~exclusion_mask) | is_ref_or_master, ["primary_accession", "segment"]].dropna()
+		valid_pairs = set(zip(
+			valid_df["primary_accession"].astype(str).str.strip(),
+			valid_df["segment"].astype(str).str.strip()
+		))
+
+		acc_to_seg_map = dict(zip(
+			df_meta_data["primary_accession"].astype(str).str.strip(),
+			df_meta_data["segment"].astype(str).str.strip()
+		))
 
 		df_features = self._read_tsv_required(self.features, [], "features", dtype=str)
-		if valid_accessions and "accession" in df_features.columns:
-			df_features = df_features[df_features["accession"].astype(str).str.strip().isin(valid_accessions)]
-		elif valid_accessions and "primary_accession" in df_features.columns:
-			df_features = df_features[df_features["primary_accession"].astype(str).str.strip().isin(valid_accessions)]
-		if valid_accessions and "sequence_id" in df_aln.columns:
-			df_aln = df_aln[df_aln["sequence_id"].astype(str).str.strip().isin(valid_accessions)]
-		elif valid_accessions and "primary_accession" in df_aln.columns:
-			df_aln = df_aln[df_aln["primary_accession"].astype(str).str.strip().isin(valid_accessions)]
+		feat_acc_col = "accession" if "accession" in df_features.columns else "primary_accession"
+		if feat_acc_col in df_features.columns:
+			df_features[feat_acc_col] = df_features[feat_acc_col].fillna("").astype(str).str.strip()
+
+		# Ingest and normalise/backfill segment values safely within df_features
+		if "segment" not in df_features.columns:
+			df_features["segment"] = df_features[feat_acc_col].map(acc_to_seg_map).fillna("") if feat_acc_col in df_features.columns else ""
+		else:
+			df_features["segment"] = df_features["segment"].fillna("").astype(str).str.strip()
+			if feat_acc_col in df_features.columns:
+				df_features["segment"] = df_features["segment"].replace("", float("NaN")).fillna(df_features[feat_acc_col].map(acc_to_seg_map)).fillna("")
+		df_features["segment"] = df_features["segment"].map(self._normalize_segment_value)
+
+		# Apply high-performance structural list comprehension filters against valid_pairs
+	
+		if valid_pairs:
+			if feat_acc_col in df_features.columns:
+				df_features = df_features[[t in valid_pairs for t in zip(df_features[feat_acc_col], df_features["segment"])]]
+			
+			# FIX: Filter using the clean primary_accession column to match valid_pairs structural layout
+			df_aln = df_aln[[t in valid_pairs for t in zip(df_aln["primary_accession"], df_aln["segment"])]]
 
 		if self.gene_info is not None:
 			df_gene = self._read_tsv_required(self.gene_info, [], "gene_info")
@@ -840,16 +912,25 @@ class CreateSqliteDB:
 				"parent_name": "NULL"
 			})
 			df_gene = pd.DataFrame(gene_records)
+			
 		df_m49_country = self._read_csv_required(self.m49_countries, ["m49_code"], "m49_countries", dtype={"m49_code": str})
 		df_m49_interm = self._read_csv_required(self.m49_interm_region, [], "m49_interm_region")
 		df_m49_region = self._read_csv_required(self.m49_regions, [], "m49_regions")
 		df_m49_sub_region = self._read_csv_required(self.m49_sub_regions, [], "m49_sub_regions")
 		df_proj_setting = self._read_tsv_required(self.proj_settings, [], "proj_settings")
 		
-		df_insertions = self._read_tsv_required(self.insertions, [], "insertions")
+		df_insertions = self._read_tsv_required(self.insertions, [], "insertions", dtype=str)
 		df_insertions = self._ensure_primary_accession(df_insertions, "insertions", aliases=["accession", "sequence_id"])
-		if valid_accessions and "primary_accession" in df_insertions.columns:
-			df_insertions = df_insertions[df_insertions["primary_accession"].astype(str).str.strip().isin(valid_accessions)]
+		df_insertions["primary_accession"] = df_insertions["primary_accession"].fillna("").astype(str).str.strip()
+		if "segment" not in df_insertions.columns:
+			df_insertions["segment"] = df_insertions["primary_accession"].map(acc_to_seg_map).fillna("")
+		else:
+			df_insertions["segment"] = df_insertions["segment"].fillna("").astype(str).str.strip()
+			df_insertions["segment"] = df_insertions["segment"].replace("", float("NaN")).fillna(df_insertions["primary_accession"].map(acc_to_seg_map)).fillna("")
+		df_insertions["segment"] = df_insertions["segment"].map(self._normalize_segment_value)
+			
+		if valid_pairs and "primary_accession" in df_insertions.columns:
+			df_insertions = df_insertions[[t in valid_pairs for t in zip(df_insertions["primary_accession"], df_insertions["segment"])]]
 		
 		df_host_taxa = self._read_tsv_required(self.host_taxa_file, [], "host_taxa_file", dtype=str)
 		host_meta_col = next((c for c in ["host_taxa_id", "taxonomy_id", "host_tax_id"] if c in df_meta_data.columns), None)
@@ -860,8 +941,16 @@ class CreateSqliteDB:
 				df_host_taxa = df_host_taxa[df_host_taxa[taxa_col].astype(str).str.strip().isin(valid_taxa)]
 		
 		df_fasta_sequences = self.load_fasta()
-		if valid_accessions and "header" in df_fasta_sequences.columns:
-			df_fasta_sequences = df_fasta_sequences[df_fasta_sequences["header"].astype(str).str.strip().isin(valid_accessions)]
+		df_fasta_sequences["header"] = df_fasta_sequences["header"].fillna("").astype(str).str.strip()
+		if "segment" not in df_fasta_sequences.columns:
+			df_fasta_sequences["segment"] = df_fasta_sequences["header"].map(acc_to_seg_map).fillna("")
+		else:
+			df_fasta_sequences["segment"] = df_fasta_sequences["segment"].fillna("").astype(str).str.strip()
+			df_fasta_sequences["segment"] = df_fasta_sequences["segment"].replace("", float("NaN")).fillna(df_fasta_sequences["header"].map(acc_to_seg_map)).fillna("")
+		df_fasta_sequences["segment"] = df_fasta_sequences["segment"].map(self._normalize_segment_value)
+
+		if valid_pairs and "header" in df_fasta_sequences.columns:
+			df_fasta_sequences = df_fasta_sequences[[t in valid_pairs for t in zip(df_fasta_sequences["header"], df_fasta_sequences["segment"])]]
 
 		db_path = self._db_path()
 		os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -876,9 +965,8 @@ class CreateSqliteDB:
 		cursor.execute("CREATE TABLE IF NOT EXISTS update_batches (batch_id TEXT PRIMARY KEY, started_at TEXT, finished_at TEXT, update_db TEXT, mode TEXT);")
 		cursor.execute("CREATE TABLE IF NOT EXISTS update_table_deltas (batch_id TEXT, table_name TEXT, before_count INTEGER, after_count INTEGER, delta INTEGER);")
 
-
 		now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-  
+
 		cursor.execute("INSERT OR REPLACE INTO update_batches (batch_id, started_at, finished_at, update_db, mode) VALUES (?, ?, ?, ?, ?)", (self.batch_id, now_str, None, self.update_db if self.update else None, "update" if self.update else "create"))
 
 		if self._should_force_unsegmented_segment_one(conn, [df_meta_data, df_features, df_aln, df_insertions]):
@@ -886,6 +974,7 @@ class CreateSqliteDB:
 			df_features = self._force_segment_one_df(df_features, create_if_missing=True)
 			df_aln = self._force_segment_one_df(df_aln, create_if_missing=True)
 			df_insertions = self._force_segment_one_df(df_insertions, create_if_missing=True)
+			df_fasta_sequences = self._force_segment_one_df(df_fasta_sequences, create_if_missing=True)
 
 		tables_for_delta = ["meta_data", "features", "sequence_alignment", "genes", "sequences", "insertions", "host_taxa"]
 		before_counts = {t: self._table_row_count(conn, t) for t in tables_for_delta}
@@ -900,9 +989,10 @@ class CreateSqliteDB:
 		self.merge_table_append_nonredundant(conn, df_m49_region, "m49_regions", None, update_exclusions)
 		self.merge_table_append_nonredundant(conn, df_m49_sub_region, "m49_sub_regions", None, update_exclusions)
 		self.merge_table_append_nonredundant(conn, df_proj_setting, "project_settings", None, update_exclusions)
-		self.merge_table_append_nonredundant(conn, df_fasta_sequences, "sequences", ["header"], update_exclusions)
+		self.merge_table_append_nonredundant(conn, df_fasta_sequences, "sequences", None, update_exclusions)
 		self.merge_table_append_nonredundant(conn, df_insertions, "insertions", None, update_exclusions)
 		self.merge_table_append_nonredundant(conn, df_host_taxa, "host_taxa", None, update_exclusions)
+		
 		if self._should_force_unsegmented_segment_one(conn, [df_meta_data, df_features, df_aln, df_insertions]):
 			self._backfill_segment_one_in_db(conn, ["meta_data", "features", "sequence_alignment", "insertions"])
 

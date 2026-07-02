@@ -352,6 +352,7 @@ def test_find_gaps_in_fasta_resolves_segmented_refset_files_to_matching_master(t
             "cds_start_OG_seq": "1",
             "cds_end_OG_seq": "3",
             "product": "P2",
+            "genome_coverage": "75.00",
         }
     ]
 
@@ -427,6 +428,7 @@ def test_find_gaps_in_fasta_segmented_refset_emits_segment_column_from_segment_m
             "cds_start_OG_seq": "1",
             "cds_end_OG_seq": "3",
             "product": "P2",
+            "genome_coverage": "75.00",
             "segment": "2",
         }
     ]

@@ -39,6 +39,18 @@ class NextalignAlignment:
 		path = os.path.basename(file_path)
 		return path.split('.')[0]
 
+	@staticmethod
+	def _normalize_segment(segment_value):
+		if segment_value is None:
+			return ""
+		text = str(segment_value).strip()
+		if not text or text.lower() == "nan":
+			return ""
+		digits = ''.join(ch for ch in text if ch.isdigit())
+		if digits:
+			return str(int(digits))
+		return text
+
 	def get_master_list(self):
 		if self.update_db:
 			masters = load_master_accessions(self.update_db)

@@ -15,7 +15,7 @@ from collections import defaultdict
 from collections import Counter
 
 class GenerateTables:
-	def __init__(self, genbank_matrix, base_dir, output_dir, blast_hits, paded_aln, host_taxa_file, nextalign_dir, email):
+	def __init__(self, genbank_matrix, base_dir, output_dir, blast_hits, paded_aln, host_taxa_file, nextalign_dir, email, reference_tsv=None):
 		self.genbank_matrix = genbank_matrix
 		self.base_dir = base_dir
 		self.output_dir = output_dir
@@ -24,6 +24,7 @@ class GenerateTables:
 		self.host_taxa_file = host_taxa_file
 		self.nextalign_dir = nextalign_dir
 		self.email = email
+		self.reference_tsv = reference_tsv
 		os.makedirs(join(self.base_dir, self.output_dir), exist_ok=True)
 
 	def fetch_taxonomy_details(self, tax_id, max_retries=5, delay=2):
@@ -146,17 +147,32 @@ class GenerateTables:
 
 	def load_segment_map(self):
 		segment_map = {}
-		if not self.genbank_matrix or not os.path.isfile(self.genbank_matrix):
-			return segment_map
-		with open(self.genbank_matrix, newline='') as handle:
-			reader = csv.DictReader(handle, delimiter='\t')
-			if not reader.fieldnames or 'primary_accession' not in reader.fieldnames or 'segment' not in reader.fieldnames:
-				return segment_map
-			for row in reader:
-				acc = (row.get('primary_accession') or '').strip()
-				seg = (row.get('segment') or '').strip()
-				if acc:
-					segment_map[acc] = seg
+		if self.genbank_matrix and os.path.isfile(self.genbank_matrix):
+			with open(self.genbank_matrix, newline='') as handle:
+				reader = csv.DictReader(handle, delimiter='\t')
+				if reader.fieldnames and 'primary_accession' in reader.fieldnames and 'segment' in reader.fieldnames:
+					for row in reader:
+						acc = (row.get('primary_accession') or '').strip()
+						seg = (row.get('segment') or '').strip()
+						if acc:
+							segment_map[acc] = seg
+
+		# Override reference segments using reference_tsv
+		if self.reference_tsv and os.path.exists(self.reference_tsv):
+			try:
+				from ExportRefListFromUpdateDb import load_reference_file_table
+				ref_df = load_reference_file_table(self.reference_tsv)
+				if "primary_accession" in ref_df.columns and "segment" in ref_df.columns:
+					for _, row in ref_df.iterrows():
+						acc = str(row["primary_accession"]).strip()
+						seg = str(row["segment"]).strip()
+						digits = ''.join(ch for ch in seg if ch.isdigit())
+						normalized_seg = digits if digits else seg
+						if acc and normalized_seg:
+							segment_map[acc] = normalized_seg
+			except Exception as e:
+				print(f"[warn] Failed to load reference segments from reference_tsv: {e}")
+
 		return segment_map
 
 	def created_alignment_table(self, blast_dict, segment_map=None):
@@ -164,10 +180,26 @@ class GenerateTables:
 		accessions = {}
 		missing_accs = []
 		seqs = {}
+		written_accessions = set()
+		inferred_segs = {}
 		header = ["primary_accession", "alignment_name", "alignment", "segment"]
 		write_file = open(join(self.base_dir, self.output_dir, "sequence_alignment.tsv"), 'w')
 		write_file.write("\t".join(header) + "\n")
 		
+		# Build segment_to_master map from genbank_matrix
+		segment_to_master = {}
+		with open(self.genbank_matrix) as file:
+			csv_reader = csv.DictReader(file, delimiter='\t')
+			for row in csv_reader:
+				acc_type = str(row.get('accession_type', '')).strip().lower()
+				if acc_type == 'master':
+					acc = str(row.get('primary_accession', '')).strip()
+					seg = str(row.get('segment', '')).strip()
+					digits = ''.join(ch for ch in seg if ch.isdigit())
+					normalized_seg = digits if digits else seg
+					if acc and normalized_seg:
+						segment_to_master[normalized_seg] = acc
+
 		# Handle single file or list of files
 		paded_aln_files = self.paded_aln if isinstance(self.paded_aln, list) else [self.paded_aln]
 		
@@ -176,26 +208,55 @@ class GenerateTables:
 				print(f"Warning: Padded alignment file not found: {paded_file}")
 				continue
 				
+			# Infer segment from filename (e.g. refset_4_aln_merged_MSA.fasta -> "4")
+			match = re.search(r"refset_(\d+)_", os.path.basename(paded_file))
+			inferred_seg = match.group(1) if match else ""
+			
 			rds = read_file.fasta(paded_file)
 			for rows in rds:
-				if rows[0] not in accessions:
-					seqs[rows[0]] = rows[1]
-					accessions[rows[0]] = 1
-					seg = segment_map.get(rows[0].strip(), "")
-					if rows[0] in blast_dict:
-						write_file.write(rows[0].strip() + '\t' + blast_dict[rows[0].strip()] + '\t' + rows[1] + '\t' + seg + '\n')
+				acc = rows[0].strip()
+				if acc not in accessions:
+					seqs[acc] = rows[1]
+					accessions[acc] = 1
+					inferred_segs[acc] = inferred_seg
+					seg = segment_map.get(acc, "")
+					if not seg:
+						seg = inferred_seg
+					if acc in blast_dict:
+						write_file.write(acc + '\t' + blast_dict[acc] + '\t' + rows[1] + '\t' + seg + '\n')
+						written_accessions.add(acc)
 					else:
-						missing_accs.append(rows[0].strip())
+						missing_accs.append(acc)
 
 		for each_ref_aln in os.listdir(join(self.nextalign_dir)):
 			for each_ref_aln_file in os.listdir(join(self.nextalign_dir, each_ref_aln)):
 				rds = read_file.fasta(join(self.nextalign_dir, each_ref_aln, each_ref_aln_file, each_ref_aln_file + ".aligned.fasta"))
 				for rows in rds:
-					if rows[0].strip() in missing_accs:
-						seg = segment_map.get(rows[0].strip(), "")
-						write_file.write(rows[0].strip() + '\t' + each_ref_aln_file + '\t' + seqs[rows[0]] + '\t' + seg + '\n')
-						accessions[rows[0].strip()] = 1
+					acc = rows[0].strip()
+					if acc in missing_accs:
+						seg = segment_map.get(acc, "")
+						if not seg:
+							seg = inferred_segs.get(acc, "")
+						write_file.write(acc + '\t' + each_ref_aln_file + '\t' + seqs[acc] + '\t' + seg + '\n')
+						written_accessions.add(acc)
 
+		# Resolve remaining missing reference/master accessions that failed Nextalign
+		still_missing = []
+		for acc in missing_accs:
+			if acc not in written_accessions:
+				seg = segment_map.get(acc, "")
+				if not seg:
+					seg = inferred_segs.get(acc, "")
+				digits = ''.join(ch for ch in seg if ch.isdigit())
+				normalized_seg = digits if digits else seg
+				master_acc = segment_to_master.get(normalized_seg)
+				if master_acc:
+					write_file.write(acc + '\t' + master_acc + '\t' + seqs[acc] + '\t' + seg + '\n')
+					written_accessions.add(acc)
+				else:
+					still_missing.append(acc)
+		if still_missing:
+			print(f"[warn] Could not resolve master sequences for {len(still_missing)} accessions: {', '.join(still_missing[:10])}")
 			
 		write_file.close()
 		print("Removing the Sequence redundancy")
@@ -263,7 +324,8 @@ if __name__ == "__main__":
 	parser.add_argument('-p', '--paded_aln', help='Paded alignment file', nargs='+', default=["tmp/Pad-alignment/NC_001542.aligned_merged_MSA.fasta"])
 	parser.add_argument('-n', '--nextalign_dir', help='Nextalign aligned directory', default="tmp/Nextalign/")
 	parser.add_argument('-e', '--email', help='Email id', default='your-email@example.com')
+	parser.add_argument('-r', '--reference_tsv', help='Optional reference list TSV/txt file', default=None)
 	args = parser.parse_args()
 	
-	processor = GenerateTables(args.genbank_matrix, args.base_dir, args.output_dir, args.blast_hits, args.paded_aln, args.host_taxa, args.nextalign_dir, args.email)
+	processor = GenerateTables(args.genbank_matrix, args.base_dir, args.output_dir, args.blast_hits, args.paded_aln, args.host_taxa, args.nextalign_dir, args.email, args.reference_tsv)
 	processor.process()

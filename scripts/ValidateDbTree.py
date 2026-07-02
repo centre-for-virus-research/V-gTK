@@ -828,9 +828,12 @@ def validate_feature_projection_integrity(conn):
         if not master_product_spans:
             unresolved_master_rows += 1
             continue
-
         cds_start_int = _try_parse_int(cds_start)
         cds_end_int = _try_parse_int(cds_end)
+        # Clamp the projected CDS coordinates to the sequence's actual alignment window
+        if cds_start_int is not None and cds_end_int is not None:
+            cds_start_int = max(cds_start_int, aln_start_int)
+            cds_end_int = min(cds_end_int, aln_end_int)
         
         expected_matches = False
         for master_start, master_end in master_product_spans:
@@ -1337,31 +1340,49 @@ def main(argv=None):
         print(f"[info] Accepted distinct accessions: {len(accepted_accessions)}")
         print(f"[info] Filtered distinct accessions: {len(filtered_accessions)}")
         print(f"[info] Accepted + filtered distinct accessions: {len(accepted_filtered_union)}")
-        print(f"[info] Meta rows: {meta_count}, Sequence rows: {seq_count}, Tree terminals: {len(tree_terminals)}")
+        print(
+            f"[info] Sequence counts by DB storage/origin location:\n"
+            f"[info]   - metadata entries (meta_data table): {meta_count} (includes query sequences, references, and excluded rows)\n"
+            f"[info]   - raw sequence records (sequences table): {seq_count} (raw sequences for non-excluded query/reference entries)\n"
+            f"[info]   - tree leaves (trees table terminals): {len(tree_terminals)}"
+        )
         print(f"[info] UShER tree rows: {usher_tree_count}")
         if segment_count is not None:
             print(f"[info] Segment count in meta_data: {segment_count}")
+        print("[info] Running DB consistency checks across tables:")
+        print("[info]   - sequence_alignment vs meta_data: verifying that every non-excluded accession in meta_data has an aligned sequence")
+        print("[info]   - features vs meta_data: verifying that every non-excluded accession has projected coordinate features")
+        print("[info]   - host_taxa vs meta_data: verifying that host taxonomy lookup records exist for each host_taxa_id in meta_data")
         for title, result in consistency_results.items():
             if result.get("skipped"):
                 print(f"[info] {title}: skipped ({result.get('reason')})")
             elif "error" in result:
                 print(f"[info] {title}: ERROR: {result['error']}")
             else:
+                missing = result.get('missing', [])
+                extra = result.get('extra', [])
                 print(
-                    f"[info] {title}: ok={result['ok']} missing={len(result.get('missing', []))} extra={len(result.get('extra', []))}"
+                    f"[info] {title}: ok={result['ok']} missing={len(missing)} extra={len(extra)}"
                 )
+                if missing:
+                    print(f"[info]   {title} missing (present in meta_data but missing in {result.get('table', 'table')}, first 10): {', '.join(missing[:10])}")
+                if extra:
+                    print(f"[info]   {title} extra (present in {result.get('table', 'table')} but missing/excluded in meta_data, first 10): {', '.join(extra[:10])}")
         for result in mutation_integrity_results:
             if result.get("skipped"):
                 print(f"[info] {result['title']}: skipped ({result.get('reason')})")
             elif "error" in result:
                 print(f"[info] {result['title']}: ERROR: {result['error']}")
             else:
+                orphan_accessions = result.get('orphan_accessions', [])
                 print(
                     f"[info] {result['title']}: ok={result['ok']} "
                     f"blank_required_rows={result.get('blank_required_rows', 0)} "
                     f"duplicate_keys={result.get('duplicate_keys', 0)} "
-                    f"orphan_accessions={len(result.get('orphan_accessions', []))}"
+                    f"orphan_accessions={len(orphan_accessions)}"
                 )
+                if orphan_accessions:
+                    print(f"[info]   {result['title']} orphan accessions (first 10): {', '.join(orphan_accessions[:10])}")
         if args.check_update_integrity:
             if feature_integrity_result.get("skipped"):
                 print(f"[info] {feature_integrity_result['title']}: skipped ({feature_integrity_result.get('reason')})")
@@ -1372,8 +1393,20 @@ def main(argv=None):
                     f"[info] {feature_integrity_result['title']}: ok={feature_integrity_result.get('ok')} "
                     f"offending_rows={feature_integrity_result.get('offending_rows', 0)} "
                     f"invalid_aln_rows={feature_integrity_result.get('invalid_aln_rows', 0)} "
-                    f"unresolved_master_rows={feature_integrity_result.get('unresolved_master_rows', 0)}"
+                    f"unresolved_master_rows={feature_integrity_result.get('unresolved_master_rows', 0)} "
+                    f"mismatched_cds_rows={feature_integrity_result.get('mismatched_cds_rows', 0)}"
                 )
+                if not feature_integrity_result.get('ok'):
+                    examples = feature_integrity_result.get('examples', [])
+                    if examples:
+                        print(f"[info] feature projection integrity: offending row details (up to 25):")
+                        for ex in examples:
+                            reason = ex.get('reason', 'unknown')
+                            print(
+                                f"[info]   accession={ex['accession']} master={ex['master_ref_accession']} "
+                                f"product={ex['product']} aln=({ex['aln_start']},{ex['aln_end']}) "
+                                f"cds=({ex['cds_start']},{ex['cds_end']}) reason={reason}"
+                            )
         if cluster_col:
             print(f"[info] Cluster column: {cluster_col}, Centroid count: {len(centroid_set)}")
             print(f"[info] Missing centroids in tree: {len(missing_centroids_in_tree)}")

@@ -861,15 +861,21 @@ process GENERATE_TABLES {
         path blast_hits
         path padded_aln
         path nextalign_dir
+        path ref_list
     output:
         path "Tables/sequence_alignment.tsv", emit: sequence_alignment
         path "Tables/insertions.tsv", emit: insertions
         path "Tables", emit: tables_dir
     shell:
     '''
+    EXTRA_TABLE_ARGS=""
+    if [ "!{ref_list}" != "null" ] && [ -f "!{ref_list}" ]; then
+        EXTRA_TABLE_ARGS="-r !{ref_list}"
+    fi
+
     python !{scripts_dir}/GenerateTables.py -g !{gb_matrix} \
     -bh !{blast_hits} -p !{padded_aln} -n !{nextalign_dir} \
-    -b . -o Tables -e !{params.email}
+    -b . -o Tables -e !{params.email} ${EXTRA_TABLE_ARGS}
     '''
 }
 
@@ -1432,7 +1438,8 @@ workflow {
     GENERATE_TABLES(data, 
                     BLAST_ALIGNMENT.out.query_uniq_tophits, 
                     PAD_ALIGNMENT.out.merged_msa.collect(), 
-                    NEXTALIGN_ALIGNMENT.out)
+                    NEXTALIGN_ALIGNMENT.out,
+                    params.ref_list)
 
     HOST_TAXA_TABLE(data,
                     GENBANK_PARSER.out.taxa_names,

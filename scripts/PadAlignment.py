@@ -90,20 +90,20 @@ class PadAlignment:
 
 		masters = df[df["accession_type"].astype(str).str.strip().str.lower() == 'master']
 		for _, row in masters.iterrows():
-			master_segment[row["primary_accession"]] = row["segment"]
+			master_segment[row["primary_accession"]] = self._normalize_segment(row["segment"])
 		return master_segment
 
 	@staticmethod
 	def _normalize_segment(segment_value):
 		if segment_value is None:
 			return None
-		segment_str = str(segment_value).strip()
-		if not segment_str:
+		text = str(segment_value).strip()
+		if not text or text.lower() == "nan":
 			return None
-		match = re.search(r"(\d+)", segment_str)
-		if not match:
-			return None
-		return str(int(match.group(1)))
+		digits = ''.join(ch for ch in text if ch.isdigit())
+		if digits:
+			return str(int(digits))
+		return text
 
 	def find_precomputed_reference_alignment(self, precomputed_ref_dir, segment_value):
 		"""

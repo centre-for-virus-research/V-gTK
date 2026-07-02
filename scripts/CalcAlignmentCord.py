@@ -32,7 +32,9 @@ class CalculateAlignmentCoordinates:
 		if not text or text.lower() == "nan":
 			return ""
 		digits = ''.join(ch for ch in text if ch.isdigit())
-		return digits if digits else text
+		if digits:
+			return str(int(digits))
+		return text
 
 	@staticmethod
 	def _infer_segment_from_alignment_name(fasta_file):
@@ -81,7 +83,7 @@ class CalculateAlignmentCoordinates:
 		if 'primary_accession' not in df.columns or 'segment' not in df.columns:
 			raise ValueError(f"Segment map TSV is missing required columns: primary_accession, segment ({self.segment_map_tsv})")
 		df['primary_accession'] = df['primary_accession'].fillna('').astype(str).str.strip()
-		df['segment'] = df['segment'].fillna('').astype(str).str.strip()
+		df['segment'] = df['segment'].fillna('').astype(str).str.strip().map(self._normalize_segment_value)
 		return dict(zip(df['primary_accession'], df['segment']))
 
 	def get_master_list(self):
