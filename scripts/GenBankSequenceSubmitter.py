@@ -17,7 +17,6 @@ from os.path import join
 from argparse import ArgumentParser
 #from PadAlignment import PadAlignment
 from GffToDictionary import GffDictionary
-#from FeatureCalculator  import FeatureCordCalculator 
 
 
 class GenBankSequenceSubmitter:
