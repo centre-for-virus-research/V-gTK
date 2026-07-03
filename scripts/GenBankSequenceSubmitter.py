@@ -341,13 +341,18 @@ class GenBankSequenceSubmitter:
 	def mafft_query_sequences(self, query_file, ref_alignment_file, output_dir):
 		output_file = self.path_to_basename(ref_alignment_file) + "_aln.fasta"
 		output_path = join(output_dir, output_file)
+		tmp_output_path = output_path + ".tmp"
 		ref_alignment_file = ref_alignment_file.split('.')[0] + "_aln.fasta"
 		try:
-			with open(output_path, 'w') as out_f:
+			with open(tmp_output_path, 'w') as out_f:
 				subprocess.run(['mafft', '--add', query_file, '--keeplength', ref_alignment_file], stdout=out_f, check=True)
+				shutil.move(tmp_output_path, output_path)
 				print(f"mafft ran successfully on {output_file}")
 		except subprocess.CalledProcessError as e:
+			if os.path.exists(tmp_output_path):
+				os.remove(tmp_output_path)
 			print(f"Error running MAFFT: {e}")
+			raise
 
 	def extract_matching_sequences(self, fasta_dir, output_file=None):
 		results = {}
@@ -583,7 +588,7 @@ class GenBankSequenceSubmitter:
 		mafft_reference_alignment = join(self.tmp_dir, "analysis", self.analysis_dir, "mafft_reference_alignment")
 		reference_alignments =  join(self.tmp_dir, "analysis", self.analysis_dir, "reference_alignments")
 		query_ref_alignment = join(self.tmp_dir, "analysis", self.analysis_dir, "query_ref_alignment")
-		table2asn_tmp = join(self.tmp_dir, "analysis", self.analysis_dir, "Table2asn", "tmp")
+		table2asn_tmp = join(self.tmp_dir, "analysis", self.analysis_dir, self.output_dir, "tmp")
 		create_tmp_dir = os.makedirs(table2asn_tmp, exist_ok=True)
 
 		os.makedirs(master_and_reference_merged, exist_ok=True)
@@ -601,7 +606,7 @@ class GenBankSequenceSubmitter:
 		for each_ref_aln in os.listdir(mafft_reference_alignment):
 			output_file = self.path_to_basename(each_ref_aln)
 			output_file = join(reference_alignments, output_file + '.fasta')
-			self.extract_matching_sequences(join(mafft_reference_alignment), output_file)
+			shutil.copyfile(join(mafft_reference_alignment, each_ref_aln), output_file)
 
 		for each_query_seq in os.listdir(grouped_fasta):
 			reference_file = self.path_to_basename(each_query_seq)
