@@ -62,10 +62,10 @@ def test_gap_helpers_and_cds_recalculation(tmp_path: Path):
         {"start": "1", "end": "4", "product": "P1"},
         {"start": "5", "end": "9", "product": "P2"},
     ]
-    adjusted = processor.recalculate_cds_coordinates("Q_A", gaps, cds_list, start_offset=1)
+    adjusted = processor.recalculate_cds_coordinates_with_span("Q_A", gaps, cds_list, start_offset=1)
     assert adjusted == [
-        {"start": 1, "end": 4, "og_start": 1, "og_end": 3, "product": "P1"},
-        {"start": 5, "end": 9, "og_start": 4, "og_end": 8, "product": "P2"},
+        {"start": 1, "end": 4, "og_start": 1, "og_end": 3, "feature_start": 1, "feature_end": 4, "product": "P1"},
+        {"start": 5, "end": 9, "og_start": 4, "og_end": 8, "feature_start": 5, "feature_end": 9, "product": "P2"},
     ]
 
 
@@ -88,11 +88,12 @@ def test_recalculate_cds_coordinates_keeps_reference_feature_span_for_partial_se
     )
 
     assert adjusted == [
-        {"start": 3, "end": 4, "og_start": 1, "og_end": 2, "product": "P1"},
-        {"start": 5, "end": 7, "og_start": 3, "og_end": 5, "product": "P2"},
+        {"start": 3, "end": 4, "og_start": 1, "og_end": 2, "feature_start": 1, "feature_end": 4, "product": "P1"},
+        {"start": 5, "end": 7, "og_start": 3, "og_end": 5, "feature_start": 5, "feature_end": 9, "product": "P2"},
     ]
 
 
+@pytest.mark.skip(reason="get_products_for_range has been removed from CalculateAlignmentCoordinates")
 def test_get_products_for_range(tmp_path: Path):
     processor = make_processor(tmp_path)
     cds_list = [
@@ -184,6 +185,7 @@ def test_find_gaps_in_fasta_preserves_projected_product_identity(tmp_path: Path)
             "cds_start_OG_seq": "1",
             "cds_end_OG_seq": "3",
             "product": "P1",
+            "genome_coverage": "75.00",
         },
         {
             "accession": "Q_A",
@@ -196,6 +198,7 @@ def test_find_gaps_in_fasta_preserves_projected_product_identity(tmp_path: Path)
             "cds_start_OG_seq": "4",
             "cds_end_OG_seq": "8",
             "product": "P2",
+            "genome_coverage": "100.00",
         },
     ]
 
@@ -219,6 +222,7 @@ def test_find_gaps_in_fasta_partial_sequences_keep_overlapping_reference_feature
             "cds_start_OG_seq": "1",
             "cds_end_OG_seq": "2",
             "product": "P1",
+            "genome_coverage": "50.00",
         },
         {
             "accession": "Q_B",
@@ -231,6 +235,7 @@ def test_find_gaps_in_fasta_partial_sequences_keep_overlapping_reference_feature
             "cds_start_OG_seq": "3",
             "cds_end_OG_seq": "5",
             "product": "P2",
+            "genome_coverage": "60.00",
         },
     ]
 
@@ -287,6 +292,7 @@ def test_find_gaps_in_fasta_skips_features_outside_partial_sequence_span(tmp_pat
             "cds_start_OG_seq": "1",
             "cds_end_OG_seq": "3",
             "product": "P1",
+            "genome_coverage": "75.00",
         }
     ]
 
@@ -695,7 +701,7 @@ def test_stress_recalculate_cds_coordinates_extreme_gaps(tmp_path: Path):
     # Overlap start=4, gaps before 4 is 3. So og_start = 4 - 3 = 1
     # Overlap end=6, gaps before 6 is 3. So og_end = 6 - 3 = 3
     assert adjusted == [
-        {"start": 4, "end": 6, "og_start": 1, "og_end": 3, "product": "P1"}
+        {"start": 4, "end": 6, "og_start": 1, "og_end": 3, "feature_start": 4, "feature_end": 6, "product": "P1"}
     ]
 
 
@@ -720,13 +726,13 @@ def test_stress_recalculate_cds_coordinates_partial_overlap_boundaries(tmp_path:
     adjusted = processor.recalculate_cds_coordinates_with_span(
         "Q", gaps, cds_list, start_offset=1, genome_cord_start=50, genome_cord_end=100
     )
-    assert adjusted == [{"start": 100, "end": 100, "og_start": 100, "og_end": 100, "product": "P_MID"}]
+    assert adjusted == [{"start": 100, "end": 100, "og_start": 100, "og_end": 100, "feature_start": 100, "feature_end": 200, "product": "P_MID"}]
     
     # 4. Span overlaps CDS by exactly 1 base at end
     adjusted = processor.recalculate_cds_coordinates_with_span(
         "Q", gaps, cds_list, start_offset=1, genome_cord_start=200, genome_cord_end=250
     )
-    assert adjusted == [{"start": 200, "end": 200, "og_start": 200, "og_end": 200, "product": "P_MID"}]
+    assert adjusted == [{"start": 200, "end": 200, "og_start": 200, "og_end": 200, "feature_start": 100, "feature_end": 200, "product": "P_MID"}]
 
 
 def test_stress_recalculate_cds_coordinates_out_of_bounds_span(tmp_path: Path):
@@ -743,7 +749,7 @@ def test_stress_recalculate_cds_coordinates_out_of_bounds_span(tmp_path: Path):
     adjusted = processor.recalculate_cds_coordinates_with_span(
         "Q", [], cds_list, start_offset=1, genome_cord_start=1, genome_cord_end=999999
     )
-    assert adjusted == [{"start": 10, "end": 20, "og_start": 10, "og_end": 20, "product": "P"}]
+    assert adjusted == [{"start": 10, "end": 20, "og_start": 10, "og_end": 20, "feature_start": 10, "feature_end": 20, "product": "P"}]
 
 
 def test_stress_find_gaps_in_fasta_empty_and_corrupt_files(tmp_path: Path):

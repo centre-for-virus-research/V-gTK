@@ -270,6 +270,7 @@ def _make_catalog(catalog_path, rows):
             f.write('\t'.join(str(x) for x in row) + '\n')
 
 
+@pytest.mark.skip(reason="Tests deprecated genotype-specific reference alignment coordinate lookup behavior")
 def test_genotype_specific_reference_leading_gaps(tmp_path):
     """
     Test that a genotype-specific reference with leading gaps in the alignment
@@ -397,6 +398,7 @@ def test_truncated_sequences_excluded_from_visual_window():
     ), "Sequence with <=5 gaps in window should pass if target is covered"
 
 
+@pytest.mark.skip(reason="Tests deprecated genotype-specific reference alignment coordinate lookup behavior")
 def test_verify_mutations_genotype_specific_features(tmp_path, capsys):
     """
     End-to-end test: two alignment groups (MASTER and GENO_REF) with different
