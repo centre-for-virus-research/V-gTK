@@ -440,9 +440,9 @@ class CreateSqliteDB:
 
             source = str(row.get("source", "")).strip()
             if not source:
-                source = str(row.get("tree_type", "")).strip()
-            if not source:
                 source = "tree_dir"
+            tree_type = str(row.get("tree_type", "")).strip()
+            tree_model = str(row.get("tree_model", "")).strip()
 
             segment_key = str(row.get("segment_key", "")).strip()
             if not segment_key:
@@ -467,8 +467,21 @@ class CreateSqliteDB:
                 continue
 
             conn.execute(
-                "INSERT INTO trees (name, source, segment_key, segment, newick, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (name, source, segment_key or None, segment or None, newick, created_at),
+                """
+                INSERT INTO trees
+                    (name, source, tree_type, tree_model, segment_key, segment, newick, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    name,
+                    source,
+                    tree_type or None,
+                    tree_model or None,
+                    segment_key or None,
+                    segment or None,
+                    newick,
+                    created_at,
+                ),
             )
             migrated += 1
 
@@ -476,6 +489,32 @@ class CreateSqliteDB:
         if migrated:
             print(f"[CreateSqliteDB] Migrated {migrated} legacy rows from 'tree' into 'trees'")
         print("[CreateSqliteDB] Removed legacy table 'tree'; using only 'trees'")
+
+    def _ensure_trees_table(self, conn) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trees (
+                name TEXT,
+                source TEXT,
+                tree_type TEXT,
+                tree_model TEXT,
+                segment_key TEXT,
+                segment TEXT,
+                newick TEXT,
+                created_at TEXT,
+                description TEXT
+            );
+            """
+        )
+
+        existing_cols = set(self._table_columns(conn, "trees"))
+        for col, col_type in [
+            ("tree_type", "TEXT"),
+            ("tree_model", "TEXT"),
+            ("description", "TEXT"),
+        ]:
+            if col not in existing_cols:
+                conn.execute(f"ALTER TABLE trees ADD COLUMN {col} {col_type};")
 
     @staticmethod
     def _normalize_key_series(s: pd.Series) -> pd.Series:
@@ -822,9 +861,7 @@ class CreateSqliteDB:
         
         # Ensure tables for info/trees exist when we need them
         cursor.execute("PRAGMA foreign_keys = ON;")
-        cursor.execute(
-            "CREATE TABLE IF NOT EXISTS trees (name TEXT, source TEXT, segment_key TEXT, segment TEXT, newick TEXT, created_at TEXT, description TEXT);"
-        )
+        self._ensure_trees_table(conn)
         cursor.execute(
             "CREATE TABLE IF NOT EXISTS info (creation_type TEXT, date TEXT);"
         )
@@ -946,9 +983,8 @@ class CreateSqliteDB:
         tree_records = []
 
         # Add --tree_dir rows to the same canonical trees table.
-        # The tree_dir manifest has extra fields, so we map them to the common schema:
+        # Manifest columns are preserved as separate fields where possible:
         #   tree_name -> name
-        #   tree_type -> source
         #   chromosome -> segment_key
         #   segment_number -> segment
         if df_trees is not None and not df_trees.empty:
@@ -964,14 +1000,12 @@ class CreateSqliteDB:
                 tree_model = str(row.get("tree_model", "")).strip()
                 description = str(row.get("description", "")).strip()
 
-                source = tree_type or "tree_dir"
-                if tree_model:
-                    source = f"{source}_{tree_model}"
-
                 tree_records.append(
                     {
                         "name": tree_name or "tree_dir_tree",
-                        "source": source,
+                        "source": "tree_dir",
+                        "tree_type": tree_type or None,
+                        "tree_model": tree_model or None,
                         "segment_key": chromosome or None,
                         "segment": segment_number or self._segment_from_key(chromosome),
                         "newick": newick,
@@ -990,6 +1024,8 @@ class CreateSqliteDB:
                     {
                         "name": name,
                         "source": source,
+                        "tree_type": None,
+                        "tree_model": None,
                         "segment_key": None,
                         "segment": None,
                         "newick": newick,
@@ -1009,6 +1045,8 @@ class CreateSqliteDB:
                 {
                     "name": nm,
                     "source": entry["source"],
+                    "tree_type": None,
+                    "tree_model": None,
                     "segment_key": seg_key,
                     "segment": seg_num,
                     "newick": newick,
@@ -1025,6 +1063,10 @@ class CreateSqliteDB:
                 + "|"
                 + df_tree_ins["name"].fillna("").astype(str).str.strip()
                 + "|"
+                + df_tree_ins["tree_type"].fillna("").astype(str).str.strip()
+                + "|"
+                + df_tree_ins["tree_model"].fillna("").astype(str).str.strip()
+                + "|"
                 + df_tree_ins["segment_key"].fillna("").astype(str).str.strip()
                 + "|"
                 + df_tree_ins["segment"].fillna("").astype(str).str.strip()
@@ -1035,30 +1077,67 @@ class CreateSqliteDB:
                 cursor.execute("DELETE FROM trees;")
                 for _, tr in df_tree_ins.iterrows():
                     cursor.execute(
-                        "INSERT INTO trees (name, source, segment_key, segment, newick, created_at, description) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (tr["name"], tr["source"], tr["segment_key"], tr["segment"], tr["newick"], tr["created_at"], tr.get("description")),
+                        """
+                        INSERT INTO trees
+                            (name, source, tree_type, tree_model, segment_key, segment, newick, created_at, description)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            tr["name"],
+                            tr["source"],
+                            tr["tree_type"],
+                            tr["tree_model"],
+                            tr["segment_key"],
+                            tr["segment"],
+                            tr["newick"],
+                            tr["created_at"],
+                            tr.get("description"),
+                        ),
                     )
             else:
                 # fetch existing keys
-                cursor.execute("SELECT source, name, segment_key, segment FROM trees;")
+                cursor.execute("SELECT source, name, tree_type, tree_model, segment_key, segment FROM trees;")
                 existing = set()
-                for s, n, sk, sg in cursor.fetchall():
+                for s, n, tt, tm, sk, sg in cursor.fetchall():
                     existing.add(
-                        (str(s or "").strip(), str(n or "").strip(), str(sk or "").strip(), str(sg or "").strip())
+                        (
+                            str(s or "").strip(),
+                            str(n or "").strip(),
+                            str(tt or "").strip(),
+                            str(tm or "").strip(),
+                            str(sk or "").strip(),
+                            str(sg or "").strip(),
+                        )
                     )
                 appended = 0
                 for _, tr in df_tree_ins.iterrows():
                     key = (
                         str(tr["source"] or "").strip(),
                         str(tr["name"] or "").strip(),
+                        str(tr["tree_type"] or "").strip(),
+                        str(tr["tree_model"] or "").strip(),
                         str(tr["segment_key"] or "").strip(),
                         str(tr["segment"] or "").strip(),
                     )
                     if key in existing:
                         continue
                     cursor.execute(
-                        "INSERT INTO trees (name, source, segment_key, segment, newick, created_at, description) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (tr["name"], tr["source"], tr["segment_key"], tr["segment"], tr["newick"], tr["created_at"], tr["description"]),
+                        """
+                        INSERT INTO trees
+                            (name, source, tree_type, tree_model, segment_key, segment, newick, created_at, description)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            tr["name"],
+                            tr["source"],
+                            tr["tree_type"],
+                            tr["tree_model"],
+                            tr["segment_key"],
+                            tr["segment"],
+                            tr["newick"],
+                            tr["created_at"],
+                            tr.get("description"),
+                        ),
                     )
                     appended += 1
                 if appended:
