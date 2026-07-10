@@ -140,7 +140,7 @@ def _add_compact_mutation_tables(db_path: Path):
         conn.close()
 
 
-def _create_segmented_subsample_db(db_path: Path):
+def _create_segmented_subsample_db(db_path: Path, tree_source: str = "usher"):
     conn = sqlite3.connect(str(db_path))
     try:
         cur = conn.cursor()
@@ -177,8 +177,75 @@ def _create_segmented_subsample_db(db_path: Path):
         cur.executemany(
             "INSERT INTO trees(name, source, newick, segment, segment_key) VALUES (?, ?, ?, ?, ?)",
             [
-                ("usher_seg1", "usher", "(SEG1_A:0.1);", "1", "refset_1"),
-                ("usher_seg2", "usher", "(SEG2_A:0.1);", "2", "refset_2"),
+                (f"{tree_source}_seg1", tree_source, "(SEG1_A:0.1);", "1", "refset_1"),
+                (f"{tree_source}_seg2", tree_source, "(SEG2_A:0.1);", "2", "refset_2"),
+            ],
+        )
+        cur.execute("CREATE TABLE update_batches (batch_id TEXT, mode TEXT, started_at TEXT, finished_at TEXT)")
+        cur.execute("INSERT INTO update_batches(batch_id, mode, started_at, finished_at) VALUES ('b1', 'update', '2026-01-01', '2026-01-01')")
+        cur.execute("CREATE TABLE update_table_deltas (batch_id TEXT, table_name TEXT, before_count INTEGER, after_count INTEGER, delta INTEGER)")
+        cur.execute("INSERT INTO update_table_deltas(batch_id, table_name, before_count, after_count, delta) VALUES ('b1', 'meta_data', 0, 4, 4)")
+        cur.execute("CREATE TABLE features (accession TEXT, segment TEXT)")
+        cur.executemany(
+            "INSERT INTO features(accession, segment) VALUES (?, ?)",
+            [("SEG1_A", "1"), ("SEG1_B", "1"), ("SEG2_A", "2"), ("SEG2_B", "2")],
+        )
+        cur.execute("CREATE TABLE insertions (primary_accession TEXT)")
+        cur.executemany(
+            "INSERT INTO insertions(primary_accession) VALUES (?)",
+            [("SEG1_A",), ("SEG1_B",), ("SEG2_A",), ("SEG2_B",)],
+        )
+        cur.execute("CREATE TABLE host_taxa (primary_accession TEXT)")
+        cur.executemany(
+            "INSERT INTO host_taxa(primary_accession) VALUES (?)",
+            [("SEG1_A",), ("SEG1_B",), ("SEG2_A",), ("SEG2_B",)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _create_segmented_iqtree_centroid_db(db_path: Path):
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE meta_data (primary_accession TEXT, accession_type TEXT, segment TEXT, cluster_98pct TEXT, exclusion_status TEXT, exclusion_criteria TEXT)"
+        )
+        cur.executemany(
+            "INSERT INTO meta_data(primary_accession, accession_type, segment, cluster_98pct, exclusion_status, exclusion_criteria) VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                ("SEG1_A", "query", "1", "SEG1_A", "", ""),
+                ("SEG1_B", "query", "1", "SEG1_A", "", ""),
+                ("SEG1_REF", "reference", "1", "", "1", "reference_context"),
+                ("SEG2_A", "query", "2", "SEG2_A", "", ""),
+                ("SEG2_B", "query", "2", "SEG2_A", "", ""),
+                ("SEG2_MASTER", "master", "2", "", "1", "reference_context"),
+            ],
+        )
+        cur.execute("CREATE TABLE sequences (header TEXT, sequence TEXT)")
+        cur.executemany(
+            "INSERT INTO sequences(header, sequence) VALUES (?, ?)",
+            [("SEG1_A", "ATGC"), ("SEG1_B", "ATGT"), ("SEG1_REF", "ATGA"), ("SEG2_A", "ATGA"), ("SEG2_B", "ATGG"), ("SEG2_MASTER", "ATGC")],
+        )
+        cur.execute(
+            "CREATE TABLE sequence_alignment (primary_accession TEXT, sequence_id TEXT, alignment_name TEXT, segment TEXT)"
+        )
+        cur.executemany(
+            "INSERT INTO sequence_alignment(primary_accession, sequence_id, alignment_name, segment) VALUES (?, ?, ?, ?)",
+            [
+                ("SEG1_A", "SEG1_A", "SEG1_A", "1"),
+                ("SEG1_B", "SEG1_B", "SEG1_B", "1"),
+                ("SEG2_A", "SEG2_A", "SEG2_A", "2"),
+                ("SEG2_B", "SEG2_B", "SEG2_B", "2"),
+            ],
+        )
+        cur.execute("CREATE TABLE trees (name TEXT, source TEXT, newick TEXT, segment TEXT, segment_key TEXT)")
+        cur.executemany(
+            "INSERT INTO trees(name, source, newick, segment, segment_key) VALUES (?, ?, ?, ?, ?)",
+            [
+                ("iqtree_seg1", "iqtree", "(SEG1_A:0.1,SEG1_REF:0.2);", "1", "refset_1"),
+                ("iqtree_seg2", "iqtree", "(SEG2_A:0.1,SEG2_MASTER:0.2);", "2", "refset_2"),
             ],
         )
         cur.execute("CREATE TABLE update_batches (batch_id TEXT, mode TEXT, started_at TEXT, finished_at TEXT)")
@@ -770,6 +837,58 @@ def test_validate_db_tree_segmented_test_mode_allows_subsampled_trees(tmp_path: 
 
     assert result.returncode == 0
     assert "allowing per-segment UShER trees to be subsampled" in result.stdout
+
+
+def test_validate_db_tree_segmented_test_mode_allows_subsampled_iqtree_trees(tmp_path: Path):
+    db_path = tmp_path / "segmented_iqtree_subsample.db"
+    _create_segmented_subsample_db(db_path, tree_source="iqtree")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--db",
+            str(db_path),
+            "--outdir",
+            str(tmp_path / "out"),
+            "--check-update-integrity",
+            "--expect-segment-trees",
+            "--segment-tree-source",
+            "iqtree",
+            "--test-mode",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0
+    assert "allowing per-segment IQ-TREE trees to be subsampled" in result.stdout
+
+
+def test_validate_db_tree_segmented_iqtree_centroid_only_comparison(tmp_path: Path):
+    db_path = tmp_path / "segmented_iqtree_centroid.db"
+    _create_segmented_iqtree_centroid_db(db_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--db",
+            str(db_path),
+            "--outdir",
+            str(tmp_path / "out"),
+            "--check-update-integrity",
+            "--expect-segment-trees",
+            "--segment-tree-source",
+            "iqtree",
+            "--test-mode",
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0
+    assert "IQ-TREE segmented validation: comparing per-segment centroid nodes only" in result.stdout
 
 
 def test_validate_db_tree_segmented_non_test_mode_rejects_subsampled_trees(tmp_path: Path):

@@ -49,11 +49,15 @@ def test_workflow_update_glue_contains_skip_and_guard():
 
     assert "def UPDATE_MODE = params.update_db" in text
     assert "def TREE_FREE_MODE = params.tree_free.toString().toBoolean()" in text
+    assert "def BASE_TREE_ONLY_MODE = params.base_tree_only.toString().toBoolean()" in text
     assert "params.tree_free=true with params.update_db: skipping tree placement and retaining any existing trees already stored in the update DB" in text
+    assert "params.base_tree_only=true: skipping USHER placement and storing IQ-TREE outputs in the DB" in text
     assert "update DB path matches output DB path" in text
     assert "if( UPDATE_MODE )" in text and "USHER_PLACEMENT(usher_input_ch)" in text
     assert "if( TREE_FREE_MODE )" in text
+    assert "if( BASE_TREE_ONLY_MODE )" in text
     assert 'EXTRA_ARGS="${EXTRA_ARGS} --allow-no-trees"' in text
+    assert 'EXTRA_ARGS="${EXTRA_ARGS} --segment-tree-source iqtree"' in text
     assert "MMSEQS_CLUSTERING(cluster_input_ch)" in text
     assert "REF_FASTA_FROM_UPDATE_DB" not in text
     assert "REF_LIST_FROM_UPDATE_DB" not in text
@@ -67,6 +71,7 @@ def test_workflow_update_glue_contains_skip_and_guard():
     assert "GENERATE_TABLES.out.host_taxa" not in text
     assert 'for USHER_DIR in usher_inputs/*; do' in text
     assert 'USHER_FILE=$(find -L usher_inputs -name "final-tree.nh" -print -quit || true)' not in text
+    assert 'find -L mmseq_inputs -type f -name "*_clusters.tsv" -print0 | sort -z | xargs -0 -r cat > "$MERGED_CLUSTER_TSV"' in text
     assert 'path "Taxa/names.dmp", emit: taxa_names' in text
     assert 'path "Taxa/nodes.dmp", emit: taxa_nodes' in text
     assert 'if [ "!{params.mutation_catalog}" != "null" ] && [ -n "!{params.mutation_catalog}" ]; then' in text
@@ -93,3 +98,5 @@ def test_nextflow_config_defines_mutation_defaults():
     assert "mutation_catalog  = null" in text
     assert "mutation_virus    = null" in text
     assert "tree_free       = false" in text
+    assert "base_tree_only  = false" in text
+    assert "segmented_base_tree" in text

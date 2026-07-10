@@ -958,6 +958,11 @@ def get_extra_tree_label(tree_source):
     return "Extra nodes in tree"
 
 
+def validation_fail(message):
+    print("[info] Validation status: FAIL")
+    raise SystemExit(message)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Validate SQLite DB contents against tree coverage and table consistency")
     parser.add_argument("--db", required=True, help="Path to SQLite DB")
@@ -971,6 +976,12 @@ def main(argv=None):
         "--expect-segment-trees",
         action="store_true",
         help="In segmented test mode, require at least one USHER tree per segment in meta_data",
+    )
+    parser.add_argument(
+        "--segment-tree-source",
+        choices=["usher", "iqtree"],
+        default="usher",
+        help="Tree source to use for segmented validation",
     )
     parser.add_argument(
         "--check-update-integrity",
@@ -1015,7 +1026,7 @@ def main(argv=None):
 
         tree_name, tree_source, newick = fetch_tree_newick(conn)
         if not newick and not args.allow_no_trees:
-            raise SystemExit("No tree found in DB (trees table is empty)")
+            validation_fail("No tree found in DB (trees table is empty)")
 
         tree_available = bool(newick)
         tree = None
@@ -1042,6 +1053,9 @@ def main(argv=None):
 
         cluster_col = find_cluster_column(meta_columns)
         centroid_set = set()
+        centroid_set_by_segment = {}
+        reference_master_set = set()
+        reference_master_set_by_segment = {}
         missing_centroids_in_tree = []
         extra_in_tree = []
         if cluster_col:
@@ -1053,9 +1067,33 @@ def main(argv=None):
                 for _, cluster_val in cluster_rows
                 if not is_cluster_placeholder(cluster_val)
             }
+            if "accession_type" in meta_columns:
+                cursor.execute(f"SELECT {args.accession_column}, segment, accession_type FROM meta_data")
+                for acc, seg, accession_type in cursor.fetchall():
+                    if not acc:
+                        continue
+                    accession_text = str(acc).strip()
+                    if not accession_text:
+                        continue
+                    accession_type_text = str(accession_type).strip().lower() if accession_type is not None else ""
+                    if accession_type_text not in {"reference", "master"}:
+                        continue
+                    reference_master_set.add(accession_text)
+                    seg_str = str(seg).strip() if seg is not None and str(seg).strip() else None
+                    if seg_str:
+                        reference_master_set_by_segment.setdefault(seg_str, set()).add(accession_text)
+            if args.segment_tree_source == "iqtree" and "segment" in meta_columns:
+                cursor.execute(f"SELECT {args.accession_column}, segment, {cluster_col} FROM meta_data")
+                for acc, seg, cluster_val in cursor.fetchall():
+                    if is_cluster_placeholder(cluster_val):
+                        continue
+                    seg_str = str(seg).strip() if seg is not None and str(seg).strip() else None
+                    if not seg_str:
+                        continue
+                    centroid_set_by_segment.setdefault(seg_str, set()).add(str(cluster_val).strip())
             if tree_available:
                 missing_centroids_in_tree = sorted(centroid_set - tree_terminals)
-                extra_in_tree = sorted(tree_terminals - centroid_set)
+                extra_in_tree = sorted(t for t in (tree_terminals - centroid_set) if t not in reference_master_set)
 
         missing_in_tree = sorted(expected_meta_set - tree_terminals) if tree_available else []
 
@@ -1092,8 +1130,8 @@ def main(argv=None):
         meta_count = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM sequences")
         seq_count = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM trees WHERE source='usher'")
-        usher_tree_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM trees WHERE source=?", (args.segment_tree_source,))
+        segment_tree_count = cursor.fetchone()[0]
 
         segment_count = None
         if "segment" in meta_columns:
@@ -1104,8 +1142,10 @@ def main(argv=None):
             segment_count = len(set(segment_values))
 
         segmented_validation_ok = False
+        iqtree_segment_report_lines = []
         if tree_available and args.expect_segment_trees and segment_count is not None and segment_count > 1:
-            usher_trees = fetch_trees(conn, source="usher")
+            segment_trees = fetch_trees(conn, source=args.segment_tree_source)
+            segment_tree_label = "UShER" if args.segment_tree_source == "usher" else "IQ-TREE"
 
             cursor.execute(f"SELECT {args.accession_column}, segment FROM meta_data")
             meta_rows = cursor.fetchall()
@@ -1126,7 +1166,7 @@ def main(argv=None):
                     accessions_by_segment.setdefault(seg_str, set()).add(str(acc))
 
             trees_by_segment = {}
-            for tr in usher_trees:
+            for tr in segment_trees:
                 seg = tr.get("segment")
                 seg_key = tr.get("segment_key")
                 if (seg is None or str(seg).strip() == "") and seg_key:
@@ -1142,16 +1182,30 @@ def main(argv=None):
             per_segment_missing = {}
             per_segment_extra = {}
             for seg in sorted(segments_in_meta):
-                expected_segment_accessions = accessions_by_segment.get(seg, set())
+                if args.segment_tree_source == "iqtree" and centroid_set_by_segment:
+                    expected_segment_accessions = centroid_set_by_segment.get(seg, set())
+                else:
+                    expected_segment_accessions = accessions_by_segment.get(seg, set())
                 tree_terms = trees_by_segment.get(seg, set())
                 missing_segment_accessions = sorted(expected_segment_accessions - tree_terms)
                 if missing_segment_accessions:
                     per_segment_missing[seg] = missing_segment_accessions
-                extra_segment_accessions = sorted(tree_terms - expected_segment_accessions)
+                segment_reference_master_set = reference_master_set_by_segment.get(seg, set())
+                extra_segment_accessions = sorted(t for t in (tree_terms - expected_segment_accessions) if t not in segment_reference_master_set)
                 if extra_segment_accessions:
                     per_segment_extra[seg] = extra_segment_accessions
+                if args.segment_tree_source == "iqtree":
+                    iqtree_segment_report_lines.append(
+                        f"[info] IQ-TREE segment {seg}: centroid_nodes_expected={len(expected_segment_accessions)} "
+                        f"centroid_nodes_observed={len(tree_terms)} missing_centroids={len(missing_segment_accessions)} "
+                        f"extra_tree_nodes={len(extra_segment_accessions)}"
+                    )
 
             print(f"[info] Segmented validation: meta segments={len(segments_in_meta)} tree segments={len(trees_by_segment)}")
+            if args.segment_tree_source == "iqtree" and centroid_set_by_segment:
+                print("[info] IQ-TREE segmented validation: comparing per-segment centroid nodes only")
+                for line in iqtree_segment_report_lines:
+                    print(line)
             if missing_segment_trees:
                 print(f"[info] Missing tree segments: {', '.join(missing_segment_trees[:10])}")
             if per_segment_missing:
@@ -1162,14 +1216,14 @@ def main(argv=None):
                 print(f"[info] Segment {first_seg} extra accessions in tree (first 10): {', '.join(per_segment_extra[first_seg][:10])}")
 
             if missing_segment_trees:
-                raise SystemExit(
-                    "Validation failed: segmented run expects at least one UShER tree per segment "
+                validation_fail(
+                    f"Validation failed: segmented run expects at least one {segment_tree_label} tree per segment "
                     f"(missing segments={', '.join(missing_segment_trees[:10])})"
                 )
             if per_segment_missing and not args.test_mode:
-                raise SystemExit("Validation failed: per-segment UShER tree is missing unfiltered accessions")
+                validation_fail(f"Validation failed: per-segment {segment_tree_label} tree is missing unfiltered accessions")
             if per_segment_missing and args.test_mode:
-                print("[info] Test mode: allowing per-segment UShER trees to be subsampled relative to meta_data accessions")
+                print(f"[info] Test mode: allowing per-segment {segment_tree_label} trees to be subsampled relative to meta_data accessions")
 
             segmented_validation_ok = True
 
@@ -1213,7 +1267,7 @@ def main(argv=None):
             report.write(f"Meta rows: {meta_count}\n")
             report.write(f"Sequence rows: {seq_count}\n")
             report.write(f"Tree terminals: {len(tree_terminals)}\n")
-            report.write(f"UShER tree rows: {usher_tree_count}\n")
+            report.write(f"{('UShER' if args.segment_tree_source == 'usher' else 'IQ-TREE')} tree rows: {segment_tree_count}\n")
             if segment_count is not None:
                 report.write(f"Segment count in meta_data: {segment_count}\n")
             if cluster_col:
@@ -1221,26 +1275,32 @@ def main(argv=None):
                 report.write(f"Centroid count: {len(centroid_set)}\n")
                 report.write(f"Missing centroids in tree: {len(missing_centroids_in_tree)}\n")
                 report.write(f"{extra_tree_label}: {len(extra_in_tree)}\n")
-            report.write(f"Missing in tree (meta_data -> tree): {len(missing_in_tree)}\n")
-            report.write(f"Missing in sequences (meta_data -> sequences): {len(missing_in_sequences)}\n")
-            report.write(f"Missing in meta_data (tree -> meta_data): {len(missing_in_meta)}\n")
+            if args.segment_tree_source == "iqtree" and cluster_col and segment_count is not None and segment_count > 1:
+                report.write("\n=== IQ-TREE Segment Validation ===\n")
+                report.write("Per-segment centroid-node checks only\n")
+                for line in iqtree_segment_report_lines:
+                    report.write(line + "\n")
+            else:
+                report.write(f"Missing in tree (meta_data -> tree): {len(missing_in_tree)}\n")
+                report.write(f"Missing in sequences (meta_data -> sequences): {len(missing_in_sequences)}\n")
+                report.write(f"Missing in meta_data (tree -> meta_data): {len(missing_in_meta)}\n")
 
-            if missing_in_tree:
-                report.write("\nMissing in tree (first 50):\n")
-                report.write("\n".join(missing_in_tree[:50]) + "\n")
-            if missing_in_sequences:
-                report.write("\nMissing in sequences (first 50):\n")
-                report.write("\n".join(missing_in_sequences[:50]) + "\n")
-            if missing_in_meta:
-                report.write("\nMissing in meta_data (first 50):\n")
-                report.write("\n".join(missing_in_meta[:50]) + "\n")
+                if missing_in_tree:
+                    report.write("\nMissing in tree (first 50):\n")
+                    report.write("\n".join(missing_in_tree[:50]) + "\n")
+                if missing_in_sequences:
+                    report.write("\nMissing in sequences (first 50):\n")
+                    report.write("\n".join(missing_in_sequences[:50]) + "\n")
+                if missing_in_meta:
+                    report.write("\nMissing in meta_data (first 50):\n")
+                    report.write("\n".join(missing_in_meta[:50]) + "\n")
 
-            if cluster_col and missing_centroids_in_tree:
-                report.write("\nMissing centroids in tree (first 50):\n")
-                report.write("\n".join(missing_centroids_in_tree[:50]) + "\n")
-            if cluster_col and extra_in_tree:
-                report.write(f"\n{extra_tree_label} (first 50):\n")
-                report.write("\n".join(extra_in_tree[:50]) + "\n")
+                if cluster_col and missing_centroids_in_tree:
+                    report.write("\nMissing centroids in tree (first 50):\n")
+                    report.write("\n".join(missing_centroids_in_tree[:50]) + "\n")
+                if cluster_col and extra_in_tree:
+                    report.write(f"\n{extra_tree_label} (first 50):\n")
+                    report.write("\n".join(extra_in_tree[:50]) + "\n")
 
             report.write("\nTable-level accession coverage:\n")
             table_list = ["meta_data", "sequences", "sequence_alignment", "features", "insertions", "host_taxa"]
@@ -1315,6 +1375,8 @@ def main(argv=None):
                     report.write(format_mutation_integrity_result(result))
                     report.write("\n\n")
 
+            report.write("\nValidation status: PASS\n")
+
         if missing_in_tree:
             with open(missing_tree_path, "w", encoding="utf-8") as handle:
                 handle.write("\n".join(missing_in_tree) + "\n")
@@ -1340,13 +1402,18 @@ def main(argv=None):
         print(f"[info] Accepted distinct accessions: {len(accepted_accessions)}")
         print(f"[info] Filtered distinct accessions: {len(filtered_accessions)}")
         print(f"[info] Accepted + filtered distinct accessions: {len(accepted_filtered_union)}")
-        print(
-            f"[info] Sequence counts by DB storage/origin location:\n"
-            f"[info]   - metadata entries (meta_data table): {meta_count} (includes query sequences, references, and excluded rows)\n"
-            f"[info]   - raw sequence records (sequences table): {seq_count} (raw sequences for non-excluded query/reference entries)\n"
-            f"[info]   - tree leaves (trees table terminals): {len(tree_terminals)}"
-        )
-        print(f"[info] UShER tree rows: {usher_tree_count}")
+        if args.segment_tree_source == "iqtree" and cluster_col and segment_count is not None and segment_count > 1:
+            print(
+                f"[info] IQ-TREE segmented validation: metadata rows={meta_count}, sequences={seq_count}, tree terminals={len(tree_terminals)}, iqtree rows={segment_tree_count}"
+            )
+        else:
+            print(
+                f"[info] Sequence counts by DB storage/origin location:\n"
+                f"[info]   - metadata entries (meta_data table): {meta_count} (includes query sequences, references, and excluded rows)\n"
+                f"[info]   - raw sequence records (sequences table): {seq_count} (raw sequences for non-excluded query/reference entries)\n"
+                f"[info]   - tree leaves (trees table terminals): {len(tree_terminals)}"
+            )
+            print(f"[info] {('UShER' if args.segment_tree_source == 'usher' else 'IQ-TREE')} tree rows: {segment_tree_count}")
         if segment_count is not None:
             print(f"[info] Segment count in meta_data: {segment_count}")
         print("[info] Running DB consistency checks across tables:")
@@ -1408,22 +1475,27 @@ def main(argv=None):
                                 f"cds=({ex['cds_start']},{ex['cds_end']}) reason={reason}"
                             )
         if cluster_col:
-            print(f"[info] Cluster column: {cluster_col}, Centroid count: {len(centroid_set)}")
-            print(f"[info] Missing centroids in tree: {len(missing_centroids_in_tree)}")
-            print(f"[info] {extra_tree_label}: {len(extra_in_tree)}")
-        print(f"[info] Missing in tree: {len(missing_in_tree)}")
-        print(f"[info] Missing in sequences: {len(missing_in_sequences)}")
-        print(f"[info] Missing in meta_data: {len(missing_in_meta)}")
-        if missing_in_tree:
-            print(f"[info] Missing in tree (first 10): {', '.join(missing_in_tree[:10])}")
-        if missing_in_sequences:
-            print(f"[info] Missing in sequences (first 10): {', '.join(missing_in_sequences[:10])}")
-        if missing_in_meta:
-            print(f"[info] Missing in meta_data (first 10): {', '.join(missing_in_meta[:10])}")
-        if cluster_col and missing_centroids_in_tree:
-            print(f"[info] Missing centroids in tree (first 10): {', '.join(missing_centroids_in_tree[:10])}")
-        if cluster_col and extra_in_tree:
-            print(f"[info] {extra_tree_label} (first 10): {', '.join(extra_in_tree[:10])}")
+            if args.segment_tree_source == "iqtree" and segment_count is not None and segment_count > 1:
+                print("[info] IQ-TREE segmented validation: per-segment centroid-node checks only")
+                for line in iqtree_segment_report_lines:
+                    print(line)
+            else:
+                print(f"[info] Cluster column: {cluster_col}, Centroid count: {len(centroid_set)}")
+                print(f"[info] Missing centroids in tree: {len(missing_centroids_in_tree)}")
+                print(f"[info] {extra_tree_label}: {len(extra_in_tree)}")
+                print(f"[info] Missing in tree: {len(missing_in_tree)}")
+                print(f"[info] Missing in sequences: {len(missing_in_sequences)}")
+                print(f"[info] Missing in meta_data: {len(missing_in_meta)}")
+                if missing_in_tree:
+                    print(f"[info] Missing in tree (first 10): {', '.join(missing_in_tree[:10])}")
+                if missing_in_sequences:
+                    print(f"[info] Missing in sequences (first 10): {', '.join(missing_in_sequences[:10])}")
+                if missing_in_meta:
+                    print(f"[info] Missing in meta_data (first 10): {', '.join(missing_in_meta[:10])}")
+                if missing_centroids_in_tree:
+                    print(f"[info] Missing centroids in tree (first 10): {', '.join(missing_centroids_in_tree[:10])}")
+                if extra_in_tree:
+                    print(f"[info] {extra_tree_label} (first 10): {', '.join(extra_in_tree[:10])}")
 
         fig = plt.figure(figsize=(12, 18))
         ax = fig.add_subplot(1, 1, 1)
@@ -1439,23 +1511,23 @@ def main(argv=None):
         overlap_count = len(meta_set & tree_terminals)
         disjoint_sets = overlap_count == 0 and len(meta_set) > 0 and len(tree_terminals) > 0
 
-        if args.test_mode and tree_source == "usher" and disjoint_sets:
+        if args.test_mode and tree_source == args.segment_tree_source and disjoint_sets:
             print(
-                "[warn] Test mode: tree terminals and meta_data are disjoint; "
+                f"[warn] Test mode: tree terminals and meta_data are disjoint for {args.segment_tree_source}; "
                 "treating as no-placeable-queries scenario and not failing validation."
             )
             return
 
         if tree_available and args.expect_segment_trees and segment_count is not None and segment_count > 1 and not segmented_validation_ok:
-            if usher_tree_count < segment_count:
-                raise SystemExit(
-                    "Validation failed: segmented run expects at least one UShER tree per segment "
-                    f"(segments={segment_count}, usher_trees={usher_tree_count})"
+            if segment_tree_count < segment_count:
+                validation_fail(
+                    f"Validation failed: segmented run expects at least one {('UShER' if args.segment_tree_source == 'usher' else 'IQ-TREE')} tree per segment "
+                    f"(segments={segment_count}, trees={segment_tree_count})"
                 )
 
         if args.check_update_integrity:
             if not table_exists(conn, "update_batches") or not table_exists(conn, "update_table_deltas"):
-                raise SystemExit("Validation failed: update audit tables are missing")
+                validation_fail("Validation failed: update audit tables are missing")
             cursor.execute("SELECT batch_id FROM update_batches ORDER BY rowid DESC LIMIT 1")
             row = cursor.fetchone()
             if row:
@@ -1463,9 +1535,9 @@ def main(argv=None):
                 cursor.execute("SELECT table_name, delta FROM update_table_deltas WHERE batch_id=?", (batch_id,))
                 delta_rows = cursor.fetchall()
                 if len(delta_rows) == 0:
-                    raise SystemExit("Validation failed: no update_table_deltas rows found for latest batch")
+                    validation_fail("Validation failed: no update_table_deltas rows found for latest batch")
                 if all(int(delta) == 0 for _table_name, delta in delta_rows):
-                    raise SystemExit("Validation failed: latest update batch made no DB changes")
+                    validation_fail("Validation failed: latest update batch made no DB changes")
             if table_exists(conn, "features") and table_exists(conn, "meta_data"):
                 feature_cols = get_table_columns(conn, "features")
                 if "segment" in feature_cols and "segment" in meta_columns and "accession" in feature_cols:
@@ -1478,9 +1550,9 @@ def main(argv=None):
                         """
                     )
                     if cursor.fetchone()[0] > 0:
-                        raise SystemExit("Validation failed: segment contamination detected in features table")
+                        validation_fail("Validation failed: segment contamination detected in features table")
             if result_failed(feature_integrity_result):
-                raise SystemExit("Validation failed: feature projection integrity check failed")
+                validation_fail("Validation failed: feature projection integrity check failed")
 
         failed_consistency_checks = [title for title, result in consistency_results.items() if result_failed(result)]
         failed_mutation_checks = [result["title"] for result in mutation_integrity_results if result_failed(result)]
@@ -1488,29 +1560,31 @@ def main(argv=None):
             if args.test_mode and args.expect_segment_trees and segment_count is not None and segment_count > 1 and not args.check_update_integrity:
                 print("[info] Test mode: skipping strict DB consistency failures for segmented validation run")
             else:
-                raise SystemExit(
+                validation_fail(
                     "Validation failed: DB consistency checks failed for " + ", ".join(failed_consistency_checks + failed_mutation_checks)
                 )
 
         if not tree_available:
             return
 
-        if tree_source == "usher":
+        if tree_source == args.segment_tree_source:
             if segmented_validation_ok:
                 return
             if missing_in_tree or missing_in_sequences or missing_in_meta:
-                raise SystemExit("Validation failed: UShER tree does not match accessions")
+                validation_fail(f"Validation failed: {('UShER' if tree_source == 'usher' else 'IQ-TREE')} tree does not match accessions")
             if cluster_col and extra_in_tree:
                 print(
-                    "[info] UShER tree contains non-centroid leaves beyond the MMseqs centroid context "
+                    f"[info] {('UShER' if tree_source == 'usher' else 'IQ-TREE')} tree contains non-centroid leaves beyond the MMseqs centroid context "
                     f"({len(extra_in_tree)} leaves); full accession coverage passed."
                 )
         elif cluster_col:
             if missing_centroids_in_tree or extra_in_tree:
-                raise SystemExit("Validation failed: IQ-TREE does not match centroid set")
+                validation_fail("Validation failed: IQ-TREE does not match centroid set")
         else:
             if missing_in_tree or missing_in_sequences or missing_in_meta:
-                raise SystemExit("Validation failed: missing accessions detected")
+                validation_fail("Validation failed: missing accessions detected")
+
+        print("[info] Validation status: PASS")
 
     finally:
         conn.close()

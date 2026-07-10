@@ -99,7 +99,7 @@ def scriptDefinedParams = [
     "xml_dir", "update", "update_file", "update_db",
     "mmseqs_min_seq_id", "mmseqs_trim_cds_file","mutation_catalog", "mutation_virus",
     "gisaid_dir", "previous_db", "conda_path", "test_max_cluster_seqs", "max_threads", "ref_set_aligned",
-    "min_seq_length_ratio", "max_aln_gap_proportion", "tree_free"
+    "min_seq_length_ratio", "max_aln_gap_proportion", "tree_free", "base_tree_only"
     // Add all parameter names defined above
 ]
 
@@ -922,7 +922,6 @@ process CREATE_SQLITE_DB {
     if [ -d iqtree_inputs ]; then
         IQTREE_FILE=$(find -L iqtree_inputs -name "*.treefile" -print -quit || true)
     fi
-    CLUSTER_TSV=$(find -L . -name "*_clusters.tsv" -print -quit || true)
     USHER_FILE=""
     if [ -d usher_inputs ]; then
         for USHER_DIR in usher_inputs/*; do
@@ -949,6 +948,15 @@ process CREATE_SQLITE_DB {
     TREE_MANIFEST_ARG=""
     if [ "$(wc -l < "$TREE_MANIFEST")" -gt 1 ]; then
         TREE_MANIFEST_ARG="--tree_manifest $TREE_MANIFEST"
+    fi
+
+    CLUSTER_TSV=""
+    MERGED_CLUSTER_TSV="merged_mmseqs_clusters.tsv"
+    if [ -d mmseq_inputs ]; then
+        find -L mmseq_inputs -type f -name "*_clusters.tsv" -print0 | sort -z | xargs -0 -r cat > "$MERGED_CLUSTER_TSV"
+        if [ -s "$MERGED_CLUSTER_TSV" ]; then
+            CLUSTER_TSV="$MERGED_CLUSTER_TSV"
+        fi
     fi
 
     echo "Using IQ-TREE file: $IQTREE_FILE ; MMseqs cluster TSV: $CLUSTER_TSV ; USHER file: $USHER_FILE ; tree manifest rows: $(($(wc -l < "$TREE_MANIFEST")-1))"
@@ -1066,6 +1074,8 @@ process TEST_DB_VALIDATION {
     EXTRA_ARGS="${EXTRA_ARGS} --check-update-integrity"
     if [ "!{params.tree_free}" = "true" ]; then
         EXTRA_ARGS="${EXTRA_ARGS} --allow-no-trees"
+    elif [ "!{params.base_tree_only}" = "true" ]; then
+        EXTRA_ARGS="${EXTRA_ARGS} --segment-tree-source iqtree"
     fi
 
     # Merged DB validation: table consistency + tree/update integrity checks
@@ -1206,6 +1216,15 @@ workflow {
     
     def UPDATE_MODE = params.update_db && params.update_db != 'null'
     def TREE_FREE_MODE = params.tree_free.toString().toBoolean()
+    def BASE_TREE_ONLY_MODE = params.base_tree_only.toString().toBoolean()
+
+    if( TREE_FREE_MODE && BASE_TREE_ONLY_MODE ){
+        error("ERROR: params.tree_free and params.base_tree_only are mutually exclusive")
+    }
+
+    if( UPDATE_MODE && BASE_TREE_ONLY_MODE ){
+        error("ERROR: params.base_tree_only is not supported with params.update_db")
+    }
 
     if( UPDATE_MODE ){
         def updateDbFile = file(params.update_db)
@@ -1376,45 +1395,49 @@ workflow {
                 }
 
             IQ_TREE(mmseq_tree_input_ch)
-            
-            // Join the channels by segment name for USHER_PLACEMENT
-            // Create tuples of (basename, file) for proper matching
-            mmseq_with_key = MMSEQS_CLUSTERING.out.mmseq_clusters
-                .map { dir ->
-                    def key = dir.name
-                        .replaceFirst(/^MMseqClusters_/, '')
-                        .replaceFirst(/_dedup$/, '')
-                        .tokenize('.')[0]
-                    [key, dir]
-                }
-                
-            iqtree_with_key = IQ_TREE.out.iqtree_out
-                .map { dir ->
-                    def key = dir.name
-                        .replaceFirst(/^IQTree_MMseqClusters_/, '')
-                        .replaceFirst(/_dedup$/, '')
-                        .tokenize('.')[0]
-                    [key, dir]
-                }
-            dedup_with_key = cluster_input_ch
-                .map { fasta ->
-                    def key = fasta.name
-                        .replaceFirst(/_dedup\.fasta$/, '')
-                        .tokenize('.')[0]
-                    [key, fasta]
-                }
-            
-            // Join the three channels by their segment key
-            usher_input_ch = mmseq_with_key
-                .join(iqtree_with_key)
-                .join(dedup_with_key)
-                .map { key, mmseq_dir, iqtree_dir, dedup_fasta -> 
-                    tuple(mmseq_dir.toString(), iqtree_dir.toString(), dedup_fasta, "Usher_${mmseq_dir.name}")
-                }
-
             iqtree_collected = IQ_TREE.out.iqtree_out.collect()
-            USHER_PLACEMENT(usher_input_ch)
-            usher_collected = USHER_PLACEMENT.out.usher_out.collect()
+            if( BASE_TREE_ONLY_MODE ){
+                log.warn("params.base_tree_only=true: skipping USHER placement and storing IQ-TREE outputs in the DB")
+                usher_collected = Channel.value([])
+            } else {
+                // Join the channels by segment name for USHER_PLACEMENT
+                // Create tuples of (basename, file) for proper matching
+                mmseq_with_key = MMSEQS_CLUSTERING.out.mmseq_clusters
+                    .map { dir ->
+                        def key = dir.name
+                            .replaceFirst(/^MMseqClusters_/, '')
+                            .replaceFirst(/_dedup$/, '')
+                            .tokenize('.')[0]
+                        [key, dir]
+                    }
+
+                iqtree_with_key = IQ_TREE.out.iqtree_out
+                    .map { dir ->
+                        def key = dir.name
+                            .replaceFirst(/^IQTree_MMseqClusters_/, '')
+                            .replaceFirst(/_dedup$/, '')
+                            .tokenize('.')[0]
+                        [key, dir]
+                    }
+                dedup_with_key = cluster_input_ch
+                    .map { fasta ->
+                        def key = fasta.name
+                            .replaceFirst(/_dedup\.fasta$/, '')
+                            .tokenize('.')[0]
+                        [key, fasta]
+                    }
+
+                // Join the three channels by their segment key
+                usher_input_ch = mmseq_with_key
+                    .join(iqtree_with_key)
+                    .join(dedup_with_key)
+                    .map { key, mmseq_dir, iqtree_dir, dedup_fasta ->
+                        tuple(mmseq_dir.toString(), iqtree_dir.toString(), dedup_fasta, "Usher_${mmseq_dir.name}")
+                    }
+
+                USHER_PLACEMENT(usher_input_ch)
+                usher_collected = USHER_PLACEMENT.out.usher_out.collect()
+            }
         }
     }
 
