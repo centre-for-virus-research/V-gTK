@@ -1013,10 +1013,14 @@ class CreateSqliteDB:
 				if acc and seg and acc not in accession_to_segment:
 					accession_to_segment[acc] = seg
 
+		is_single_segment = self._should_force_unsegmented_segment_one(conn, [df_meta_data, df_features, df_aln, df_insertions])
+
 		tree_records = []
 		for name, source, tree_path in [("veryfasttree", "veryfasttree", self.tree_file), ("iqtree", "iqtree", self.iqtree_file), ("usher", "usher", self.usher_tree)]:
 			newick = self._read_tree_file(tree_path)
 			if newick:
+				if is_single_segment and source == "usher":
+					continue
 				tree_records.append({"name": name, "source": source, "segment_key": None, "segment": None, "newick": newick})
 
 		for entry in self._load_tree_manifest(self.tree_manifest):
@@ -1028,7 +1032,28 @@ class CreateSqliteDB:
 			if seg_num is None:
 				seg_num = self._segment_from_key(seg_key)
 			name = entry.get("name") or f"{entry['source']}_{seg_key or 'tree'}"
+			if is_single_segment and entry.get("source") == "usher":
+				continue
 			tree_records.append({"name": name, "source": entry["source"], "segment_key": seg_key, "segment": seg_num, "newick": newick})
+
+		if is_single_segment:
+			usher_newick = None
+			if self.usher_tree:
+				usher_newick = self._read_tree_file(self.usher_tree)
+			if not usher_newick and self.tree_manifest:
+				for entry in self._load_tree_manifest(self.tree_manifest):
+					if entry.get("source") == "usher":
+						usher_newick = self._read_tree_file(entry["path"])
+						if usher_newick:
+							break
+			if usher_newick:
+				tree_records.append({
+					"name": "Usher_tree_full_segment_1",
+					"source": "usher",
+					"segment_key": None,
+					"segment": "1",
+					"newick": usher_newick
+				})
 
 		if tree_records:
 			df_tree = pd.DataFrame(tree_records)
@@ -1037,7 +1062,11 @@ class CreateSqliteDB:
 				df_tree.to_sql("trees", conn, if_exists="replace", index=False)
 			else:
 				if self._table_exists(conn, "trees"):
+					if is_single_segment:
+						conn.execute("DELETE FROM trees WHERE source = 'usher'")
 					for _, tr in df_tree.iterrows():
+						if is_single_segment and tr.get("source") == "usher":
+							continue
 						conn.execute(
 							"DELETE FROM trees WHERE COALESCE(source, '')=? AND COALESCE(name, '')=? AND COALESCE(segment_key, '')=? AND COALESCE(segment, '')=?",
 							(

@@ -456,11 +456,11 @@ def test_create_sqlite_db_maps_tree_manifest_segment_from_refset_key(tmp_path: P
 
     conn = sqlite3.connect(tmp_path / "SqliteDB" / "testdb_manifest_segment.db")
     cur = conn.cursor()
-    cur.execute("SELECT source, segment_key, segment FROM trees WHERE source='usher' LIMIT 1")
+    cur.execute("SELECT name, source, segment_key, segment FROM trees WHERE source='usher' LIMIT 1")
     row = cur.fetchone()
     conn.close()
 
-    assert row == ("usher", "refset_1_aln_merged_MSA", "1")
+    assert row == ("Usher_tree_full_segment_1", "usher", None, "1")
 
 
 def test_create_sqlite_db_preserves_multi_segment_rows_and_tree_segments(tmp_path: Path):
