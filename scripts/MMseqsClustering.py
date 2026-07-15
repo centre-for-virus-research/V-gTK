@@ -65,17 +65,17 @@ def run_mmseqs_clustering(input_fasta, output_dir, min_seq_id, threads=8):
     cluster_seq_path = os.path.join(segments_db_dir, f"{base_name}_cluster_seq")
     cluster_rep_path = os.path.join(segments_db_dir, f"{base_name}_cluster_rep")
 
-    subprocess.run(["mmseqs", "createdb", input_fasta, db_path], check=True)
+    subprocess.run(["mmseqs", "createdb", input_fasta, db_path, "--threads", str(threads)], check=True)
     subprocess.run([
         "mmseqs", "cluster",
         "--min-seq-id", str(min_seq_id),
         db_path, cluster_path, tmp_dir,
-        "--threads", str(threads) ,'--cov-mode', '2', '--cluster-mode', '2'
+        "--threads", str(threads), '--cov-mode', '2', '--cluster-mode', '2'
     ], check=True)
     tsv_output = os.path.join(mmseqs_dir, f"{base_name}_clusters.tsv")
-    subprocess.run(["mmseqs", "createtsv", db_path, db_path, cluster_path, tsv_output], check=True)
+    subprocess.run(["mmseqs", "createtsv", db_path, db_path, cluster_path, tsv_output, "--threads", str(threads)], check=True)
 
-    subprocess.run(["mmseqs", "createseqfiledb", db_path, cluster_path, cluster_seq_path], check=True)
+    subprocess.run(["mmseqs", "createseqfiledb", db_path, cluster_path, cluster_seq_path, "--threads", str(threads)], check=True)
     subprocess.run(["mmseqs", "result2flat", db_path, db_path, cluster_seq_path, f"{cluster_seq_path}.fasta"], check=True)
 
     subprocess.run(["mmseqs", "createsubdb", cluster_path, db_path, cluster_rep_path], check=True)

@@ -13,7 +13,7 @@ from FastaHandler import RemoveRedundantSequence
 from ExportRefListFromUpdateDb import load_master_accessions, load_master_accessions_from_file
 
 class NextalignAlignment:
-	def __init__(self, gb_matrix, query_dir, ref_dir, ref_fa_file, master_seq_dir, tmp_dir, master_ref, nextalign_dir, reference_alignment, update_db=None):
+	def __init__(self, gb_matrix, query_dir, ref_dir, ref_fa_file, master_seq_dir, tmp_dir, master_ref, nextalign_dir, reference_alignment, update_db=None, max_threads=10):
 		self.gb_matrix = gb_matrix
 		self.query_dir = query_dir
 		self.ref_dir = ref_dir
@@ -24,6 +24,7 @@ class NextalignAlignment:
 		self.tmp_dir = tmp_dir
 		self.reference_alignment = reference_alignment
 		self.nextalign_dir = nextalign_dir
+		self.max_threads = max_threads
 		
 		# Cascading parameter profiles for dynamic relaxation
 		self.relaxation_profiles = [
@@ -133,6 +134,7 @@ class NextalignAlignment:
 				'--output-all', output_subdir,
 				'--output-basename', f'{accession}',
 				'--include-reference',
+				'--jobs', str(self.max_threads),
 				query_acc_path
 			]
 
@@ -170,6 +172,7 @@ class NextalignAlignment:
 			'--output-all', join(query_aln_op, f'{accession}'),
 			'--output-basename', f'{accession}',
 			'--include-reference',
+			'--jobs', str(self.max_threads),
 			query_acc_path
 		]
 		
@@ -295,7 +298,9 @@ if __name__ == "__main__":
 	parser.add_argument('-n', '--nextalign_dir', help='Nextalign output directory', default="Nextalign")
 	parser.add_argument('-ra', '--ref_alignment_file', help='Use custom reference alignment file')
 	parser.add_argument('--update_db', help='Existing update DB', default=None)
+	parser.add_argument('--max_threads', type=int, help='Maximum number of threads to use', default=10)
+ 
 	args = parser.parse_args()
 
-	processor = NextalignAlignment(args.gB_matrix, args.query_dir, args.ref_dir, args.ref_fa_file, args.master_seq_dir, args.tmp_dir, args.master_ref, args.nextalign_dir, args.ref_alignment_file, args.update_db)
+	processor = NextalignAlignment(args.gB_matrix, args.query_dir, args.ref_dir, args.ref_fa_file, args.master_seq_dir, args.tmp_dir, args.master_ref, args.nextalign_dir, args.ref_alignment_file, args.update_db, args.max_threads)
 	processor.process()

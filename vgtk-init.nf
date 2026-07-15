@@ -575,7 +575,7 @@ process NEXTALIGN_ALIGNMENT{
 
         python !{scripts_dir}/NextalignAlignment.py  -r !{ref_seqs}  \
          -q !{grouped_fasta_dir} -g !{genbank_matrix} -t . \
-         -f !{ref_seqs_fasta} -m "$TARGET_M" -ms !{master_seq_dir} ${EXTRA_ARGS}
+         -f !{ref_seqs_fasta} -m "$TARGET_M" -ms !{master_seq_dir} --max_threads !{params.max_threads} ${EXTRA_ARGS}
     '''
 }
 
@@ -681,8 +681,10 @@ process MMSEQS_CLUSTERING{
 
 process IQ_TREE{
     publishDir "${params.publish_dir}" , mode: 'copy'
-    cpus { params.is_segmented == 'Y' ? SEGMENT_PARALLEL_THREADS : MAX_THREADS }
-    maxForks HEAVY_TASK_MAX_FORKS
+    // Run one IQ-TREE job at a time with all available threads. For segmented
+    // viruses this avoids idle CPUs once the easier/faster segments finish.
+    cpus MAX_THREADS
+    maxForks 1
     input:
         tuple path(mmseq_cluster_dir), path(guide_tree_dir)
     output:
@@ -1342,8 +1344,12 @@ workflow {
     DEDUP_ALIGNMENT(padded_msa_ch)
 
     // Keep clustered input small in test mode to speed up CI and avoid long MMseqs runs
-    cluster_input_ch = DEDUP_ALIGNMENT.out.dedup_msa
-
+    if( params.test == "1" ){
+        TEST_SUBSAMPLE_CLUSTER_INPUT(DEDUP_ALIGNMENT.out.dedup_msa)
+        cluster_input_ch = TEST_SUBSAMPLE_CLUSTER_INPUT.out.dedup_for_cluster
+    } else {
+        cluster_input_ch = DEDUP_ALIGNMENT.out.dedup_msa
+    }
 
     def iqtree_collected
     def mmseq_collected
