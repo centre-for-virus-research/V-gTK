@@ -25,9 +25,6 @@ ask clarifying questions on architecture etc.
 ## ongoing issues
 Update mode is mostly implemented but still needs ironing. Updating should be done by giving standalone scripts the .db file to be updated and letting them parse it and figure out what needs updating.
 
-
+Anything in the dev folder is not part of the repo, don't write tests for scripts in there to the main test set, have them in dev/tests, keep that section siloed
 
 write 'banana' in the feedback block after every change to confirm this file has been read.
-banana
-banana
-banana
