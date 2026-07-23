@@ -78,26 +78,26 @@ MIN_SEQ_LENGTH_RATIO="0.05"
 # ---------------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --tax_id)                 TAX_ID="$2";               shift 2 ;;
-        --db_name)                DB_NAME="$2";              shift 2 ;;
-        --ref_list)               REF_LIST="$2";             shift 2 ;;
-        --publish_dir)            PUBLISH_DIR="$2";          shift 2 ;;
-        --is_segmented)           IS_SEGMENTED="$2";         shift 2 ;;
-        --test)                   TEST_MODE="$2";            shift 2 ;;
-        --update_db)              UPDATE_DB="$2";            shift 2 ;;
-        --xml_dir)                XML_DIR="$2";              shift 2 ;;
+        --tax_id)                 [[ $# -lt 2 ]] && { echo "[error] --tax_id requires a value" >&2; exit 1; }; TAX_ID="$2";               shift 2 ;;
+        --db_name)                [[ $# -lt 2 ]] && { echo "[error] --db_name requires a value" >&2; exit 1; }; DB_NAME="$2";              shift 2 ;;
+        --ref_list)               [[ $# -lt 2 ]] && { echo "[error] --ref_list requires a value" >&2; exit 1; }; REF_LIST="$2";             shift 2 ;;
+        --publish_dir)            [[ $# -lt 2 ]] && { echo "[error] --publish_dir requires a value" >&2; exit 1; }; PUBLISH_DIR="$2";          shift 2 ;;
+        --is_segmented)           [[ $# -lt 2 ]] && { echo "[error] --is_segmented requires a value" >&2; exit 1; }; IS_SEGMENTED="$2";         shift 2 ;;
+        --test)                   [[ $# -lt 2 ]] && { echo "[error] --test requires a value" >&2; exit 1; }; TEST_MODE="$2";            shift 2 ;;
+        --update_db)              [[ $# -lt 2 ]] && { echo "[error] --update_db requires a value" >&2; exit 1; }; UPDATE_DB="$2";            shift 2 ;;
+        --xml_dir)                [[ $# -lt 2 ]] && { echo "[error] --xml_dir requires a value" >&2; exit 1; }; XML_DIR="$2";              shift 2 ;;
         --tree_free)              TREE_FREE="true";          shift   ;;
-        --max_threads)            MAX_THREADS="$2";          shift 2 ;;
-        --mmseqs_min_seq_id)      MMSEQS_MIN_SEQ_ID="$2";   shift 2 ;;
-        --test_max_cluster_seqs)  TEST_MAX_CLUSTER_SEQS="$2"; shift 2 ;;
-        --email)                  EMAIL="$2";                shift 2 ;;
-        --mutation_catalog)       MUTATION_CATALOG="$2";     shift 2 ;;
-        --mutation_virus)         MUTATION_VIRUS="$2";       shift 2 ;;
-        --max_aln_gap_proportion) MAX_ALN_GAP_PROPORTION="$2"; shift 2 ;;
-        --min_seq_length_ratio)   MIN_SEQ_LENGTH_RATIO="$2";  shift 2 ;;
-        --start_step)             START_STEP="$2";             shift 2 ;;
+        --max_threads)            [[ $# -lt 2 ]] && { echo "[error] --max_threads requires a value" >&2; exit 1; }; MAX_THREADS="$2";          shift 2 ;;
+        --mmseqs_min_seq_id)      [[ $# -lt 2 ]] && { echo "[error] --mmseqs_min_seq_id requires a value" >&2; exit 1; }; MMSEQS_MIN_SEQ_ID="$2";   shift 2 ;;
+        --test_max_cluster_seqs)  [[ $# -lt 2 ]] && { echo "[error] --test_max_cluster_seqs requires a value" >&2; exit 1; }; TEST_MAX_CLUSTER_SEQS="$2"; shift 2 ;;
+        --email)                  [[ $# -lt 2 ]] && { echo "[error] --email requires a value" >&2; exit 1; }; EMAIL="$2";                shift 2 ;;
+        --mutation_catalog)       [[ $# -lt 2 ]] && { echo "[error] --mutation_catalog requires a value" >&2; exit 1; }; MUTATION_CATALOG="$2";     shift 2 ;;
+        --mutation_virus)         [[ $# -lt 2 ]] && { echo "[error] --mutation_virus requires a value" >&2; exit 1; }; MUTATION_VIRUS="$2";       shift 2 ;;
+        --max_aln_gap_proportion) [[ $# -lt 2 ]] && { echo "[error] --max_aln_gap_proportion requires a value" >&2; exit 1; }; MAX_ALN_GAP_PROPORTION="$2"; shift 2 ;;
+        --min_seq_length_ratio)   [[ $# -lt 2 ]] && { echo "[error] --min_seq_length_ratio requires a value" >&2; exit 1; }; MIN_SEQ_LENGTH_RATIO="$2";  shift 2 ;;
+        --start_step)             [[ $# -lt 2 ]] && { echo "[error] --start_step requires a value" >&2; exit 1; }; START_STEP="$2";             shift 2 ;;
         -h|--help)
-            sed -n '3,31p' "${BASH_SOURCE[0]}"
+            sed -n '3,/^# ===/p' "${BASH_SOURCE[0]}"
             exit 0
             ;;
         *) echo "[error] Unknown option: $1" >&2; exit 1 ;;
@@ -135,6 +135,23 @@ run_step() {
     "$@"
     echo "[done] ${name}"
 }
+
+# ---------------------------------------------------------------------------
+# Dependency check – fail fast before wasting compute
+# ---------------------------------------------------------------------------
+_check_dep() { command -v "$1" >/dev/null 2>&1 || { echo "[error] Required tool not found in PATH: $1" >&2; return 1; }; }
+_dep_ok=true
+_check_dep python    || _dep_ok=false
+_check_dep seqkit    || _dep_ok=false
+_check_dep mmseqs    || _dep_ok=false
+if ! command -v iqtree3 >/dev/null 2>&1; then
+    echo "[error] Required tool not found in PATH: iqtree3" >&2; _dep_ok=false
+fi
+if ! command -v VeryFastTree >/dev/null 2>&1 && ! command -v FastTree >/dev/null 2>&1; then
+    echo "[error] Neither VeryFastTree nor FastTree found in PATH" >&2; _dep_ok=false
+fi
+[[ "$_dep_ok" == true ]] || exit 1
+unset _dep_ok _check_dep
 
 # ---------------------------------------------------------------------------
 # Working directory setup + START_STEP option
@@ -186,12 +203,12 @@ SQLITE_DB="${WORK_DIR}/${DB_NAME}.db"
 # as side-effects of running the step loops.
 # ---------------------------------------------------------------------------
 if (( START_STEP > 2 )); then
-    GFF_FILE="$(find "${WORK_DIR}" -maxdepth 1 -name '*.gff3' | head -n1)"
+    GFF_FILE="$(find "${WORK_DIR}" -maxdepth 1 -iname '*.gff*' | head -n1)"
     [[ -z "$GFF_FILE" ]] && echo "[warn] No .gff3 found in ${WORK_DIR} – step 14 will fail if reached" >&2
 fi
 
 if (( START_STEP > 8 )); then
-    mapfile -t PADDED_MSA_FILES < <(find "${WORK_DIR}" -maxdepth 1 -name '*_merged_MSA.fasta' | sort)
+    mapfile -t PADDED_MSA_FILES < <(find "${WORK_DIR}" -maxdepth 1 -iname '*_merged_msa.fasta' | sort)
     [[ ${#PADDED_MSA_FILES[@]} -eq 0 ]] && echo "[warn] No *_merged_MSA.fasta found – step 9 will fail if reached" >&2
 fi
 
@@ -216,7 +233,7 @@ if (( START_STEP > 12 )); then
 fi
 
 if (( START_STEP > 13 )); then
-    mapfile -t PADDED_MSA_FILES < <(find "${WORK_DIR}" -maxdepth 1 -name '*_merged_MSA.fasta' | sort)
+    mapfile -t PADDED_MSA_FILES < <(find "${WORK_DIR}" -maxdepth 1 -iname '*_merged_msa.fasta' | sort)
 fi
 
 echo "[info] Starting from step ${START_STEP}"
@@ -230,15 +247,15 @@ if (( STEP >= START_STEP )); then
     if [[ -n "$XML_DIR" ]]; then
         echo "[info] Using pre-fetched GenBank XML: ${XML_DIR}"
     else
-        FETCH_EXTRA=""
-        [[ "$TEST_MODE" == "1" ]] && FETCH_EXTRA="--test_run --ref_list ${REF_LIST}"
-        [[ "$UPDATE_MODE" == "true" ]] && FETCH_EXTRA="${FETCH_EXTRA} --update ${UPDATE_DB}"
+        FETCH_EXTRA=()
+        [[ "$TEST_MODE" == "1" ]] && FETCH_EXTRA+=( --test_run --ref_list "${REF_LIST}" )
+        [[ "$UPDATE_MODE" == "true" ]] && FETCH_EXTRA+=( --update "${UPDATE_DB}" )
         run_step "FETCH_GENBANK" \
             python "${SCRIPTS}/GenBankFetcher.py" \
                 --taxid "${TAX_ID}" -b 50 \
                 -e "${EMAIL}" \
                 -o . \
-                ${FETCH_EXTRA}
+                "${FETCH_EXTRA[@]+${FETCH_EXTRA[@]}}"
         GENBANK_XML_DIR="${WORK_DIR}/GenBank-XML"
     fi
 fi
@@ -248,27 +265,27 @@ fi
 # ---------------------------------------------------------------------------
 STEP=$(( STEP + 1 ))
 if (( STEP >= START_STEP )); then
-    DOWNLOAD_GFF_EXTRA=""
-    [[ "$UPDATE_MODE" == "true" ]] && DOWNLOAD_GFF_EXTRA="--update_db ${UPDATE_DB}"
+    DOWNLOAD_GFF_EXTRA=()
+    [[ "$UPDATE_MODE" == "true" ]] && DOWNLOAD_GFF_EXTRA+=( --update_db "${UPDATE_DB}" )
     run_step "DOWNLOAD_GFF" \
         python "${SCRIPTS}/DownloadGFF.py" \
             --accession_ids "${REF_LIST}" \
             -o . -b . \
-            ${DOWNLOAD_GFF_EXTRA}
+            "${DOWNLOAD_GFF_EXTRA[@]+${DOWNLOAD_GFF_EXTRA[@]}}"
 fi
 # Always (re)discover after step 2 in case it just ran or we skipped to here
-GFF_FILE="$(find "${WORK_DIR}" -maxdepth 1 -name '*.gff3' | head -n1)"
+GFF_FILE="$(find "${WORK_DIR}" -maxdepth 1 -iname '*.gff*' | head -n1)"
 
 # ---------------------------------------------------------------------------
 # STEP 3 – GENBANK_PARSER + VALIDATE_MATRIX
 # ---------------------------------------------------------------------------
 STEP=$(( STEP + 1 ))
 if (( STEP >= START_STEP )); then
-    PARSER_EXTRA="--require_refs"
+    PARSER_EXTRA=( --require_refs )
     if [[ -n "$XML_DIR" && "$TEST_MODE" == "1" ]]; then
-        PARSER_EXTRA="${PARSER_EXTRA} --test_run"
+        PARSER_EXTRA+=( --test_run )
     fi
-    [[ "$UPDATE_MODE" == "true" ]] && PARSER_EXTRA="${PARSER_EXTRA} --update ${UPDATE_DB}"
+    [[ "$UPDATE_MODE" == "true" ]] && PARSER_EXTRA+=( --update "${UPDATE_DB}" )
 
     run_step "GENBANK_PARSER" \
         python "${SCRIPTS}/GenBankParser.py" \
@@ -277,7 +294,7 @@ if (( STEP >= START_STEP )); then
             -o . -b . \
             -s "${IS_SEGMENTED}" \
             --min_length_ratio "${MIN_SEQ_LENGTH_RATIO}" \
-            ${PARSER_EXTRA}
+            "${PARSER_EXTRA[@]}"
 
     run_step "VALIDATE_MATRIX" \
         python "${SCRIPTS}/ValidateMatrix.py" \
@@ -293,8 +310,8 @@ fi
 # ---------------------------------------------------------------------------
 STEP=$(( STEP + 1 ))
 if (( STEP >= START_STEP )); then
-    FILTER_EXTRA=""
-    [[ "$UPDATE_MODE" == "true" ]] && FILTER_EXTRA="--update_db ${UPDATE_DB}"
+    FILTER_EXTRA=()
+    [[ "$UPDATE_MODE" == "true" ]] && FILTER_EXTRA+=( --update_db "${UPDATE_DB}" )
     run_step "FILTER_AND_EXTRACT" \
         python "${SCRIPTS}/FilterAndExtractSequences.py" \
             -b . -o . \
@@ -302,7 +319,7 @@ if (( STEP >= START_STEP )); then
             -v "${IS_SEGMENTED}" \
             -g "${GB_MATRIX}" \
             -sf "${SEQUENCES_FA}" \
-            ${FILTER_EXTRA}
+            "${FILTER_EXTRA[@]+${FILTER_EXTRA[@]}}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -310,8 +327,8 @@ fi
 # ---------------------------------------------------------------------------
 STEP=$(( STEP + 1 ))
 if (( STEP >= START_STEP )); then
-    BLAST_EXTRA=""
-    [[ "$UPDATE_MODE" == "true" ]] && BLAST_EXTRA="--update_db ${UPDATE_DB}"
+    BLAST_EXTRA=()
+    [[ "$UPDATE_MODE" == "true" ]] && BLAST_EXTRA+=( --update_db "${UPDATE_DB}" )
     if [[ "$IS_SEGMENTED" == "Y" ]]; then
         run_step "BLAST_ALIGNMENT" \
             python "${SCRIPTS}/BlastAlignment.py" \
@@ -320,7 +337,7 @@ if (( STEP >= START_STEP )); then
                 -q "${QUERY_FA}" -r "${REF_FA}" \
                 -t . -b . -m "${REF_LIST}" \
                 -g "${GB_MATRIX}" \
-                ${BLAST_EXTRA}
+                "${BLAST_EXTRA[@]+${BLAST_EXTRA[@]}}"
     else
         run_step "BLAST_ALIGNMENT" \
             python "${SCRIPTS}/BlastAlignment.py" \
@@ -328,7 +345,7 @@ if (( STEP >= START_STEP )); then
                 -q "${QUERY_FA}" -r "${REF_FA}" \
                 -b . -t . -m "${REF_LIST}" \
                 -g "${GB_MATRIX}" \
-                ${BLAST_EXTRA}
+                "${BLAST_EXTRA[@]+${BLAST_EXTRA[@]}}"
     fi
 fi
 
@@ -337,8 +354,8 @@ fi
 # ---------------------------------------------------------------------------
 STEP=$(( STEP + 1 ))
 if (( STEP >= START_STEP )); then
-    NEXTALIGN_EXTRA=""
-    [[ "$UPDATE_MODE" == "true" ]] && NEXTALIGN_EXTRA="--update_db ${UPDATE_DB}"
+    NEXTALIGN_EXTRA=()
+    [[ "$UPDATE_MODE" == "true" ]] && NEXTALIGN_EXTRA+=( --update_db "${UPDATE_DB}" )
     run_step "NEXTALIGN_ALIGNMENT" \
         python "${SCRIPTS}/NextalignAlignment.py" \
             -r "${REF_SEQS_DIR}" \
@@ -348,7 +365,7 @@ if (( STEP >= START_STEP )); then
             -f "${REF_SEQ_FILTERED_FA}" \
             -m "${REF_LIST}" \
             -ms "${MASTER_SEQ_DIR}" \
-            ${NEXTALIGN_EXTRA}
+            "${NEXTALIGN_EXTRA[@]+${NEXTALIGN_EXTRA[@]}}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -363,6 +380,8 @@ if (( STEP >= START_STEP )); then
             -b . \
             --max_gap_proportion "${MAX_ALN_GAP_PROPORTION}"
 fi
+# Guarantee files exist (CollectFilteredSequences may not create them if nothing is filtered)
+touch "${FILTERED_IDS}" "${FILTERED_TSV}"
 
 # ---------------------------------------------------------------------------
 # STEP 8 – PAD_ALIGNMENT
@@ -381,7 +400,7 @@ if (( STEP >= START_STEP )); then
             --skip_ids "${FILTERED_IDS}"
 fi
 # Always rediscover after step 8 in case it just ran
-mapfile -t PADDED_MSA_FILES < <(find "${WORK_DIR}" -maxdepth 1 -name '*_merged_MSA.fasta' | sort)
+mapfile -t PADDED_MSA_FILES < <(find "${WORK_DIR}" -maxdepth 1 -iname '*_merged_msa.fasta' | sort)
 
 # ---------------------------------------------------------------------------
 # STEP 9 – DEDUP_ALIGNMENT (seqkit rmdup) + optional test-mode subsampling
@@ -552,9 +571,10 @@ if (( STEP >= START_STEP )); then
     done
 
     # -m is the ref list file (Nextflow resolves master_acc_str → master_file_opt when file exists)
-    CALC_EXTRA=""
-    [[ "$UPDATE_MODE" == "true" ]] && \
-        CALC_EXTRA="--update_db ${UPDATE_DB} --update_scope_tsv ${GB_MATRIX} --segment_map_tsv ${GB_MATRIX}"
+    CALC_EXTRA=()
+    if [[ "$UPDATE_MODE" == "true" ]]; then
+        CALC_EXTRA+=( --update_db "${UPDATE_DB}" --update_scope_tsv "${GB_MATRIX}" --segment_map_tsv "${GB_MATRIX}" )
+    fi
 
     run_step "CALC_ALIGNMENT_CORD" \
         python "${SCRIPTS}/CalcAlignmentCord.py" \
@@ -564,7 +584,7 @@ if (( STEP >= START_STEP )); then
             -bh "${BLAST_TOPHITS}" \
             -b . -d . \
             -o "${FEATURES_TSV}" \
-            ${CALC_EXTRA}
+            "${CALC_EXTRA[@]+${CALC_EXTRA[@]}}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -582,6 +602,12 @@ fi
 # ---------------------------------------------------------------------------
 STEP=$(( STEP + 1 ))
 if (( STEP >= START_STEP )); then
+    # Warn if taxonomy dump files are missing — they are not generated by this pipeline;
+    # they must be pre-downloaded (e.g. via NCBI taxdump) and placed in Taxa/.
+    if [[ ! -f "${WORK_DIR}/Taxa/names.dmp" || ! -f "${WORK_DIR}/Taxa/nodes.dmp" ]]; then
+        echo "[warn] Taxonomy dump files not found in ${WORK_DIR}/Taxa/ – HOST_TAXA_TABLE may fail." >&2
+        echo "[warn] Download from: https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz" >&2
+    fi
     run_step "HOST_TAXA_TABLE" \
         python "${SCRIPTS}/HostTaxaTable.py" \
             -g "${GB_MATRIX}" \
@@ -595,8 +621,8 @@ fi
 # ---------------------------------------------------------------------------
 STEP=$(( STEP + 1 ))
 if (( STEP >= START_STEP )); then
-    EXTRA_TABLE_ARGS=""
-    [[ -f "$REF_LIST" ]] && EXTRA_TABLE_ARGS="-r ${REF_LIST}"
+    EXTRA_TABLE_ARGS=()
+    [[ -f "$REF_LIST" ]] && EXTRA_TABLE_ARGS+=( -r "${REF_LIST}" )
 
     # Build -p flags: GenerateTables.py expects the padded MSA FASTA file(s),
     # not the work directory.  Mirrors PAD_ALIGNMENT.out.merged_msa.collect() in Nextflow.
@@ -613,7 +639,7 @@ if (( STEP >= START_STEP )); then
             -n "${NEXTALIGN_DIR}" \
             -b . -o Tables \
             -e "${EMAIL}" \
-            ${EXTRA_TABLE_ARGS}
+            "${EXTRA_TABLE_ARGS[@]+${EXTRA_TABLE_ARGS[@]}}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -621,17 +647,17 @@ fi
 # ---------------------------------------------------------------------------
 STEP=$(( STEP + 1 ))
 if (( STEP >= START_STEP )); then
-    IQTREE_ARG=""
-    USHER_ARG=""
-    CLUSTER_ARG=""
-    FILTERED_ARG=""
-    FILTERED_DETAILS_ARG=""
-    REFERENCE_ARG=""
-    UPDATE_ARGS=""
-    TREE_MANIFEST_ARG=""
+    IQTREE_ARG=()
+    USHER_ARG=()
+    CLUSTER_ARG=()
+    FILTERED_ARG=()
+    FILTERED_DETAILS_ARG=()
+    REFERENCE_ARG=()
+    UPDATE_ARGS=()
+    TREE_MANIFEST_ARG=()
 
     IQTREE_TREEFILE="$(find -L "${IQTREE_INPUT_DIR}" -name '*.treefile' -print -quit 2>/dev/null || true)"
-    [[ -n "$IQTREE_TREEFILE" ]] && IQTREE_ARG="-it ${IQTREE_TREEFILE}"
+    [[ -n "$IQTREE_TREEFILE" ]] && IQTREE_ARG=( -it "${IQTREE_TREEFILE}" )
 
     USHER_TREEFILE=""
     for ud in "${USHER_DIRS[@]+"${USHER_DIRS[@]}"}"; do
@@ -641,21 +667,21 @@ if (( STEP >= START_STEP )); then
             USHER_TREEFILE="${ud}/uncondensed-final-tree.nh"; break
         fi
     done
-    [[ -n "$USHER_TREEFILE" ]] && USHER_ARG="-ut ${USHER_TREEFILE}"
+    [[ -n "$USHER_TREEFILE" ]] && USHER_ARG=( -ut "${USHER_TREEFILE}" )
 
     MERGED_CLUSTER_TSV="${WORK_DIR}/merged_mmseqs_clusters.tsv"
     find -L "${WORK_DIR}/mmseqs_inputs" -type f -name '*_clusters.tsv' -print0 2>/dev/null \
         | sort -z | xargs -0 -r cat > "${MERGED_CLUSTER_TSV}" || true
-    [[ -s "$MERGED_CLUSTER_TSV" ]] && CLUSTER_ARG="-ct ${MERGED_CLUSTER_TSV} -ci ${MMSEQS_MIN_SEQ_ID}"
+    [[ -s "$MERGED_CLUSTER_TSV" ]] && CLUSTER_ARG=( -ct "${MERGED_CLUSTER_TSV}" -ci "${MMSEQS_MIN_SEQ_ID}" )
 
-    [[ -f "$FILTERED_IDS" && -s "$FILTERED_IDS" ]] && FILTERED_ARG="-fi ${FILTERED_IDS}"
-    [[ -f "$FILTERED_TSV" ]] && FILTERED_DETAILS_ARG="-fd ${FILTERED_TSV}"
-    [[ -f "$REF_LIST" ]] && REFERENCE_ARG="--reference_tsv ${REF_LIST}"
+    [[ -f "$FILTERED_IDS" && -s "$FILTERED_IDS" ]] && FILTERED_ARG=( -fi "${FILTERED_IDS}" )
+    [[ -f "$FILTERED_TSV" ]] && FILTERED_DETAILS_ARG=( -fd "${FILTERED_TSV}" )
+    [[ -f "$REF_LIST" ]] && REFERENCE_ARG=( --reference_tsv "${REF_LIST}" )
     [[ "$UPDATE_MODE" == "true" ]] && \
-        UPDATE_ARGS="--update --update_db ${UPDATE_DB} --batch_id sh_run_$(date +%Y%m%d_%H%M%S)"
+        UPDATE_ARGS=( --update --update_db "${UPDATE_DB}" --batch_id "sh_run_$(date +%Y%m%d_%H%M%S)" )
 
     MANIFEST_ROWS="$(wc -l < "${TREE_MANIFEST}" 2>/dev/null || echo 0)"
-    [[ "$MANIFEST_ROWS" -gt 1 ]] && TREE_MANIFEST_ARG="--tree_manifest ${TREE_MANIFEST}"
+    [[ "$MANIFEST_ROWS" -gt 1 ]] && TREE_MANIFEST_ARG=( --tree_manifest "${TREE_MANIFEST}" )
 
     run_step "CREATE_SQLITE_DB" \
         python "${SCRIPTS}/CreateSqliteDB.py" \
@@ -672,26 +698,26 @@ if (( STEP >= START_STEP )); then
             -msr "${ASSETS}/m49_sub_region.csv" \
             -d "${DB_NAME}" \
             -b . -o . \
-            ${IQTREE_ARG} \
-            ${USHER_ARG} \
-            ${CLUSTER_ARG} \
-            ${FILTERED_ARG} \
-            ${FILTERED_DETAILS_ARG} \
-            ${TREE_MANIFEST_ARG} \
-            ${REFERENCE_ARG} \
-            ${UPDATE_ARGS}
+            "${IQTREE_ARG[@]}" \
+            "${USHER_ARG[@]}" \
+            "${CLUSTER_ARG[@]}" \
+            "${FILTERED_ARG[@]}" \
+            "${FILTERED_DETAILS_ARG[@]}" \
+            "${TREE_MANIFEST_ARG[@]}" \
+            "${REFERENCE_ARG[@]}" \
+            "${UPDATE_ARGS[@]}"
 
     # ANNOTATE_MUTATIONS (optional – only when mutation_catalog provided)
     if [[ -n "$MUTATION_CATALOG" && -f "$MUTATION_CATALOG" ]]; then
-        VIRUS_ARG=""
-        [[ -n "$MUTATION_VIRUS" ]] && VIRUS_ARG="--virus ${MUTATION_VIRUS}"
+        VIRUS_ARG=()
+        [[ -n "$MUTATION_VIRUS" ]] && VIRUS_ARG=( --virus "${MUTATION_VIRUS}" )
         CATALOG_PROFILE="${MUTATION_VIRUS:-all_columns}"
         run_step "ANNOTATE_MUTATIONS" \
             python "${SCRIPTS}/AnnotateMutations.py" \
                 --db "${SQLITE_DB}" \
                 --mutation_catalog "${MUTATION_CATALOG}" \
                 --catalog_column_profile "${CATALOG_PROFILE}" \
-                ${VIRUS_ARG}
+                "${VIRUS_ARG[@]}"
     fi
 fi
 
@@ -701,15 +727,15 @@ fi
 STEP=$(( STEP + 1 ))
 if (( STEP >= START_STEP && TEST_MODE == 1 )); then
     mkdir -p "${PUBLISH_DIR}/tests"
-    VALIDATE_EXTRA="--check-update-integrity"
-    [[ "$IS_SEGMENTED" == "Y" ]] && VALIDATE_EXTRA="${VALIDATE_EXTRA} --expect-segment-trees"
-    [[ "$TREE_FREE" == "true" ]] && VALIDATE_EXTRA="${VALIDATE_EXTRA} --allow-no-trees"
+    VALIDATE_EXTRA=( --check-update-integrity )
+    [[ "$IS_SEGMENTED" == "Y" ]] && VALIDATE_EXTRA+=( --expect-segment-trees )
+    [[ "$TREE_FREE" == "true" ]] && VALIDATE_EXTRA+=( --allow-no-trees )
     run_step "VALIDATE_DB_TREE" \
         python "${SCRIPTS}/ValidateDbTree.py" \
             --db "${SQLITE_DB}" \
             --outdir "${PUBLISH_DIR}/tests" \
             --test-mode \
-            ${VALIDATE_EXTRA}
+            "${VALIDATE_EXTRA[@]}"
 fi
 
 # ---------------------------------------------------------------------------
