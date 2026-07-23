@@ -721,7 +721,7 @@ def test_update_mode_replaces_existing_usher_tree_with_same_key(tmp_path: Path):
     try:
         rows = conn.execute("SELECT name, source, newick FROM trees WHERE source='usher'").fetchall()
         assert len(rows) == 1
-        assert rows[0][0] == "usher"
+        assert rows[0][0] == "Usher_tree_full_segment_1"
         assert rows[0][2].strip() == "(A:0.1,B:0.2);"
     finally:
         conn.close()

@@ -25,6 +25,7 @@ class UsherPlacement:
 		self.chunk_threshold = max(1, int(chunk_threshold))
 		self.starter_tree = self._normalize_optional_path(starter_tree)
 		self.existing_ids_file = self._normalize_optional_path(existing_ids_file)
+		self._usher_supports_T = None
 
 	@staticmethod
 	def _normalize_optional_path(path_value):
@@ -464,9 +465,9 @@ class UsherPlacement:
 				print(retry_message)
 			return False
 
-	def build_vcf(self, ref_id, exclude_ids_file=None, alignment_fasta=None):
+	def build_vcf(self, ref_id, exclude_ids_file=None, alignment_fasta=None, vcf_path=None):
 		alignment_fasta = alignment_fasta or self.padded_aln
-		vcf_path = os.path.join(self.output_dir, "all_samples.vcf")
+		vcf_path = vcf_path or os.path.join(self.output_dir, "all_samples.vcf")
 		base_cmd = ["faToVcf", f"-ref={ref_id}"]
 		if exclude_ids_file:
 			cmd = base_cmd + [f"-excludeFile={exclude_ids_file}", alignment_fasta, vcf_path]
@@ -484,27 +485,136 @@ class UsherPlacement:
 				return path
 		raise FileNotFoundError(f"USHER tree output not found in {output_dir}")
 
-	def run_usher(self, tree_file, vcf_path, output_dir):
-		os.makedirs(output_dir, exist_ok=True)
-		usher_help = subprocess.run(["usher", "--help"], capture_output=True, text=True, check=False)
-		usher_cmd = [
-			"usher",
-			"-v", vcf_path,
-			"-t", tree_file,
-			"-d", output_dir,
-			"-o", os.path.join(output_dir, "usher.pb"),
-			"-C", "-u",
-		]
-		if " -T " in (usher_help.stdout + usher_help.stderr):
-			usher_cmd.extend(["-T", str(self.threads)])
+	def _append_threads(self, cmd):
+		"""Add -T <threads> if this usher build accepts it (cached probe)."""
+		if self._usher_supports_T is None:
+			usher_help = subprocess.run(["usher", "--help"], capture_output=True, text=True, check=False)
+			self._usher_supports_T = " -T " in (usher_help.stdout + usher_help.stderr)
+		if self._usher_supports_T:
+			cmd.extend(["-T", str(self.threads)])
+		return cmd
 
+	def _run_usher_cmd(self, cmd, output_dir, log_name="usher.verbose.log"):
 		env = os.environ.copy()
 		for var in ["OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"]:
 			env[var] = str(self.threads)
-		verbose_log = self._usher_verbose_log_path(output_dir)
-		with open(verbose_log, "w", encoding="utf-8") as verbose_handle:
-			subprocess.run(usher_cmd, check=True, env=env, stdout=verbose_handle, stderr=subprocess.STDOUT)
-		return self._resolve_usher_tree_output(output_dir)
+		log_path = os.path.join(output_dir, log_name)
+		with open(log_path, "w", encoding="utf-8") as log_handle:
+			subprocess.run(cmd, check=True, env=env, stdout=log_handle, stderr=subprocess.STDOUT)
+
+	def _fetch_db_alignments(self, accessions):
+		"""Fetch aligned (reference-coordinate) sequences for the given accessions
+		from the update DB's sequence_alignment table. Returns {accession: seq}."""
+		result = {}
+		accessions = [str(a).strip() for a in accessions if a and str(a).strip()]
+		if not accessions or not self.update_db or not os.path.isfile(self.update_db):
+			return result
+		conn = sqlite3.connect(self.update_db)
+		try:
+			cur = conn.cursor()
+			step = 900
+			for start in range(0, len(accessions), step):
+				chunk = accessions[start:start + step]
+				placeholders = ",".join("?" * len(chunk))
+				for acc, seq in cur.execute(
+					f"SELECT primary_accession, alignment FROM sequence_alignment "
+					f"WHERE primary_accession IN ({placeholders})", chunk
+				):
+					acc = str(acc).strip()
+					seq = "" if seq is None else str(seq).strip()
+					if acc and seq and seq.lower() != "nan" and acc not in result:
+						result[acc] = seq
+		finally:
+			conn.close()
+		return result
+
+	def collect_backbone_fasta(self, backbone_ids, ref_id, alignment_fasta):
+		"""Assemble an aligned FASTA holding the reference plus every backbone
+		(existing-tree) tip's genotype, so faToVcf/usher can reconstruct the
+		mutations on the backbone branches. Without this the backbone is a
+		mutation-less scaffold and every new sample collapses onto the root."""
+		needed = {str(a).strip() for a in backbone_ids if a and str(a).strip()}
+		needed.add(ref_id)
+		out_path = os.path.join(self.output_dir, "backbone_alignment.fasta")
+		found = set()
+		with open(out_path, "w", encoding="utf-8") as out_handle:
+			# 1) whatever is already in the working alignment (always holds the ref)
+			for record in SeqIO.parse(alignment_fasta, "fasta"):
+				rid = str(record.id).strip()
+				if rid in needed and rid not in found:
+					SeqIO.write([record], out_handle, "fasta")
+					found.add(rid)
+			# 2) the backbone tips themselves, from the update DB alignment table
+			remaining = needed - found
+			if remaining:
+				for acc, seq in self._fetch_db_alignments(remaining).items():
+					out_handle.write(f">{acc}\n{seq}\n")
+					found.add(acc)
+			# 3) last resort: the on-disk padded alignment, if distinct
+			remaining = needed - found
+			if remaining and os.path.abspath(alignment_fasta) != os.path.abspath(self.padded_aln):
+				for record in SeqIO.parse(self.padded_aln, "fasta"):
+					rid = str(record.id).strip()
+					if rid in remaining and rid not in found:
+						SeqIO.write([record], out_handle, "fasta")
+						found.add(rid)
+
+		if ref_id not in found:
+			raise ValueError(f"Reference sequence '{ref_id}' not found for backbone VCF construction")
+		missing = needed - found - {ref_id}
+		if missing:
+			preview = ", ".join(sorted(missing)[:5])
+			print(
+				f"[warn] {len(missing)} backbone tip(s) have no aligned sequence available; "
+				f"they will carry no mutations in the backbone (e.g. {preview}).",
+				flush=True,
+			)
+		print(
+			f"[info] Assembled backbone genotypes for {len(found) - 1} tip(s) + reference "
+			f"for mutation-annotated-tree construction.",
+			flush=True,
+		)
+		return out_path
+
+	def build_backbone_pb(self, tree_file, backbone_ids, ref_id, alignment_fasta):
+		"""Build a mutation-annotated tree (protobuf) from the backbone tree and
+		its tips' genotypes. Returns the path to the saved .pb."""
+		backbone_dir = os.path.join(self.output_dir, "backbone")
+		os.makedirs(backbone_dir, exist_ok=True)
+		backbone_fasta = self.collect_backbone_fasta(backbone_ids, ref_id, alignment_fasta)
+		backbone_vcf = self.build_vcf(
+			ref_id, alignment_fasta=backbone_fasta,
+			vcf_path=os.path.join(backbone_dir, "backbone.vcf"),
+		)
+		backbone_pb = os.path.join(backbone_dir, "backbone.pb")
+		cmd = ["usher", "-t", tree_file, "-v", backbone_vcf, "-d", backbone_dir, "-o", backbone_pb]
+		self._append_threads(cmd)
+		print("[info] Building mutation-annotated backbone protobuf ...", flush=True)
+		self._run_usher_cmd(cmd, backbone_dir, log_name="usher.backbone.log")
+		if not os.path.isfile(backbone_pb):
+			raise FileNotFoundError(f"USHER did not produce a backbone protobuf at {backbone_pb}")
+		return backbone_pb
+
+	def place_onto_pb(self, input_pb, vcf_path, output_dir):
+		"""Place the samples in vcf_path onto the mutation-annotated tree in
+		input_pb, saving an updated protobuf. Returns the new .pb path so the
+		next batch places against the backbone PLUS everything added here."""
+		os.makedirs(output_dir, exist_ok=True)
+		output_pb = os.path.join(output_dir, "usher.pb")
+		cmd = [
+			"usher",
+			"-i", input_pb,
+			"-v", vcf_path,
+			"-d", output_dir,
+			"-o", output_pb,
+			"-C", "-u",
+		]
+		self._append_threads(cmd)
+		self._run_usher_cmd(cmd, output_dir)
+		self._resolve_usher_tree_output(output_dir)
+		if not os.path.isfile(output_pb):
+			raise FileNotFoundError(f"USHER did not produce an updated protobuf at {output_pb}")
+		return output_pb
 
 	def promote_final_usher_outputs(self, final_output_dir):
 		for name in ["final-tree.nh", "uncondensed-final-tree.nh", "usher.pb", "mutation-paths.txt", "placement_stats.tsv", "all_samples.vcf"]:
@@ -553,17 +663,23 @@ class UsherPlacement:
 
 		cluster_rep = None
 		alignment_fasta = self.padded_aln
+		# backbone_ids = tips of the starting tree; their genotypes must feed the
+		# mutation-annotated-tree build so the backbone branches carry mutations.
 		if self.starter_tree or self.existing_ids_file:
 			tree_file, existing_ids_file = self.resolve_resume_assets()
+			backbone_ids = self._read_text_lines(existing_ids_file)
 		elif self.update_db:
 			tree_file, existing_ids_file = self.prepare_update_assets()
 			alignment_fasta = self.build_update_alignment_input(tree_file)
+			backbone_ids = self._read_text_lines(existing_ids_file)
 		else:
 			cluster_rep, tree_file = self.resolve_non_update_assets()
 			centroid_ids = self._read_ids_from_fasta(cluster_rep)
 			self.write_ids_file("centroid_ids.txt", centroid_ids)
 			self.write_ids_file("aln_ids.txt", self._read_ids_from_fasta(self.padded_aln))
 			existing_ids_file = self.write_ids_file("exclude_ids.txt", centroid_ids[1:])
+			# every cluster representative is a backbone (IQ-TREE) tip, ref included
+			backbone_ids = centroid_ids
 
 		ref_id = self.resolve_reference_id(cluster_rep=cluster_rep, alignment_fasta=alignment_fasta)
 		existing_ids = []
@@ -589,45 +705,43 @@ class UsherPlacement:
 			self.expand_identical_sequence_tree_outputs(collapse_plan["anchor_to_members"])
 			return
 
-		if len(placeable_ids) > self.chunk_threshold:
-			chunk_fastas = self.split_alignment_into_chunks(alignment_fasta, ref_id, placeable_ids)
-			print(
-				f"[info] Splitting {len(placeable_ids)} placement sequence(s) into {len(chunk_fastas)} chunk(s) "
-				f"of up to {self.chunk_size} sequence(s) each."
-			)
-			current_tree = tree_file
-			final_chunk_dir = None
-			print(
-				f"[info] Detailed USHER output for each batch is written under {os.path.join(self.output_dir, 'chunk_*', 'usher.verbose.log')}",
-				flush=True,
-			)
-			self.log_chunk_progress(0, len(chunk_fastas))
-			for idx, chunk_fasta in enumerate(chunk_fastas, start=1):
-				chunk_dir = os.path.join(self.output_dir, f"chunk_{idx:04d}")
-				vcf_path = self.build_vcf(ref_id, alignment_fasta=chunk_fasta)
-				current_tree = self.run_usher(current_tree, vcf_path, chunk_dir)
-				final_chunk_dir = chunk_dir
-				self.log_chunk_progress(idx, len(chunk_fastas))
-			if final_chunk_dir:
-				self.promote_final_usher_outputs(final_chunk_dir)
-				self.expand_identical_sequence_tree_outputs(collapse_plan["anchor_to_members"])
-			return
+		# Build a mutation-annotated backbone protobuf ONCE. This is the fix:
+		# usher places samples by the mutations they share with backbone branches,
+		# so the backbone tips' genotypes must be present when the .pb is built.
+		# Previously usher was handed a bare newick with a VCF that excluded the
+		# backbone tips, leaving every backbone branch mutation-less -> every new
+		# sample was equidistant from all branches and collapsed onto the root.
+		backbone_pb = self.build_backbone_pb(tree_file, backbone_ids, ref_id, alignment_fasta)
 
-		exclude_ids_file = None
-		exclude_ids = [
-			acc for acc in aln_ids
-			if acc != ref_id and acc not in set(placeable_ids)
-		]
-		exclude_count = len(exclude_ids)
-		if exclude_count < (len(aln_ids) - 1):
-			exclude_ids_file = self.write_ids_file("exclude_ids.txt", exclude_ids)
-		else:
-			mode = " in test mode" if self.test_mode else ""
-			print(f"[warn] Exclude list would remove all non-reference sequences ({exclude_count}/{len(aln_ids)}){mode}; running faToVcf without -excludeFile.")
-
-		vcf_path = self.build_vcf(ref_id, exclude_ids_file=exclude_ids_file, alignment_fasta=alignment_fasta)
-		self.run_usher(tree_file, vcf_path, self.output_dir)
-		self.expand_identical_sequence_tree_outputs(collapse_plan["anchor_to_members"])
+		# Place samples in batches, carrying the protobuf forward. Because each
+		# batch's placements are saved into the .pb handed to the next batch,
+		# later batches place against the backbone PLUS everything already added,
+		# not just the static reference set.
+		chunk_fastas = self.split_alignment_into_chunks(alignment_fasta, ref_id, placeable_ids)
+		print(
+			f"[info] Placing {len(placeable_ids)} sequence(s) in {len(chunk_fastas)} batch(es) "
+			f"of up to {self.chunk_size} sequence(s) each onto the backbone protobuf."
+		)
+		print(
+			f"[info] Detailed USHER output for each batch is written under {os.path.join(self.output_dir, 'chunk_*', 'usher.verbose.log')}",
+			flush=True,
+		)
+		current_pb = backbone_pb
+		final_chunk_dir = None
+		self.log_chunk_progress(0, len(chunk_fastas))
+		for idx, chunk_fasta in enumerate(chunk_fastas, start=1):
+			chunk_dir = os.path.join(self.output_dir, f"chunk_{idx:04d}")
+			os.makedirs(chunk_dir, exist_ok=True)
+			vcf_path = self.build_vcf(
+				ref_id, alignment_fasta=chunk_fasta,
+				vcf_path=os.path.join(chunk_dir, "all_samples.vcf"),
+			)
+			current_pb = self.place_onto_pb(current_pb, vcf_path, chunk_dir)
+			final_chunk_dir = chunk_dir
+			self.log_chunk_progress(idx, len(chunk_fastas))
+		if final_chunk_dir:
+			self.promote_final_usher_outputs(final_chunk_dir)
+			self.expand_identical_sequence_tree_outputs(collapse_plan["anchor_to_members"])
 
 	@staticmethod
 	def _read_text_lines(path):

@@ -989,6 +989,11 @@ def main(argv=None):
         help="Validate update audit tables and update-mode integrity constraints",
     )
     parser.add_argument(
+        "--allow-empty-update",
+        action="store_true",
+        help="Allow validation to pass even if the latest update batch made no database changes",
+    )
+    parser.add_argument(
         "--allow-no-trees",
         action="store_true",
         help="Allow validation to pass when the DB intentionally contains no trees",
@@ -1528,16 +1533,25 @@ def main(argv=None):
         if args.check_update_integrity:
             if not table_exists(conn, "update_batches") or not table_exists(conn, "update_table_deltas"):
                 validation_fail("Validation failed: update audit tables are missing")
-            cursor.execute("SELECT batch_id FROM update_batches ORDER BY rowid DESC LIMIT 1")
-            row = cursor.fetchone()
-            if row:
-                batch_id = row[0]
+            update_batches_cols = get_table_columns(conn, "update_batches")
+            if "mode" in update_batches_cols:
+                cursor.execute("SELECT batch_id, mode FROM update_batches ORDER BY rowid DESC LIMIT 1")
+                row = cursor.fetchone()
+                batch_id = row[0] if row else None
+                mode = row[1] if row else None
+            else:
+                cursor.execute("SELECT batch_id FROM update_batches ORDER BY rowid DESC LIMIT 1")
+                row = cursor.fetchone()
+                batch_id = row[0] if row else None
+                mode = "update"
+            if batch_id:
                 cursor.execute("SELECT table_name, delta FROM update_table_deltas WHERE batch_id=?", (batch_id,))
                 delta_rows = cursor.fetchall()
                 if len(delta_rows) == 0:
                     validation_fail("Validation failed: no update_table_deltas rows found for latest batch")
-                if all(int(delta) == 0 for _table_name, delta in delta_rows):
-                    validation_fail("Validation failed: latest update batch made no DB changes")
+                if str(mode).strip().lower() == "update" and not args.allow_empty_update:
+                    if all(int(delta) == 0 for _table_name, delta in delta_rows):
+                        validation_fail("Validation failed: latest update batch made no DB changes")
             if table_exists(conn, "features") and table_exists(conn, "meta_data"):
                 feature_cols = get_table_columns(conn, "features")
                 if "segment" in feature_cols and "segment" in meta_columns and "accession" in feature_cols:
