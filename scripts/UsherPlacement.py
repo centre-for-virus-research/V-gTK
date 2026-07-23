@@ -378,8 +378,8 @@ class UsherPlacement:
 				handle.write(acc + "\n")
 
 		try:
-			subprocess.run([seqkit, "grep", "-n", "-f", ids_file, alignment_fasta, "-o", placeable_fasta], check=True)
-			subprocess.run([seqkit, "split2", "-s", str(self.chunk_size), "-O", raw_chunk_dir, placeable_fasta], check=True)
+			subprocess.run([seqkit, "grep", "-j", str(self.threads), "-n", "-f", ids_file, alignment_fasta, "-o", placeable_fasta], check=True)
+			subprocess.run([seqkit, "split2", "-j", str(self.threads), "-s", str(self.chunk_size), "-O", raw_chunk_dir, placeable_fasta], check=True)
 		except subprocess.CalledProcessError:
 			return self._split_alignment_into_chunks_python(alignment_fasta, ref_id, placeable_ids)
 

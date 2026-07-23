@@ -15,7 +15,7 @@ import read_file
 from ExportRefListFromUpdateDb import load_master_accessions_from_file, load_reference_file_table, load_reference_rows
 
 class BlastAlignment:
-	def __init__(self, query_fasta, db_fasta, base_dir, output_dir, output_file, is_segmented_virus, master_acc, is_update, keep_blast_tmp_dir, gb_matrix, segment_file=None, update_db=None):
+	def __init__(self, query_fasta, db_fasta, base_dir, output_dir, output_file, is_segmented_virus, master_acc, is_update, keep_blast_tmp_dir, gb_matrix, segment_file=None, update_db=None, threads=1):
 		self.query_fasta = query_fasta
 		self.db_fasta = db_fasta
 		self.base_dir = base_dir
@@ -28,6 +28,7 @@ class BlastAlignment:
 		self.is_update = is_update
 		self.keep_blast_tmp_dir = keep_blast_tmp_dir
 		self.update_db = update_db
+		self.threads = max(1, int(threads))
 		self.db_file_name = os.path.basename(db_fasta)
 
 	@staticmethod
@@ -227,7 +228,8 @@ class BlastAlignment:
 			'-max_target_seqs', '1',
 			'-max_hsps', '1',
 			'-out', join(output_dir, self.output_file),
-			'-outfmt', "6 qacc sacc pident sstrand"
+			'-outfmt', "6 qacc sacc pident sstrand",
+			'-num_threads', str(self.threads)
 			]
 		try:
 			subprocess.run(command, check=True)
@@ -345,7 +347,7 @@ class BlastAlignment:
 
 		for each_file in os.listdir(sorted_fasta):
 			if "minus" in each_file:
-				command = ["seqkit", "seq", "-r", "-p", "-v", "-t", "dna", join(sorted_fasta, each_file), ">", join(merged_fasta, each_file)]
+				command = ["seqkit", "seq", "-j", str(self.threads), "-r", "-p", "-v", "-t", "dna", join(sorted_fasta, each_file), ">", join(merged_fasta, each_file)]
 			else:
 				command = ["cp", join(sorted_fasta, each_file), join(merged_fasta, each_file)]
 
@@ -511,7 +513,7 @@ class BlastAlignment:
 			name, seg_num, strand = each_seg.split('.')[0].split('_')
 			print(f"Processing {name}-{strand}")
 			if strand == "minus":
-				command = ["seqkit", "seq", "-r", "-p", "-v", "-t", "dna", join(segment_sorted, each_seg), ">", join(segment_merged, each_seg)]
+				command = ["seqkit", "seq", "-j", str(self.threads), "-r", "-p", "-v", "-t", "dna", join(segment_sorted, each_seg), ">", join(segment_merged, each_seg)]
 			else:
 				command = ["cp", join(segment_sorted, each_seg), join(segment_merged, each_seg)]
 
@@ -773,6 +775,7 @@ if __name__ == "__main__":
 	parser.add_argument('-k', '--keep_blast_tmp_dir', help='Retains the blast temp directory for debug purpose', default='N')
 	parser.add_argument('-g', '--gb_matrix', help='GenBank matrix file', default='tmp/GenBank-matrix/gB_matrix_raw.tsv')
 	parser.add_argument('--update_db', help='Existing SQLite DB used as the source of truth for reference accessions and sequences in update mode', default=None)
+	parser.add_argument('--threads', type=int, default=1, help='Number of threads to use')
 	args = parser.parse_args()
 
 	if not args.master_acc and not args.update_db:
@@ -792,7 +795,8 @@ if __name__ == "__main__":
 		args.keep_blast_tmp_dir,
 		args.gb_matrix,
 		args.segment_file,
-		args.update_db
+		args.update_db,
+		threads=args.threads
 		)
 	try:
 		processor.process()

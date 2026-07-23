@@ -514,6 +514,7 @@ process FILTER_AND_EXTRACT{
 
 
 process BLAST_ALIGNMENT{
+    cpus MAX_THREADS
     input:
         path query_seqs
         path ref_seqs
@@ -537,10 +538,10 @@ process BLAST_ALIGNMENT{
 
         if [ "!{params.is_segmented}" = "Y" ]; then
             python "!{scripts_dir}/BlastAlignment.py" -s Y -f "!{ref_list_path}" -q !{query_seqs} -r !{ref_seqs} \
-             -t . -b . -m !{ref_list_path}  -g !{gb_matrix} ${UPDATE_BLAST_ARGS}
+             -t . -b . -m !{ref_list_path}  -g !{gb_matrix} --threads !{task.cpus} ${UPDATE_BLAST_ARGS}
         else
             python "!{scripts_dir}/BlastAlignment.py" -f "!{ref_list_path}" -q !{query_seqs} -r !{ref_seqs} \
-             -b . -t . -m !{ref_list_path} -g !{gb_matrix} ${UPDATE_BLAST_ARGS}
+             -b . -t . -m !{ref_list_path} -g !{gb_matrix} --threads !{task.cpus} ${UPDATE_BLAST_ARGS}
         fi
     '''
 }
@@ -551,6 +552,7 @@ process BLAST_ALIGNMENT{
 
 //python "${scripts_dir}/NextalignAlignment.py" -m $master_acc #-gff "tmp/Gff/NC_001542.gff3"
 process NEXTALIGN_ALIGNMENT{
+    cpus MAX_THREADS
     input:
         path genbank_matrix
         path grouped_fasta_dir
@@ -575,7 +577,7 @@ process NEXTALIGN_ALIGNMENT{
 
         python !{scripts_dir}/NextalignAlignment.py  -r !{ref_seqs}  \
          -q !{grouped_fasta_dir} -g !{genbank_matrix} -t . \
-         -f !{ref_seqs_fasta} -m "$TARGET_M" -ms !{master_seq_dir} --max_threads !{params.max_threads} ${EXTRA_ARGS}
+         -f !{ref_seqs_fasta} -m "$TARGET_M" -ms !{master_seq_dir} --max_threads !{task.cpus} ${EXTRA_ARGS}
     '''
 }
 
@@ -681,10 +683,10 @@ process MMSEQS_CLUSTERING{
 
 process IQ_TREE{
     publishDir "${params.publish_dir}" , mode: 'copy'
-    // Run one IQ-TREE job at a time with all available threads. For segmented
-    // viruses this avoids idle CPUs once the easier/faster segments finish.
-    cpus MAX_THREADS
-    maxForks 1
+    // Run up to 2 IQ-TREE jobs concurrently. For single-segment viruses, use MAX_THREADS.
+    // For segmented viruses, use MAX_THREADS / 2 per job.
+    cpus { params.is_segmented == 'Y' ? Math.max(1, (int)Math.floor(MAX_THREADS / 2)) : MAX_THREADS }
+    maxForks 2
     input:
         tuple path(mmseq_cluster_dir), path(guide_tree_dir)
     output:
