@@ -11,6 +11,7 @@ from os.path import join, normpath
 from datetime import datetime
 from argparse import ArgumentParser
 from ExportRefListFromUpdateDb import load_reference_file_table
+from clade_from_tree import assign_labels_from_tree
 
 
 class CreateSqliteDB:
@@ -306,6 +307,62 @@ class CreateSqliteDB:
 			for _, row in reference_df.iterrows()
 		}
 
+	def _candidate_assignment_trees(self):
+		"""Newick strings that can carry queries + labelled references, most
+		trustworthy first. The UShER tree holds every placed sample, so it is
+		preferred; the IQ-TREE backbone only holds cluster representatives."""
+		candidates = []
+		manifest = self._load_tree_manifest(self.tree_manifest)
+
+		def _add(path):
+			newick = self._read_tree_file(path)
+			if newick:
+				candidates.append(newick)
+
+		_add(self.usher_tree)
+		for entry in manifest:
+			if entry.get("source") == "usher":
+				_add(entry.get("path"))
+		_add(self.iqtree_file)
+		for entry in manifest:
+			if entry.get("source") == "iqtree":
+				_add(entry.get("path"))
+		_add(self.tree_file)
+		for entry in manifest:
+			if entry.get("source") not in {"usher", "iqtree"}:
+				_add(entry.get("path"))
+		return candidates
+
+	def _tree_based_reference_labels(self, lookup):
+		"""Assign genotype/subtype to query tips from their nearest labelled
+		reference in the phylogenetic tree. Merges across all available trees
+		(e.g. one per segment); the first tree to label an accession wins, which
+		respects the trust order in _candidate_assignment_trees()."""
+		candidates = self._candidate_assignment_trees()
+		if not candidates:
+			return {}
+		reference_labels = {
+			acc: {
+				"genotype": labels.get("nearest_reference_genotype", ""),
+				"subtype": labels.get("nearest_reference_subtype", ""),
+			}
+			for acc, labels in lookup.items()
+		}
+		merged = {}
+		for newick in candidates:
+			try:
+				assignments = assign_labels_from_tree(newick, reference_labels)
+			except Exception as exc:  # never let a malformed tree break the DB build
+				print(f"[warn] Tree-based clade assignment skipped for one tree: {exc}")
+				continue
+			for acc, labels in assignments.items():
+				existing = merged.setdefault(acc, {"genotype": "", "subtype": ""})
+				if not existing["genotype"] and labels.get("genotype"):
+					existing["genotype"] = labels["genotype"]
+				if not existing["subtype"] and labels.get("subtype"):
+					existing["subtype"] = labels["subtype"]
+		return merged
+
 	def _add_reference_columns(self, df_meta_data, df_aln):
 		lookup = self._load_reference_lookup()
 		if not lookup or "primary_accession" not in df_meta_data.columns:
@@ -315,8 +372,15 @@ class CreateSqliteDB:
 		direct_genotype = meta_accessions.map(lambda accession: lookup.get(accession, {}).get("nearest_reference_genotype", ""))
 		direct_subtype = meta_accessions.map(lambda accession: lookup.get(accession, {}).get("nearest_reference_subtype", ""))
 
-		nearest_genotype = pd.Series("", index=df_meta_data.index, dtype=str)
-		nearest_subtype = pd.Series("", index=df_meta_data.index, dtype=str)
+		# Preferred source for queries: the phylogenetic tree neighbourhood.
+		tree_labels = self._tree_based_reference_labels(lookup)
+		tree_genotype = meta_accessions.map(lambda accession: tree_labels.get(accession, {}).get("genotype", ""))
+		tree_subtype = meta_accessions.map(lambda accession: tree_labels.get(accession, {}).get("subtype", ""))
+
+		# Fallback for queries missing from the tree: the best BLAST hit, i.e. the
+		# reference each query was aligned against (alignment_name).
+		blast_genotype = pd.Series("", index=df_meta_data.index, dtype=str)
+		blast_subtype = pd.Series("", index=df_meta_data.index, dtype=str)
 		if df_aln is not None and not df_aln.empty and {"primary_accession", "alignment_name"}.issubset(df_aln.columns):
 			aln_map_df = df_aln[["primary_accession", "alignment_name"]].copy()
 			aln_map_df["primary_accession"] = aln_map_df["primary_accession"].fillna("").astype(str).str.strip()
@@ -325,11 +389,15 @@ class CreateSqliteDB:
 			aln_map_df = aln_map_df.drop_duplicates(subset=["primary_accession"], keep="first")
 			nearest_ref_map = dict(zip(aln_map_df["primary_accession"], aln_map_df["alignment_name"]))
 			nearest_ref_accession = meta_accessions.map(nearest_ref_map)
-			nearest_genotype = nearest_ref_accession.map(lambda accession: lookup.get(accession, {}).get("nearest_reference_genotype", "") if accession else "")
-			nearest_subtype = nearest_ref_accession.map(lambda accession: lookup.get(accession, {}).get("nearest_reference_subtype", "") if accession else "")
+			blast_genotype = nearest_ref_accession.map(lambda accession: lookup.get(accession, {}).get("nearest_reference_genotype", "") if accession else "")
+			blast_subtype = nearest_ref_accession.map(lambda accession: lookup.get(accession, {}).get("nearest_reference_subtype", "") if accession else "")
 
-		df_meta_data["nearest_reference_genotype"] = nearest_genotype.where(direct_genotype == "", direct_genotype)
-		df_meta_data["nearest_reference_subtype"] = nearest_subtype.where(direct_subtype == "", direct_subtype)
+		# Resolution order per accession: it is itself a reference (direct) >
+		# tree neighbourhood > best BLAST hit.
+		fallback_genotype = tree_genotype.where(tree_genotype != "", blast_genotype)
+		fallback_subtype = tree_subtype.where(tree_subtype != "", blast_subtype)
+		df_meta_data["nearest_reference_genotype"] = fallback_genotype.where(direct_genotype == "", direct_genotype)
+		df_meta_data["nearest_reference_subtype"] = fallback_subtype.where(direct_subtype == "", direct_subtype)
 		return df_meta_data
 
 	def load_fasta(self):

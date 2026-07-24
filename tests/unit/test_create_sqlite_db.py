@@ -1387,3 +1387,103 @@ def test_create_sqlite_db_with_none_gene_info(tmp_path):
         ("Whole genome", "Whole genome", "whole_genome", "NULL")
     }
 
+
+def test_nearest_reference_prefers_tree_over_blast_hit(tmp_path: Path):
+    meta = tmp_path / "meta.tsv"
+    features = tmp_path / "features.tsv"
+    aln = tmp_path / "sequence_alignment.tsv"
+    gene = tmp_path / "gene.tsv"
+    m49_country = tmp_path / "m49_country.csv"
+    m49_inter = tmp_path / "m49_inter.csv"
+    m49_region = tmp_path / "m49_region.csv"
+    m49_sub = tmp_path / "m49_sub.csv"
+    proj = tmp_path / "software.tsv"
+    insertions = tmp_path / "insertions.tsv"
+    host_taxa = tmp_path / "host.tsv"
+    fasta = tmp_path / "seqs.fa"
+    reference_tsv = tmp_path / "reference.tsv"
+    usher_tree = tmp_path / "final-tree.nh"
+
+    write_tsv(
+        meta,
+        [
+            ["REF1", "reference"],
+            ["REF2", "reference"],
+            ["seqTree", "query"],
+            ["seqBlast", "query"],
+        ],
+        ["primary_accession", "accession_type"],
+    )
+    write_tsv(features, [["REF1", "P"]], ["primary_accession", "feature"])
+    # BLAST top hit (alignment_name) points seqTree at REF2 (genotype 2), but the
+    # tree places it next to REF1 (genotype 1). seqBlast is absent from the tree.
+    write_tsv(
+        aln,
+        [
+            ["REF1", "REF1", "ATGC"],
+            ["REF2", "REF2", "ATGC"],
+            ["seqTree", "REF2", "ATGC"],
+            ["seqBlast", "REF1", "ATGC"],
+        ],
+        ["primary_accession", "alignment_name", "aligned_seq"],
+    )
+    write_tsv(gene, [["geneA", "Gene A"]], ["name", "description"])
+    write_csv(m49_country, [["001", "World"]], ["m49_code", "name"])
+    write_csv(m49_inter, [["X", "Inter"]], ["code", "name"])
+    write_csv(m49_region, [["Y", "Region"]], ["code", "name"])
+    write_csv(m49_sub, [["Z", "SubRegion"]], ["code", "name"])
+    write_tsv(proj, [["Python", "3.11"]], ["Software", "Version"])
+    write_tsv(insertions, [["REF1", "none"]], ["primary_accession", "insertions"])
+    write_tsv(host_taxa, [["REF1", "host1"]], ["primary_accession", "host"])
+    fasta.write_text(
+        ">REF1\nATGC\n>REF2\nATGC\n>seqTree\nATGC\n>seqBlast\nATGC\n",
+        encoding="utf-8",
+    )
+    write_tsv(
+        reference_tsv,
+        [["REF1", "reference", "1", "1", "a"], ["REF2", "reference", "2", "2", "b"]],
+        ["primary_accession", "status", "segment", "genotype", "subtype"],
+    )
+    # seqTree clusters with REF1 (genotype 1) in the tree; seqBlast is not a tip.
+    usher_tree.write_text("((REF1:0.1,seqTree:0.1):0.2,REF2:0.2);\n", encoding="utf-8")
+
+    db = CreateSqliteDB(
+        meta_data=str(meta),
+        features=str(features),
+        pad_aln=str(aln),
+        gene_info=str(gene),
+        m49_countries=str(m49_country),
+        m49_interm_region=str(m49_inter),
+        m49_regions=str(m49_region),
+        m49_sub_regions=str(m49_sub),
+        proj_settings=str(proj),
+        fasta_sequence_file=str(fasta),
+        insertions=str(insertions),
+        host_taxa_file=str(host_taxa),
+        base_dir=str(tmp_path),
+        output_dir="SqliteDB",
+        db_name="tree_pref",
+        db_status="new db",
+        reference_tsv=str(reference_tsv),
+        usher_tree=str(usher_tree),
+    )
+
+    db.create_db()
+
+    conn = sqlite3.connect(tmp_path / "SqliteDB" / "tree_pref.db")
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT primary_accession, nearest_reference_genotype, nearest_reference_subtype FROM meta_data ORDER BY primary_accession"
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    assert rows == [
+        ("REF1", "1", "a"),
+        ("REF2", "2", "b"),
+        # Absent from the tree -> falls back to the BLAST hit REF1.
+        ("seqBlast", "1", "a"),
+        # Tree neighbour REF1 wins over the BLAST hit REF2.
+        ("seqTree", "1", "a"),
+    ]
+

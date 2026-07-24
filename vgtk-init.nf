@@ -985,6 +985,10 @@ process CREATE_SQLITE_DB {
     if [ -f "!{filtered_tsv}" ]; then
         FILTERED_DETAILS_ARG="-fd !{filtered_tsv}"
     fi
+    # nearest_reference_genotype/subtype is derived by CreateSqliteDB from the
+    # phylogenetic tree (UShER preferred over IQ-TREE via the args/manifest above),
+    # falling back to the best BLAST hit only for queries absent from every tree.
+    # That requires the reference list to carry genotype/subtype columns.
     REFERENCE_ARG=""
     if [ "!{params.ref_list}" != "null" ] && [ -n "!{params.ref_list}" ]; then
         if [ ! -f "!{params.ref_list}" ]; then
