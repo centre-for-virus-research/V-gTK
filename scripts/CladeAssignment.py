@@ -24,12 +24,14 @@ written back into the GenBank matrix.
 
 import os
 import csv
+import shutil
 import subprocess
 from os.path import join
 from argparse import ArgumentParser
 
 import read_file
 from clade_from_tree import assign_labels_from_tree
+from ExportRefListFromUpdateDb import load_reference_file_table
 
 
 def _clean(value):
@@ -41,17 +43,20 @@ def _clean(value):
 
 class CladeAssignment:
 	def __init__(self, major_clade, minor_clade, padded_alignment, base_dir, output_dir, gb_matrix,
-				 threads, iqtree_model, iqtree_tree=None, usher_tree=None):
-		self.major_clade = major_clade
-		self.minor_clade = minor_clade
+				 threads, iqtree_model, iqtree_tree=None, usher_tree=None,
+				 reference_tsv=None, assignments_out=None):
+		self.major_clade = self._normalize_optional_path(major_clade)
+		self.minor_clade = self._normalize_optional_path(minor_clade)
 		self.padded_alignment = padded_alignment
 		self.base_dir = base_dir
 		self.output_dir = output_dir
-		self.gb_matrix = gb_matrix
+		self.gb_matrix = self._normalize_optional_path(gb_matrix)
 		self.threads = str(threads)
 		self.iqtree_model = iqtree_model
 		self.iqtree_tree = self._normalize_optional_path(iqtree_tree)
 		self.usher_tree = self._normalize_optional_path(usher_tree)
+		self.reference_tsv = self._normalize_optional_path(reference_tsv)
+		self.assignments_out = self._normalize_optional_path(assignments_out)
 
 	@staticmethod
 	def _normalize_optional_path(path_value):
@@ -82,6 +87,44 @@ class CladeAssignment:
 				if acc and clade and acc not in mapping:
 					mapping[acc] = clade
 		return mapping
+
+	@staticmethod
+	def _read_reference_tsv_labels(reference_tsv):
+		"""Reference list carrying genotype/subtype columns (the shape HCV-style
+		datasets use, where no curated taxon file exists). genotype -> major clade,
+		subtype -> minor clade."""
+		major, minor = {}, {}
+		if not reference_tsv or not os.path.isfile(reference_tsv):
+			return major, minor
+		try:
+			df = load_reference_file_table(reference_tsv)
+		except (FileNotFoundError, ValueError):
+			return major, minor
+		if df is None or df.empty or "primary_accession" not in df.columns:
+			return major, minor
+		for _, row in df.iterrows():
+			acc = _clean(row.get("primary_accession"))
+			if not acc:
+				continue
+			genotype = _clean(row.get("genotype")) if "genotype" in df.columns else ""
+			subtype = _clean(row.get("subtype")) if "subtype" in df.columns else ""
+			if genotype and acc not in major:
+				major[acc] = genotype
+			if subtype and acc not in minor:
+				minor[acc] = subtype
+		return major, minor
+
+	def _load_reference_labels(self):
+		"""Reference clade labels from whichever source the dataset provides.
+
+		Curated taxon files (rabv-style) win where present; the reference list's
+		genotype/subtype columns (HCV-style) fill in everything else. Supporting
+		both is what lets the EPA-ng fallback work for datasets that never had
+		taxon files."""
+		major, minor = self._read_reference_tsv_labels(self.reference_tsv)
+		major.update(self._read_taxon_file(self.major_clade))
+		minor.update(self._read_taxon_file(self.minor_clade))
+		return major, minor
 
 	@staticmethod
 	def _matrix_key(row):
@@ -216,18 +259,50 @@ class CladeAssignment:
 		parts = [p for p in str(taxopath).split(';') if _clean(p)]
 		return _clean(parts[-1]) if parts else ""
 
-	def assign_with_epa_ng(self):
+	def _ensure_taxon_file(self, mapping, filename):
+		"""gappa requires a taxon file. Datasets whose labels come from the
+		reference list (rather than a curated taxon file) get one derived here,
+		which is what lets the EPA-ng fallback work beyond rabv-style inputs."""
+		path = join(self.base_dir, self.output_dir, filename)
+		with open(path, 'w', newline='', encoding='utf-8') as handle:
+			writer = csv.writer(handle, delimiter='\t')
+			for acc, clade in sorted(mapping.items()):
+				writer.writerow([acc, clade])
+		return path
+
+	def _resolve_taxon_file(self, configured, mapping, derived_name):
+		if configured and os.path.isfile(configured):
+			return configured
+		return self._ensure_taxon_file(mapping, derived_name)
+
+	def assign_with_epa_ng(self, reference_major=None, reference_minor=None):
+		if reference_major is None or reference_minor is None:
+			reference_major, reference_minor = self._load_reference_labels()
 		query_fa, ref_fa = self.alignment()
 		prefix = join(self.base_dir, self.output_dir, 'ref_tree')
 		self.iqtree(ref_fa, prefix)
 		self.epa_ng(ref_fa, query_fa, prefix)
-		major_pq = self._gappa_assign(self.major_clade, 'gappa_major_clades')
-		minor_pq = self._gappa_assign(self.minor_clade, 'gappa_minor_clades')
+		major_taxon = self._resolve_taxon_file(self.major_clade, reference_major, 'derived_major_clades.tsv')
+		minor_taxon = self._resolve_taxon_file(self.minor_clade, reference_minor, 'derived_minor_clades.tsv')
+		major_pq = self._gappa_assign(major_taxon, 'gappa_major_clades')
+		minor_pq = self._gappa_assign(minor_taxon, 'gappa_minor_clades')
 		major = {name: self._leaf_taxon(tp) for name, tp in self.parse_gappa_per_query(major_pq).items()}
 		minor = {name: self._leaf_taxon(tp) for name, tp in self.parse_gappa_per_query(minor_pq).items()}
 		return major, minor
 
 	# ----------------------------------------------------------------- output
+
+	def write_assignments_tsv(self, major_clades, minor_clades, path):
+		"""Standalone assignment table consumed by CreateSqliteDB as the tier
+		between the tree and the BLAST top hit."""
+		accessions = sorted(set(major_clades) | set(minor_clades))
+		with open(path, "w", newline="", encoding="utf-8") as handle:
+			writer = csv.writer(handle, delimiter="\t")
+			writer.writerow(["primary_accession", "genotype", "subtype"])
+			for acc in accessions:
+				writer.writerow([acc, major_clades.get(acc, ""), minor_clades.get(acc, "")])
+		print(f"[info] Wrote {len(accessions)} clade assignment(s) to {path}")
+		return path
 
 	def write_clades_to_gb_matrix(self, major_clades, minor_clades):
 		temp_file = self.gb_matrix + '.tmp'
@@ -249,8 +324,12 @@ class CladeAssignment:
 
 	def process(self):
 		os.makedirs(join(self.base_dir, self.output_dir), exist_ok=True)
-		reference_major = self._read_taxon_file(self.major_clade)
-		reference_minor = self._read_taxon_file(self.minor_clade)
+		reference_major, reference_minor = self._load_reference_labels()
+		if not reference_major and not reference_minor:
+			raise ValueError(
+				"No reference clade labels available: supply --major_clade/--minor_clade "
+				"taxon files or a --reference_tsv carrying genotype/subtype columns."
+			)
 
 		tree_path, source = self._select_tree()
 		if tree_path:
@@ -258,14 +337,19 @@ class CladeAssignment:
 			query_major, query_minor = self.assign_from_tree(tree_path, reference_major, reference_minor)
 		else:
 			print("[info] No IQ-TREE/UShER tree available; falling back to EPA-ng placement.")
-			query_major, query_minor = self.assign_with_epa_ng()
+			query_major, query_minor = self.assign_with_epa_ng(reference_major, reference_minor)
 
 		# References keep their curated clade; queries take the assigned one.
 		major = dict(reference_major)
 		major.update({acc: clade for acc, clade in query_major.items() if clade})
 		minor = dict(reference_minor)
 		minor.update({acc: clade for acc, clade in query_minor.items() if clade})
-		self.write_clades_to_gb_matrix(major, minor)
+
+		if self.assignments_out:
+			self.write_assignments_tsv(major, minor, self.assignments_out)
+		if self.gb_matrix:
+			self.write_clades_to_gb_matrix(major, minor)
+		return major, minor
 
 
 if __name__ == "__main__":
@@ -275,7 +359,9 @@ if __name__ == "__main__":
 	parser.add_argument('-p', '--padded_alignment', help='Padded alignment FASTA', default='tmp/Pad-alignment/NC_001542.aligned_merged_MSA.fasta')
 	parser.add_argument('-b', '--base_dir', help='Base directory', default='tmp')
 	parser.add_argument('-o', '--output_dir', help='Output directory', default='CladeAssignment')
-	parser.add_argument('-g', '--gb_matrix', help='GenBank matrix TSV', default='tmp/GenBank-matrix/gB_matrix_raw.tsv')
+	parser.add_argument('-g', '--gb_matrix', help='GenBank matrix TSV to annotate in place (optional)', default=None)
+	parser.add_argument('-r', '--reference_tsv', help='Reference list TSV with genotype/subtype columns', default=None)
+	parser.add_argument('-a', '--assignments_out', help='Write assignments TSV (primary_accession/genotype/subtype)', default=None)
 	parser.add_argument('-t', '--threads', help='Threads for iqtree (EPA-ng fallback)', default='7')
 	parser.add_argument('-m', '--iqtree_model', help='iqtree model (EPA-ng fallback)', default='GTR+G')
 	parser.add_argument('-it', '--iqtree_tree', help='IQ-TREE newick with query + reference tips', default=None)
@@ -293,4 +379,6 @@ if __name__ == "__main__":
 		args.iqtree_model,
 		iqtree_tree=args.iqtree_tree,
 		usher_tree=args.usher_tree,
+		reference_tsv=args.reference_tsv,
+		assignments_out=args.assignments_out,
 	).process()

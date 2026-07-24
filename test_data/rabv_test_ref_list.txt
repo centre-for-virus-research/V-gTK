@@ -1,28 +1,28 @@
-NC_001542	master
-KX148218	reference
-PX132041	reference
-KX148203	reference
-PX132042	reference
-AB981664	reference
-PX476159	reference
-EU293111	reference
-PX476147	reference
-PX476155	reference
-JN786877	reference
-PX476160	reference
-PX476154	reference
-PX476161	reference
-PX476156	reference
-PX476157	reference
-PX476158	reference
-JQ970482	reference
-PX458727	reference
-PX458728	reference
-KX148254	reference
-PX476148	reference
-PX476149	reference
-PX476150	reference
-PX476146	reference
-PX476151	reference
-PX476152	reference
-PX476153	reference
+NC_001542	master	1	Cosmopolitan	Vac
+KX148218	reference	1	NA	NA
+PX132041	reference	1	NA	NA
+KX148203	reference	1	NA	NA
+PX132042	reference	1	NA	NA
+AB981664	reference	1	NA	NA
+PX476159	reference	1	NA	NA
+EU293111	reference	1	Asian	SEA3
+PX476147	reference	1	NA	NA
+PX476155	reference	1	NA	NA
+JN786877	reference	1	NA	NA
+PX476160	reference	1	NA	NA
+PX476154	reference	1	NA	NA
+PX476161	reference	1	NA	NA
+PX476156	reference	1	NA	NA
+PX476157	reference	1	NA	NA
+PX476158	reference	1	NA	NA
+JQ970482	reference	1	NA	NA
+PX458727	reference	1	NA	NA
+PX458728	reference	1	NA	NA
+KX148254	reference	1	NA	NA
+PX476148	reference	1	NA	NA
+PX476149	reference	1	NA	NA
+PX476150	reference	1	NA	NA
+PX476146	reference	1	NA	NA
+PX476151	reference	1	NA	NA
+PX476152	reference	1	NA	NA
+PX476153	reference	1	NA	NA

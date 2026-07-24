@@ -683,6 +683,29 @@ if (( STEP >= START_STEP )); then
     MANIFEST_ROWS="$(wc -l < "${TREE_MANIFEST}" 2>/dev/null || echo 0)"
     [[ "$MANIFEST_ROWS" -gt 1 ]] && TREE_MANIFEST_ARG=( --tree_manifest "${TREE_MANIFEST}" )
 
+    # EPA-ng fallback: only when this run produced NO usable tree. With a tree the
+    # tree neighbourhood is both cheaper and more consistent, so EPA-ng stays off.
+    # tree_free is excluded deliberately: it opts out of phylogenetics for speed,
+    # and EPA-ng (reference tree build + placement of every query) is the slowest
+    # way to assign clades. Those runs fall through to the BLAST top hit.
+    CLADE_ARG=()
+    if [[ "$TREE_FREE" == "true" ]]; then
+        echo "[info] tree_free mode: skipping EPA-ng clade assignment; using BLAST top-hit genotypes."
+    elif [[ -z "$IQTREE_TREEFILE" && -z "$USHER_TREEFILE" && -f "$REF_LIST" \
+          && ${#PADDED_MSA_FILES[@]} -gt 0 && -f "${PADDED_MSA_FILES[0]}" ]]; then
+        echo "[info] No IQ-TREE/UShER tree in this run; running EPA-ng clade assignment fallback."
+        # Clade labels come from the ref_list genotype/subtype columns for every
+        # dataset - no separate per-organism taxon files.
+        if python "${SCRIPTS}/CladeAssignment.py" \
+                -p "${PADDED_MSA_FILES[0]}" -b "${WORK_DIR}" -o CladeAssignment \
+                -r "${REF_LIST}" -a "${WORK_DIR}/clade_assignments.tsv" \
+                -t "${THREADS}"; then
+            CLADE_ARG=( --clade_assignments "${WORK_DIR}/clade_assignments.tsv" )
+        else
+            echo "[warn] EPA-ng clade assignment failed; falling back to BLAST top-hit genotypes." >&2
+        fi
+    fi
+
     run_step "CREATE_SQLITE_DB" \
         python "${SCRIPTS}/CreateSqliteDB.py" \
             -m "${GB_MATRIX}" \
@@ -705,6 +728,7 @@ if (( STEP >= START_STEP )); then
             "${FILTERED_DETAILS_ARG[@]}" \
             "${TREE_MANIFEST_ARG[@]}" \
             "${REFERENCE_ARG[@]}" \
+            "${CLADE_ARG[@]+"${CLADE_ARG[@]}"}" \
             "${UPDATE_ARGS[@]}"
 
     # ANNOTATE_MUTATIONS (optional – only when mutation_catalog provided)

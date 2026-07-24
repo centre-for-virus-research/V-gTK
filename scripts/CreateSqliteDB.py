@@ -42,6 +42,7 @@ class CreateSqliteDB:
 		filtered_details_file=None,
 		tree_manifest=None,
 		reference_tsv=None,
+		clade_assignments=None,
 		update=False,
 		update_db=None,
 		batch_id=None,
@@ -71,6 +72,7 @@ class CreateSqliteDB:
 		self.filtered_details_file = filtered_details_file
 		self.tree_manifest = tree_manifest
 		self.reference_tsv = reference_tsv
+		self.clade_assignments = clade_assignments
 		self.update = bool(update)
 		self.update_db = update_db
 		self.batch_id = batch_id or datetime.now().strftime("batch_%Y%m%d_%H%M%S")
@@ -363,6 +365,25 @@ class CreateSqliteDB:
 					existing["subtype"] = labels["subtype"]
 		return merged
 
+	def _load_clade_assignments(self):
+		"""Precomputed assignments from CladeAssignment.py (the EPA-ng fallback,
+		used when the run produced no usable tree). Columns: primary_accession,
+		genotype, subtype."""
+		path = self.clade_assignments
+		if not path or not os.path.isfile(path):
+			return {}
+		assignments = {}
+		with open(path, "r", newline="", encoding="utf-8") as handle:
+			for row in csv.DictReader(handle, delimiter="\t"):
+				accession = (row.get("primary_accession") or "").strip()
+				if not accession:
+					continue
+				genotype = (row.get("genotype") or "").strip()
+				subtype = (row.get("subtype") or "").strip()
+				if genotype or subtype:
+					assignments[accession] = {"genotype": genotype, "subtype": subtype}
+		return assignments
+
 	def _add_reference_columns(self, df_meta_data, df_aln):
 		lookup = self._load_reference_lookup()
 		if not lookup or "primary_accession" not in df_meta_data.columns:
@@ -392,10 +413,17 @@ class CreateSqliteDB:
 			blast_genotype = nearest_ref_accession.map(lambda accession: lookup.get(accession, {}).get("nearest_reference_genotype", "") if accession else "")
 			blast_subtype = nearest_ref_accession.map(lambda accession: lookup.get(accession, {}).get("nearest_reference_subtype", "") if accession else "")
 
+		# EPA-ng placement results, only produced when the run had no usable tree.
+		epa_labels = self._load_clade_assignments()
+		epa_genotype = meta_accessions.map(lambda accession: epa_labels.get(accession, {}).get("genotype", ""))
+		epa_subtype = meta_accessions.map(lambda accession: epa_labels.get(accession, {}).get("subtype", ""))
+
 		# Resolution order per accession: it is itself a reference (direct) >
-		# tree neighbourhood > best BLAST hit.
-		fallback_genotype = tree_genotype.where(tree_genotype != "", blast_genotype)
-		fallback_subtype = tree_subtype.where(tree_subtype != "", blast_subtype)
+		# tree neighbourhood > EPA-ng placement > best BLAST hit.
+		fallback_genotype = epa_genotype.where(epa_genotype != "", blast_genotype)
+		fallback_subtype = epa_subtype.where(epa_subtype != "", blast_subtype)
+		fallback_genotype = tree_genotype.where(tree_genotype != "", fallback_genotype)
+		fallback_subtype = tree_subtype.where(tree_subtype != "", fallback_subtype)
 		df_meta_data["nearest_reference_genotype"] = fallback_genotype.where(direct_genotype == "", direct_genotype)
 		df_meta_data["nearest_reference_subtype"] = fallback_subtype.where(direct_subtype == "", direct_subtype)
 		return df_meta_data
@@ -1269,6 +1297,7 @@ def process(args):
 		args.filtered_details,
 		args.tree_manifest,
 		args.reference_tsv,
+		clade_assignments=args.clade_assignments,
 		update=args.update,
 		update_db=args.update_db,
 		batch_id=args.batch_id,
@@ -1306,6 +1335,7 @@ if __name__ == "__main__":
 	parser.add_argument('--update_db', default=None, help='Path to existing DB file for update mode')
 	parser.add_argument('--batch_id', default=None, help='Optional update batch identifier for audit logging')
 	parser.add_argument('--reference_tsv', help='Optional reference TSV with columns: primary_accession, status,segment,genotype,subtype, to help resolve segment info for tree records', default=None)
+	parser.add_argument('--clade_assignments', help='Optional TSV (primary_accession, genotype, subtype) from CladeAssignment.py, used when no tree is available', default=None)
 	args = parser.parse_args()
 	if args.update_db:
 		args.update_db = normpath(args.update_db)

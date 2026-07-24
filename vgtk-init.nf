@@ -916,6 +916,7 @@ process CREATE_SQLITE_DB {
         path usher_dirs, stageAs: 'usher_inputs/*'           // Can be multiple directories for segmented viruses
         path filtered_tsv
         path filtered_ids
+        path padded_msa, stageAs: 'padded_inputs/*'          // Needed only for the EPA-ng fallback (no tree)
     output:
         path "${params.db_name}.db", emit: sqlite_db
         path "db_summary.txt", emit: db_summary_out, optional: true
@@ -998,6 +999,31 @@ process CREATE_SQLITE_DB {
         REFERENCE_ARG="--reference_tsv !{params.ref_list}"
     fi
 
+    # EPA-ng fallback: only when this run produced NO usable tree. With a tree the
+    # tree neighbourhood is both cheaper and more consistent, so EPA-ng stays off.
+    # tree_free is excluded deliberately: it opts out of phylogenetics for speed,
+    # and EPA-ng (reference tree build + placement of every query) is the slowest
+    # way to assign clades. Those runs fall through to the BLAST top hit.
+    CLADE_ARG=""
+    if [ "!{params.tree_free}" = "true" ]; then
+        echo "[info] tree_free mode: skipping EPA-ng clade assignment; using BLAST top-hit genotypes."
+    elif [ -z "$IQTREE_FILE" ] && [ -z "$USHER_FILE" ] && [ -n "$REFERENCE_ARG" ]; then
+        PADDED_FASTA=$(find -L padded_inputs -name "*.fasta" -print -quit 2>/dev/null || true)
+        if [ -n "$PADDED_FASTA" ] && [ -f "$PADDED_FASTA" ]; then
+            echo "[info] No IQ-TREE/UShER tree in this run; running EPA-ng clade assignment fallback."
+            # Clade labels come from the ref_list genotype/subtype columns for every
+            # dataset - no separate per-organism taxon files.
+            if python !{scripts_dir}/CladeAssignment.py \
+                -p "$PADDED_FASTA" -b . -o CladeAssignment \
+                -r !{params.ref_list} -a clade_assignments.tsv \
+                -t !{task.cpus}; then
+                CLADE_ARG="--clade_assignments clade_assignments.tsv"
+            else
+                echo "[warn] EPA-ng clade assignment failed; falling back to BLAST top-hit genotypes." >&2
+            fi
+        fi
+    fi
+
     UPDATE_ARGS=""
     if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
         UPDATE_ARGS="--update --update_db !{params.update_db} --batch_id nf_!{workflow.runName}"
@@ -1019,7 +1045,7 @@ process CREATE_SQLITE_DB {
     -mir !{projectDir}/assets/m49_intermediate_region.csv \
     -mr !{projectDir}/assets/m49_region.csv \
     -msr !{projectDir}/assets/m49_sub_region.csv \
-    -d !{params.db_name} -b . -o . ${IQTREE_ARG} ${USHER_ARG} ${CLUSTER_ARG} ${FILTERED_ARG} ${FILTERED_DETAILS_ARG} ${TREE_MANIFEST_ARG} ${REFERENCE_ARG} ${UPDATE_ARGS} | tee db_summary.txt
+    -d !{params.db_name} -b . -o . ${IQTREE_ARG} ${USHER_ARG} ${CLUSTER_ARG} ${FILTERED_ARG} ${FILTERED_DETAILS_ARG} ${TREE_MANIFEST_ARG} ${REFERENCE_ARG} ${CLADE_ARG} ${UPDATE_ARGS} | tee db_summary.txt
     if [ "!{params.mutation_catalog}" != "null" ] && [ -n "!{params.mutation_catalog}" ]; then
         if [ ! -f "!{params.mutation_catalog}" ]; then
             echo "[error] mutation catalog not found: !{params.mutation_catalog}" >&2
@@ -1491,7 +1517,8 @@ workflow {
                      mmseq_collected,
                      usher_collected,
                      COLLECT_FILTERED_SEQUENCES.out.filtered_tsv,
-                     COLLECT_FILTERED_SEQUENCES.out.filtered_ids
+                     COLLECT_FILTERED_SEQUENCES.out.filtered_ids,
+                     PAD_ALIGNMENT.out.merged_msa.collect()
                      )
 
     if (params.test == "1") {

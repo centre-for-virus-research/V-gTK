@@ -1388,6 +1388,123 @@ def test_create_sqlite_db_with_none_gene_info(tmp_path):
     }
 
 
+def _reference_metadata_fixture(tmp_path: Path, aln_rows, meta_rows, fasta_ids):
+    """Shared scaffolding for the nearest_reference tier tests."""
+    paths = {name: tmp_path / fname for name, fname in {
+        "meta": "meta.tsv", "features": "features.tsv", "aln": "sequence_alignment.tsv",
+        "gene": "gene.tsv", "m49_country": "m49_country.csv", "m49_inter": "m49_inter.csv",
+        "m49_region": "m49_region.csv", "m49_sub": "m49_sub.csv", "proj": "software.tsv",
+        "insertions": "insertions.tsv", "host_taxa": "host.tsv", "fasta": "seqs.fa",
+        "reference_tsv": "reference.tsv",
+    }.items()}
+
+    write_tsv(paths["meta"], meta_rows, ["primary_accession", "accession_type"])
+    write_tsv(paths["features"], [["REF1", "P"]], ["primary_accession", "feature"])
+    write_tsv(paths["aln"], aln_rows, ["primary_accession", "alignment_name", "aligned_seq"])
+    write_tsv(paths["gene"], [["geneA", "Gene A"]], ["name", "description"])
+    write_csv(paths["m49_country"], [["001", "World"]], ["m49_code", "name"])
+    write_csv(paths["m49_inter"], [["X", "Inter"]], ["code", "name"])
+    write_csv(paths["m49_region"], [["Y", "Region"]], ["code", "name"])
+    write_csv(paths["m49_sub"], [["Z", "SubRegion"]], ["code", "name"])
+    write_tsv(paths["proj"], [["Python", "3.11"]], ["Software", "Version"])
+    write_tsv(paths["insertions"], [["REF1", "none"]], ["primary_accession", "insertions"])
+    write_tsv(paths["host_taxa"], [["REF1", "host1"]], ["primary_accession", "host"])
+    paths["fasta"].write_text("".join(f">{i}\nATGC\n" for i in fasta_ids), encoding="utf-8")
+    write_tsv(
+        paths["reference_tsv"],
+        [["REF1", "reference", "1", "1", "a"], ["REF2", "reference", "2", "2", "b"]],
+        ["primary_accession", "status", "segment", "genotype", "subtype"],
+    )
+    return paths
+
+
+def _build_db(paths, tmp_path: Path, db_name, **kwargs):
+    db = CreateSqliteDB(
+        meta_data=str(paths["meta"]),
+        features=str(paths["features"]),
+        pad_aln=str(paths["aln"]),
+        gene_info=str(paths["gene"]),
+        m49_countries=str(paths["m49_country"]),
+        m49_interm_region=str(paths["m49_inter"]),
+        m49_regions=str(paths["m49_region"]),
+        m49_sub_regions=str(paths["m49_sub"]),
+        proj_settings=str(paths["proj"]),
+        fasta_sequence_file=str(paths["fasta"]),
+        insertions=str(paths["insertions"]),
+        host_taxa_file=str(paths["host_taxa"]),
+        base_dir=str(tmp_path),
+        output_dir="SqliteDB",
+        db_name=db_name,
+        db_status="new db",
+        reference_tsv=str(paths["reference_tsv"]),
+        **kwargs,
+    )
+    db.create_db()
+    conn = sqlite3.connect(tmp_path / "SqliteDB" / f"{db_name}.db")
+    rows = conn.execute(
+        "SELECT primary_accession, nearest_reference_genotype, nearest_reference_subtype "
+        "FROM meta_data ORDER BY primary_accession"
+    ).fetchall()
+    conn.close()
+    return dict((r[0], (r[1], r[2])) for r in rows)
+
+
+def test_nearest_reference_uses_epa_assignments_when_no_tree(tmp_path: Path):
+    """With no tree, EPA-ng assignments outrank the BLAST top hit."""
+    paths = _reference_metadata_fixture(
+        tmp_path,
+        aln_rows=[
+            ["REF1", "REF1", "ATGC"], ["REF2", "REF2", "ATGC"],
+            ["seqEpa", "REF2", "ATGC"],   # BLAST says genotype 2
+            ["seqBlast", "REF2", "ATGC"],  # BLAST says genotype 2, no EPA row
+        ],
+        meta_rows=[["REF1", "reference"], ["REF2", "reference"], ["seqEpa", "query"], ["seqBlast", "query"]],
+        fasta_ids=["REF1", "REF2", "seqEpa", "seqBlast"],
+    )
+    clade_tsv = tmp_path / "clade_assignments.tsv"
+    write_tsv(clade_tsv, [["seqEpa", "1", "a"]], ["primary_accession", "genotype", "subtype"])
+
+    rows = _build_db(paths, tmp_path, "epa_tier", clade_assignments=str(clade_tsv))
+
+    assert rows["seqEpa"] == ("1", "a")      # EPA-ng beat the BLAST hit
+    assert rows["seqBlast"] == ("2", "b")    # no EPA row -> BLAST fallback
+    assert rows["REF1"] == ("1", "a")        # references unaffected
+
+
+def test_nearest_reference_tree_outranks_epa_assignments(tmp_path: Path):
+    """Full precedence: direct > tree > EPA-ng > BLAST."""
+    paths = _reference_metadata_fixture(
+        tmp_path,
+        aln_rows=[
+            ["REF1", "REF1", "ATGC"], ["REF2", "REF2", "ATGC"],
+            ["seqAll", "REF2", "ATGC"],  # BLAST -> genotype 2
+        ],
+        meta_rows=[["REF1", "reference"], ["REF2", "reference"], ["seqAll", "query"]],
+        fasta_ids=["REF1", "REF2", "seqAll"],
+    )
+    usher_tree = tmp_path / "final-tree.nh"
+    usher_tree.write_text("((REF1:0.1,seqAll:0.1):0.2,REF2:0.2);\n", encoding="utf-8")  # tree -> genotype 1
+    clade_tsv = tmp_path / "clade_assignments.tsv"
+    write_tsv(clade_tsv, [["seqAll", "2", "b"]], ["primary_accession", "genotype", "subtype"])
+
+    rows = _build_db(paths, tmp_path, "tree_over_epa",
+                     usher_tree=str(usher_tree), clade_assignments=str(clade_tsv))
+
+    assert rows["seqAll"] == ("1", "a")  # tree wins over both EPA-ng and BLAST
+
+
+def test_missing_clade_assignments_file_is_ignored(tmp_path: Path):
+    paths = _reference_metadata_fixture(
+        tmp_path,
+        aln_rows=[["REF1", "REF1", "ATGC"], ["seqBlast", "REF1", "ATGC"]],
+        meta_rows=[["REF1", "reference"], ["seqBlast", "query"]],
+        fasta_ids=["REF1", "seqBlast"],
+    )
+    rows = _build_db(paths, tmp_path, "missing_clade_file",
+                     clade_assignments=str(tmp_path / "does_not_exist.tsv"))
+    assert rows["seqBlast"] == ("1", "a")  # falls straight through to BLAST
+
+
 def test_nearest_reference_prefers_tree_over_blast_hit(tmp_path: Path):
     meta = tmp_path / "meta.tsv"
     features = tmp_path / "features.tsv"
