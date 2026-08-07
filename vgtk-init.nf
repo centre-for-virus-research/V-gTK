@@ -101,7 +101,7 @@ def scriptDefinedParams = [
     "gisaid_dir", "previous_db", "conda_path", "test_max_cluster_seqs", "max_threads", "iqtree_mem", "ref_set_aligned",
     "min_seq_length_ratio", "max_aln_gap_proportion", "tree_free", "base_tree_only",
     "pivot_isolate_key", "pivot_required_segments",
-    "mmseqs_two_step", "mmseqs_min_completeness", "mmseqs_step2_min_seq_id"
+    "mmseqs_two_step", "mmseqs_min_completeness"
     // Add all parameter names defined above
 ]
 
@@ -684,9 +684,6 @@ process MMSEQS_CLUSTERING{
         TWO_STEP_ARGS=""
         if [ "!{params.mmseqs_two_step}" = "true" ]; then
             TWO_STEP_ARGS="--two-step --min-completeness !{params.mmseqs_min_completeness}"
-            if [ "!{params.mmseqs_step2_min_seq_id}" != "null" ] && [ -n "!{params.mmseqs_step2_min_seq_id}" ]; then
-                TWO_STEP_ARGS="${TWO_STEP_ARGS} --step2-min-seq-id !{params.mmseqs_step2_min_seq_id}"
-            fi
         fi
 
         python !{scripts_dir}/MMseqsClustering.py \

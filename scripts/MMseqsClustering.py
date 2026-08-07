@@ -258,8 +258,7 @@ def write_aligned_representatives(alignment_fasta, cluster_tsv, output_fasta):
 
 
 def run_mmseqs_clustering(input_fasta, output_dir, min_seq_id, threads=8, strip_gaps=True, max_seqs=None,
-                          sort_by_quality=True, two_step=False, min_completeness=0.9,
-                          step2_min_seq_id=None):
+                          sort_by_quality=True, two_step=False, min_completeness=0.9):
     base_name = os.path.splitext(os.path.basename(input_fasta))[0]
     mmseqs_dir = os.path.join(output_dir, base_name)
     segments_db_dir = os.path.join(mmseqs_dir, "segments_DB")
@@ -357,16 +356,21 @@ def run_mmseqs_clustering(input_fasta, output_dir, min_seq_id, threads=8, strip_
         print(f"[info] Backbone: {count} aligned representatives from complete sequences")
 
         if remainder_source:
-            step2_id = min_seq_id if step2_min_seq_id is None else step2_min_seq_id
+            # Deliberately the same identity as step 1. Step 2 assigns fragments to
+            # clusters step 1 already defined; a looser threshold here would label a
+            # sequence as belonging to a min_seq_id cluster on a weaker match, so the
+            # cluster column would mean two different things. Sequences that match
+            # nothing get a NULL cluster, which is the honest answer - they stay in
+            # the database and are still placed on the tree by UShER.
             assignments = assign_remainder_to_representatives(
                 remainder_source, rep_fasta, os.path.join(mmseqs_dir, "step2_tmp"),
-                threads, step2_id)
+                threads, min_seq_id)
             with open(tsv_output, "a") as handle:
                 for member, representative in sorted(assignments.items()):
                     handle.write(f"{representative}\t{member}\n")
             held = sum(1 for _ in SeqIO.parse(remainder_source, "fasta"))
             print(f"[info] Step 2: assigned {len(assignments)}/{held} held-back sequences to a "
-                  f"backbone cluster at >= {float(step2_id):.0%} identity; "
+                  f"backbone cluster at >= {float(min_seq_id):.0%} identity; "
                   f"{held - len(assignments)} left unassigned (NULL cluster)")
             shutil.rmtree(os.path.join(mmseqs_dir, "step2_tmp"), ignore_errors=True)
         for path in (remainder_source,):
@@ -404,11 +408,6 @@ if __name__ == "__main__":
     parser.add_argument("--min-completeness", type=float, default=0.9,
                         help="Fraction of the alignment width a sequence must cover with unambiguous "
                              "bases to join step 1 (default: 0.9)")
-    parser.add_argument("--step2-min-seq-id", type=float, default=None,
-                        help="Identity required to assign a held-back sequence to a backbone cluster "
-                             "(default: same as --min-seq-id). On influenza HA, 0.98 assigns 63%% of "
-                             "held-back sequences, 0.95 assigns 78%%, 0.90 assigns 99%%; unassigned "
-                             "sequences get a NULL cluster in the database.")
     parser.add_argument("--no-quality-sort", action="store_true",
                         help="Do not order clustering input by informative (non-N, non-gap) length. "
                              "By default the input is sorted longest-informative-first and createdb "
@@ -434,8 +433,7 @@ if __name__ == "__main__":
                 run_mmseqs_clustering(trimmed_fasta, args.output_dir, args.min_seq_id, args.threads,
                                       strip_gaps=not args.keep_gaps, max_seqs=args.max_seqs,
                                       sort_by_quality=not args.no_quality_sort,
-                                      two_step=args.two_step, min_completeness=args.min_completeness,
-                                      step2_min_seq_id=args.step2_min_seq_id)
+                                      two_step=args.two_step, min_completeness=args.min_completeness)
             print("All processing completed.")
             exit(0)
 
@@ -454,8 +452,7 @@ if __name__ == "__main__":
             run_mmseqs_clustering(input_fasta_path, args.output_dir, args.min_seq_id, args.threads,
                                   strip_gaps=not args.keep_gaps, max_seqs=args.max_seqs,
                                       sort_by_quality=not args.no_quality_sort,
-                                      two_step=args.two_step, min_completeness=args.min_completeness,
-                                      step2_min_seq_id=args.step2_min_seq_id)
+                                      two_step=args.two_step, min_completeness=args.min_completeness)
 
     print("All processing completed.")
 
