@@ -13,7 +13,12 @@ from Bio import Phylo, SeqIO
 
 
 class UsherPlacement:
-	def __init__(self, padded_aln, output_dir, mmseq_cluster_dir=None, iqtree_dir=None, update_db=None, threads=1, test_mode=False, chunk_size=50000, chunk_threshold=100000, starter_tree=None, existing_ids_file=None):
+	# Bases that carry phylogenetic information. N, gaps and the IUPAC ambiguity
+	# codes tell usher nothing about which branch a sample belongs on, so they do
+	# not count toward a sequence's quality score.
+	INFORMATIVE_BASES = ("A", "C", "G", "T", "U")
+
+	def __init__(self, padded_aln, output_dir, mmseq_cluster_dir=None, iqtree_dir=None, update_db=None, threads=1, test_mode=False, chunk_size=50000, chunk_threshold=100000, starter_tree=None, existing_ids_file=None, placement_order="quality"):
 		self.padded_aln = padded_aln
 		self.output_dir = output_dir
 		self.mmseq_cluster_dir = self._normalize_optional_path(mmseq_cluster_dir)
@@ -25,6 +30,9 @@ class UsherPlacement:
 		self.chunk_threshold = max(1, int(chunk_threshold))
 		self.starter_tree = self._normalize_optional_path(starter_tree)
 		self.existing_ids_file = self._normalize_optional_path(existing_ids_file)
+		self.placement_order = str(placement_order or "quality").strip().lower()
+		if self.placement_order not in ("quality", "input"):
+			raise ValueError(f"placement_order must be 'quality' or 'input', got {placement_order!r}")
 		self._usher_supports_T = None
 
 	@staticmethod
@@ -278,6 +286,48 @@ class UsherPlacement:
 					writer.writerow([anchor_id, member_id, int(anchor_id in placeable_ids)])
 		return report_path
 
+	@classmethod
+	def _informative_length(cls, sequence):
+		"""Unambiguous bases in a sequence: everything that is not N, a gap or an
+		IUPAC ambiguity code. str.count runs in C, so this stays cheap over a
+		full segment alignment."""
+		seq = str(sequence).upper()
+		return sum(seq.count(base) for base in cls.INFORMATIVE_BASES)
+
+	def order_ids_by_quality(self, alignment_fasta, ids):
+		"""Rank ids by informative base count, longest first.
+
+		usher adds samples one at a time, in VCF column order, each onto the tree
+		built so far, and each batch is placed onto the protobuf produced by the
+		previous batch. So this ranking is the literal placement order, end to end.
+
+		Placing well-covered sequences first means a partial sequence is later
+		matched against a tree that already holds the full-length relatives it
+		belongs next to, instead of being stranded on whichever branch happens to
+		fit the handful of sites it covers - a misplacement that never gets
+		revisited once made.
+		"""
+		wanted = set(ids)
+		scores = {}
+		for record in SeqIO.parse(alignment_fasta, "fasta"):
+			seq_id = str(record.id).strip()
+			if seq_id in wanted:
+				scores[seq_id] = self._informative_length(record.seq)
+
+		# Anything missing from the alignment sorts last rather than vanishing.
+		# The id is a tie-break so the order is deterministic across runs.
+		ordered = sorted(ids, key=lambda acc: (-scores.get(acc, -1), acc))
+		return ordered, scores
+
+	def write_placement_order_report(self, ordered_ids, scores):
+		report_path = os.path.join(self.output_dir, "placement_order.tsv")
+		with open(report_path, "w", encoding="utf-8", newline="") as handle:
+			writer = csv.writer(handle, delimiter="\t")
+			writer.writerow(["rank", "accession", "informative_bases", "batch"])
+			for rank, acc in enumerate(ordered_ids, start=1):
+				writer.writerow([rank, acc, scores.get(acc, ""), ((rank - 1) // self.chunk_size) + 1])
+		return report_path
+
 	@staticmethod
 	def _render_progress_bar(completed, total, width=30):
 		if total <= 0:
@@ -303,7 +353,6 @@ class UsherPlacement:
 		if not placeable_ids:
 			return []
 
-		placeable_set = set(placeable_ids)
 		ref_record = None
 		for record in SeqIO.parse(alignment_fasta, "fasta"):
 			if record.id == ref_id:
@@ -314,43 +363,79 @@ class UsherPlacement:
 
 		chunk_dir = os.path.join(self.output_dir, "chunks")
 		os.makedirs(chunk_dir, exist_ok=True)
-		chunk_paths = []
-		chunk_handle = None
-		chunk_index = 0
-		written_in_chunk = 0
 
-		def open_chunk():
-			nonlocal chunk_handle, chunk_index, written_in_chunk
-			chunk_index += 1
-			written_in_chunk = 0
-			chunk_path = os.path.join(chunk_dir, f"chunk_{chunk_index:04d}.fasta")
-			chunk_paths.append(chunk_path)
-			chunk_handle = open(chunk_path, "w", encoding="utf-8")
-			SeqIO.write([ref_record], chunk_handle, "fasta")
+		# placeable_ids carries the order sequences should be placed in, so a
+		# sequence's rank decides its batch: batch 1 holds the highest-quality
+		# sequences. Records stream straight to their batch file, so nothing
+		# beyond the id -> batch map is held in memory. Order *within* each batch
+		# is fixed up afterwards - see the rank-order rewrite below.
+		id_to_chunk = {acc: rank // self.chunk_size for rank, acc in enumerate(placeable_ids)}
+		total_chunks = (len(placeable_ids) + self.chunk_size - 1) // self.chunk_size
+		chunk_paths = [
+			os.path.join(chunk_dir, f"chunk_{idx + 1:04d}.fasta")
+			for idx in range(total_chunks)
+		]
 
-		def close_chunk():
-			nonlocal chunk_handle
-			if chunk_handle:
-				chunk_handle.close()
-				chunk_handle = None
+		# Seed every batch with the reference up front, then append members.
+		for chunk_path in chunk_paths:
+			with open(chunk_path, "w", encoding="utf-8") as handle:
+				SeqIO.write([ref_record], handle, "fasta")
+
+		# Cap concurrent file handles so a small chunk_size over a large alignment
+		# cannot exhaust the process limit; evicted batches reopen in append mode.
+		max_open = 256
+		handles = {}
+
+		def handle_for(chunk_idx):
+			handle = handles.get(chunk_idx)
+			if handle is None:
+				if len(handles) >= max_open:
+					_, victim = handles.popitem()
+					victim.close()
+				handle = open(chunk_paths[chunk_idx], "a", encoding="utf-8")
+				handles[chunk_idx] = handle
+			return handle
 
 		try:
 			for record in SeqIO.parse(alignment_fasta, "fasta"):
-				if record.id == ref_id or record.id not in placeable_set:
+				chunk_idx = id_to_chunk.get(str(record.id).strip())
+				if chunk_idx is None:
 					continue
-				if chunk_handle is None or written_in_chunk >= self.chunk_size:
-					close_chunk()
-					open_chunk()
-				SeqIO.write([record], chunk_handle, "fasta")
-				written_in_chunk += 1
+				SeqIO.write([record], handle_for(chunk_idx), "fasta")
 		finally:
-			close_chunk()
+			for handle in handles.values():
+				handle.close()
+
+		# The streaming pass above wrote each batch in alignment order. That is not
+		# good enough: faToVcf emits VCF sample columns in FASTA order, and
+		# place_onto_pb runs usher with no -s/-S/-A sort flag, so usher places
+		# samples in VCF column order, one at a time, each onto the tree built so
+		# far. Order within a batch therefore matters exactly as much as order
+		# across batches, so rewrite each batch in rank order. Only one batch is
+		# held in memory at a time.
+		#
+		# Do not add usher's -A/--sort-before-placement-3 here: it would re-sort
+		# each batch by ambiguous-base count on its own terms and override this
+		# ranking, and it can only see one batch, never the global order.
+		rank_of = {acc: rank for rank, acc in enumerate(placeable_ids)}
+		for chunk_path in chunk_paths:
+			records = list(SeqIO.parse(chunk_path, "fasta"))
+			ref_records = [r for r in records if str(r.id).strip() == ref_id]
+			members = [r for r in records if str(r.id).strip() != ref_id]
+			members.sort(key=lambda r: rank_of.get(str(r.id).strip(), len(rank_of)))
+			with open(chunk_path, "w", encoding="utf-8") as handle:
+				SeqIO.write(ref_records + members, handle, "fasta")
 
 		return chunk_paths
 
-	def split_alignment_into_chunks(self, alignment_fasta, ref_id, placeable_ids):
+	def split_alignment_into_chunks(self, alignment_fasta, ref_id, placeable_ids, ordered=False):
 		if not placeable_ids:
 			return []
+		if ordered:
+			# seqkit grep/split2 emit records in alignment order regardless of the
+			# order of the id file, which would throw the quality ranking away, so
+			# the ordered path stays in Python.
+			return self._split_alignment_into_chunks_python(alignment_fasta, ref_id, placeable_ids)
 		chunk_dir = os.path.join(self.output_dir, "chunks")
 		os.makedirs(chunk_dir, exist_ok=True)
 
@@ -717,7 +802,20 @@ class UsherPlacement:
 		# batch's placements are saved into the .pb handed to the next batch,
 		# later batches place against the backbone PLUS everything already added,
 		# not just the static reference set.
-		chunk_fastas = self.split_alignment_into_chunks(alignment_fasta, ref_id, placeable_ids)
+		ordered = self.placement_order == "quality"
+		if ordered:
+			placeable_ids, quality_scores = self.order_ids_by_quality(alignment_fasta, placeable_ids)
+			report_path = self.write_placement_order_report(placeable_ids, quality_scores)
+			if placeable_ids:
+				best = quality_scores.get(placeable_ids[0], 0)
+				worst = quality_scores.get(placeable_ids[-1], 0)
+				print(
+					f"[info] Placement ordered by sequence quality: {best} informative bases in the "
+					f"first sequence down to {worst} in the last. Order written to {report_path}",
+					flush=True,
+				)
+
+		chunk_fastas = self.split_alignment_into_chunks(alignment_fasta, ref_id, placeable_ids, ordered=ordered)
 		print(
 			f"[info] Placing {len(placeable_ids)} sequence(s) in {len(chunk_fastas)} batch(es) "
 			f"of up to {self.chunk_size} sequence(s) each onto the backbone protobuf."
@@ -762,6 +860,14 @@ if __name__ == "__main__":
 	parser.add_argument("--test_mode", default="0", help="Whether test mode is enabled (1/0)")
 	parser.add_argument("--chunk_size", default=5000, type=int, help="Maximum sequences per iterative placement chunk when chunking is triggered")
 	parser.add_argument("--chunk_threshold", default=10000, type=int, help="Trigger iterative chunked placement when sequences-to-place exceed this count")
+	parser.add_argument(
+		"--placement_order",
+		default="quality",
+		choices=["quality", "input"],
+		help="Order sequences are placed in. 'quality' (default) places the sequences with the most "
+			 "unambiguous bases first, so partial sequences are matched against a tree that already "
+			 "contains their full-length relatives. 'input' keeps alignment order.",
+	)
 	args = parser.parse_args()
 	
 	UsherPlacement(
@@ -776,4 +882,5 @@ if __name__ == "__main__":
 		test_mode=args.test_mode,
 		chunk_size=args.chunk_size,
 		chunk_threshold=args.chunk_threshold,
+		placement_order=args.placement_order,
 	).run()

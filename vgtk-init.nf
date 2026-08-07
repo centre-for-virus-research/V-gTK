@@ -705,10 +705,14 @@ process IQ_TREE{
             fi
         fi
 
-        LEN_STATS=$(seqkit fx2tab -n -s "$CLUSTER_REP" | awk '
+        # -l prints the sequence length. NOT -s: in seqkit that is --seq-hash,
+        # which emits a fixed-width MD5, so length($2) was always 32 and this
+        # check could never fail. Field is $NF because a header may contain
+        # spaces but never a tab.
+        LEN_STATS=$(seqkit fx2tab -n -l "$CLUSTER_REP" | awk -F'\t' '
             BEGIN{count=0; min=-1; max=0}
             {
-                l=length($2)
+                l=$NF + 0
                 count++
                 if(min==-1 || l<min) min=l
                 if(l>max) max=l
@@ -844,6 +848,48 @@ process VERY_FAST_TREE{
                 exit 1
             fi
         fi
+
+        # Same guard as IQ_TREE. VeryFastTree/FastTree take an alignment, so a
+        # ragged input is a bug, but neither tool reports it in terms that point
+        # back at clustering - and the fallback above can select a file that was
+        # never meant to be an alignment. Fail here, where the cause is obvious.
+        # -l prints the sequence length. NOT -s: in seqkit that is --seq-hash,
+        # which emits a fixed-width MD5, so length($2) was always 32 and this
+        # check could never fail. Field is $NF because a header may contain
+        # spaces but never a tab.
+        LEN_STATS=$(seqkit fx2tab -n -l "$CLUSTER_REP" | awk -F'\t' '
+            BEGIN{count=0; min=-1; max=0}
+            {
+                l=$NF + 0
+                count++
+                if(min==-1 || l<min) min=l
+                if(l>max) max=l
+            }
+            END{
+                if(count==0){
+                    print "0\t0\t0"
+                } else {
+                    print count "\t" min "\t" max
+                }
+            }
+        ')
+
+        ALN_COUNT=$(echo "$LEN_STATS" | cut -f1)
+        ALN_MIN_LEN=$(echo "$LEN_STATS" | cut -f2)
+        ALN_MAX_LEN=$(echo "$LEN_STATS" | cut -f3)
+
+        if [ "$ALN_COUNT" -eq 0 ]; then
+            echo "[error] Cluster representative FASTA is empty: $CLUSTER_REP" >&2
+            exit 1
+        fi
+
+        if [ "$ALN_MIN_LEN" -ne "$ALN_MAX_LEN" ]; then
+            echo "[error] Alignment length mismatch in $CLUSTER_REP (min=${ALN_MIN_LEN}, max=${ALN_MAX_LEN})." >&2
+            echo "[error] VeryFastTree/FastTree require aligned sequences of equal length." >&2
+            exit 1
+        fi
+
+        echo "[info] Guide tree input: $CLUSTER_REP (${ALN_COUNT} sequences, ${ALN_MAX_LEN} columns)"
 
         mkdir -p VeryFastTree_!{mmseq_cluster_dir.baseName}
         GUIDE_TREE=VeryFastTree_!{mmseq_cluster_dir.baseName}/guide_tree.nwk
@@ -1511,8 +1557,12 @@ workflow {
                      GENERATE_TABLES.out.sequence_alignment, 
                      GENERATE_TABLES.out.insertions, 
                      HOST_TAXA_TABLE.out.host_taxa, 
-                     SOFTWARE_VERSION.out.software_info, 
-                     GENBANK_PARSER.out.sequences_out,
+                     SOFTWARE_VERSION.out.software_info,
+                     // gb_seqs_ch, not GENBANK_PARSER.out.sequences_out: with --gisaid_dir
+                     // CAT_FASTA rebinds this to GenBank+GISAID. Naming the process output
+                     // directly bypassed that rebinding and put a GenBank-only FASTA in the
+                     // DB, leaving every GISAID accession with metadata but no sequence.
+                     gb_seqs_ch,
                      iqtree_collected,
                      mmseq_collected,
                      usher_collected,
