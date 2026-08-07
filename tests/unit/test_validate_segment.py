@@ -179,3 +179,76 @@ def test_edge_dataset_force_overwrite_exclusions(tmp_path: Path):
     )
 
     assert read_tsv_dicts(out_file) == read_tsv_dicts(DATA_DIR / "expected_overwrite.tsv")
+
+
+def test_valid_segments_from_ref_list(tmp_path: Path):
+    """With a reference list, letter segments survive instead of being excluded."""
+    matrix = tmp_path / "gB_matrix.tsv"
+    write_tsv(
+        matrix,
+        [["Q1", "", "", ""], ["Q2", "", "", ""]],
+        header=["primary_accession", "segment_validated", "closest_reference", "exclusion"],
+    )
+    ann = tmp_path / "annotated.tsv"
+    write_tsv(ann, [["Q1", "REF_L", "99.9", "+", "L"], ["Q2", "REF_X", "99.0", "+", "X"]])
+    out_file = tmp_path / "out.tsv"
+
+    annotate_matrix(
+        str(matrix),
+        build_segment_map(str(ann)),
+        build_reference_map(str(ann)),
+        str(out_file),
+        overwrite=False,
+        overwrite_exclusions=False,
+        valid_segments={"l", "s"},
+    )
+
+    rows = {r["primary_accession"]: r for r in read_tsv_dicts(out_file)}
+    assert rows["Q1"]["segment_validated"] == "L"
+    assert rows["Q1"]["exclusion"] == ""
+    assert rows["Q2"]["exclusion"] == "segment not in reference segment set"
+
+
+def test_valid_segments_flu_equivalence(tmp_path: Path):
+    """The influenza reference list partitions exactly as the hardcoded 1-8 range."""
+    import pytest
+
+    pytest.importorskip("pandas")
+    from ValidateSegment import load_valid_segments
+
+    valid = load_valid_segments(str(REPO_ROOT / "generic" / "influenza" / "ref_list_refmast.txt"))
+    assert valid == {"1", "2", "3", "4", "5", "6", "7", "8"}
+
+    matrix = tmp_path / "gB_matrix.tsv"
+    write_tsv(
+        matrix,
+        [["Q1", "", "", ""], ["Q2", "", "", ""], ["Q3", "", "", ""], ["Q4", "", "", ""]],
+        header=["primary_accession", "segment_validated", "closest_reference", "exclusion"],
+    )
+    ann = tmp_path / "annotated.tsv"
+    write_tsv(
+        ann,
+        [
+            ["Q1", "R", "99", "+", "1"],
+            ["Q2", "R", "99", "+", "08"],
+            ["Q3", "R", "99", "+", "10"],
+            ["Q4", "R", "99", "+", "2.5"],
+        ],
+    )
+    out_file = tmp_path / "out.tsv"
+
+    annotate_matrix(
+        str(matrix),
+        build_segment_map(str(ann)),
+        build_reference_map(str(ann)),
+        str(out_file),
+        overwrite=False,
+        overwrite_exclusions=False,
+        valid_segments=valid,
+    )
+
+    rows = {r["primary_accession"]: r for r in read_tsv_dicts(out_file)}
+    assert rows["Q1"]["exclusion"] == ""
+    assert rows["Q2"]["exclusion"] == ""
+    assert rows["Q3"]["exclusion"] == "segment not in reference segment set"
+    assert rows["Q4"]["exclusion"] == "segment not in reference segment set"

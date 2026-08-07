@@ -71,7 +71,12 @@ def test_workflow_update_glue_contains_skip_and_guard():
     assert "GENERATE_TABLES.out.host_taxa" not in text
     assert 'for USHER_DIR in usher_inputs/*; do' in text
     assert 'USHER_FILE=$(find -L usher_inputs -name "final-tree.nh" -print -quit || true)' not in text
-    assert 'find -L mmseq_inputs -type f -name "*_clusters.tsv" -print0 | sort -z | xargs -0 -r cat > "$MERGED_CLUSTER_TSV"' in text
+    # Merged with a portable find|sort|read loop: `sort -z` and `xargs -r` are
+    # GNU-only and abort the process on macOS.
+    assert 'find -L mmseq_inputs -type f -name "*_clusters.tsv" | LC_ALL=C sort' in text
+    assert 'while IFS= read -r CLUSTER_FILE; do cat "$CLUSTER_FILE"; done > "$MERGED_CLUSTER_TSV"' in text
+    assert '| sort -z |' not in text
+    assert 'xargs -0 -r' not in text
     assert 'path "Taxa/names.dmp", emit: taxa_names' in text
     assert 'path "Taxa/nodes.dmp", emit: taxa_nodes' in text
     assert 'if [ "!{params.mutation_catalog}" != "null" ] && [ -n "!{params.mutation_catalog}" ]; then' in text

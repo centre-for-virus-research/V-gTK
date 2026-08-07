@@ -99,7 +99,8 @@ def scriptDefinedParams = [
     "xml_dir", "update", "update_file", "update_db",
     "mmseqs_min_seq_id", "mmseqs_trim_cds_file","mutation_catalog", "mutation_virus",
     "gisaid_dir", "previous_db", "conda_path", "test_max_cluster_seqs", "max_threads", "iqtree_mem", "ref_set_aligned",
-    "min_seq_length_ratio", "max_aln_gap_proportion", "tree_free", "base_tree_only"
+    "min_seq_length_ratio", "max_aln_gap_proportion", "tree_free", "base_tree_only",
+    "pivot_isolate_key", "pivot_required_segments"
     // Add all parameter names defined above
 ]
 
@@ -1178,6 +1179,7 @@ process VALIDATE_SEGMENT{
     input:
         path gb_matrix
         path blast_hits
+        path ref_list
     output:
         path "gB_matrix_validated_segment.tsv", emit: validated_matrix
     shell:
@@ -1185,6 +1187,7 @@ process VALIDATE_SEGMENT{
     python !{scripts_dir}/ValidateSegment.py \
         -g !{gb_matrix} \
         -s !{blast_hits} \
+        -r !{ref_list} \
         -o gB_matrix_validated_segment.tsv
     '''
 }
@@ -1209,17 +1212,29 @@ process VALIDATE_STRAIN{
 process PIVOT_TABLE_SEGMENTS{
     publishDir "${params.publish_dir}" , mode: 'copy'
     when:
-        params.is_segmented =="Y" &&
-        params.is_flu == "Y"
+        params.is_segmented == "Y"
     input:
         path gb_matrix
+        path ref_list
     output:
         path "gB_matrix_pivoted_segments.tsv", emit: pivoted_matrix
+        path "gB_matrix_pivoted_segments.summary.tsv", emit: pivot_summary
     shell:
     '''
-    python !{scripts_dir}/FluPivotTable.py \
+    PIVOT_ARGS=""
+    if [ "!{params.pivot_isolate_key}" != "null" ] && [ -n "!{params.pivot_isolate_key}" ]; then
+        PIVOT_ARGS="${PIVOT_ARGS} -k !{params.pivot_isolate_key}"
+    fi
+    if [ "!{params.pivot_required_segments}" != "null" ] && [ -n "!{params.pivot_required_segments}" ]; then
+        PIVOT_ARGS="${PIVOT_ARGS} --required_segments !{params.pivot_required_segments}"
+    fi
+
+    python !{scripts_dir}/SegmentPivotTable.py \
         -g !{gb_matrix} \
-        -o gB_matrix_pivoted_segments.tsv
+        -r !{ref_list} \
+        -o gB_matrix_pivoted_segments.tsv \
+        --summary_file gB_matrix_pivoted_segments.summary.tsv \
+        ${PIVOT_ARGS}
     '''
 }
 
@@ -1388,17 +1403,22 @@ workflow {
 
     // Add VALIDATE_SEGMENT here
     if (params.is_segmented == 'Y') {
-        VALIDATE_SEGMENT(data, BLAST_ALIGNMENT.out.query_uniq_tophit_annotated)
+        VALIDATE_SEGMENT(data, BLAST_ALIGNMENT.out.query_uniq_tophit_annotated, effective_ref_list)
         // Update 'data' to point to the new validated matrix for downstream steps
         data = VALIDATE_SEGMENT.out.validated_matrix
-        
+
         if (params.is_flu == "Y") {
-            // Flu pivoting requires Parsed_strain, created by VALIDATE_STRAIN
+            // Influenza only: adds Parsed_strain / serotype_validated to the matrix.
             VALIDATE_STRAIN(data)
             data = VALIDATE_STRAIN.out.validated_matrix
-
-            PIVOT_TABLE_SEGMENTS(data)
         }
+
+        // Per-isolate segment completeness for ANY segmented virus. For flu `data`
+        // is the VALIDATE_STRAIN matrix, so Parsed_strain is elected as the isolate
+        // key; otherwise it is the VALIDATE_SEGMENT matrix and the key falls to the
+        // GenBank `isolate` qualifier. The expected segment set comes from the
+        // master rows of the reference list.
+        PIVOT_TABLE_SEGMENTS(data, effective_ref_list)
     }
 
 
@@ -1576,7 +1596,7 @@ workflow {
                      )
 
     if (params.test == "1") {
-        if (params.is_segmented == "Y" && params.is_flu == "Y") {
+        if (params.is_segmented == "Y") {
             TEST_SEGMENTED_OUTPUT(
                 BLAST_ALIGNMENT.out.query_uniq_tophit_annotated,
                 VALIDATE_SEGMENT.out.validated_matrix,

@@ -248,3 +248,64 @@ def test_non_segmented_reference_rows_do_not_require_alignment(tmp_path: Path):
 
     assert result.returncode == 0
     assert "meta_data sequences missing alignment" not in result.stdout
+
+
+def test_segmented_counts_letter_segment_columns(tmp_path: Path):
+    """Test 3 counts the virus's own segment columns, not a hardcoded 1-8.
+
+    Before generalisation an L/S arenavirus pivot reported "Found 0 segment
+    columns" because the counter matched against {str(x) for x in range(1, 9)}.
+    """
+    sqlite_db = tmp_path / "db.sqlite"
+    con = sqlite3.connect(sqlite_db)
+    cur = con.cursor()
+    cur.execute(
+        "CREATE TABLE meta_data (primary_accession TEXT, segment TEXT, exclusion_status TEXT, exclusion_criteria TEXT)"
+    )
+    cur.execute("CREATE TABLE sequence_alignment (sequence_id TEXT, alignment_name TEXT)")
+    cur.execute("INSERT INTO meta_data VALUES ('A1', 'L', '', '')")
+    cur.execute("INSERT INTO meta_data VALUES ('REF1', 'L', '', '')")
+    cur.execute("INSERT INTO sequence_alignment VALUES ('A1', 'REF1')")
+    cur.execute("INSERT INTO sequence_alignment VALUES ('REF1', 'REF1')")
+    con.commit()
+    con.close()
+
+    annotated_blast = tmp_path / "annotated.tsv"
+    _write_tsv(annotated_blast, "q\tr\tscore\tstrand\tsegment", ["A1\tREF1\t100\t+\tL"])
+
+    validated_matrix = tmp_path / "validated.tsv"
+    _write_tsv(
+        validated_matrix,
+        "primary_accession\tsegment_validated",
+        ["A1\tL", "REF1\tS"],
+    )
+
+    pivoted_matrix = tmp_path / "pivoted.tsv"
+    _write_tsv(pivoted_matrix, "isolate\tL\tS\tComplete_status", ["iso1\tA1\tREF1\tComplete"])
+
+    output = tmp_path / "out.txt"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--mode",
+            "segmented",
+            "--annotated_blast",
+            str(annotated_blast),
+            "--validated_matrix",
+            str(validated_matrix),
+            "--pivoted_matrix",
+            str(pivoted_matrix),
+            "--sqlite_db",
+            str(sqlite_db),
+            "--output",
+            str(output),
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    report = output.read_text(encoding="utf-8")
+    assert "Found 2 segment columns" in report, report
+    assert "Complete genomes: 1" in report
+    assert result.returncode == 0, result.stdout + result.stderr
