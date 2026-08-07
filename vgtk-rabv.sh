@@ -27,6 +27,7 @@
 #   --xml_dir           <path>  Pre-fetched GenBank XML dir (default: fetch from NCBI)
 #   --tree_free                 Skip tree building entirely
 #   --max_threads       <n>     CPU threads                 (default: 8)
+#   --iqtree_mem        <size>  IQ-TREE -mem cap            (default: 300G)
 #   --mmseqs_min_seq_id <f>     MMseqs2 min seq identity    (default: 0.98)
 #   --test_max_cluster_seqs <n> Cap seqs for clustering     (default: 250)
 #   --email             <addr>  Contact email for NCBI      (default: your_email@example.com)
@@ -65,6 +66,7 @@ UPDATE_DB=""
 XML_DIR=""
 TREE_FREE="false"
 MAX_THREADS=8
+IQTREE_MEM="300G"   # IQ-TREE -mem cap; lower on a laptop (e.g. --iqtree_mem 8G)
 MMSEQS_MIN_SEQ_ID="0.98"
 TEST_MAX_CLUSTER_SEQS="250"
 EMAIL="your_email@example.com"
@@ -88,6 +90,7 @@ while [[ $# -gt 0 ]]; do
         --xml_dir)                [[ $# -lt 2 ]] && { echo "[error] --xml_dir requires a value" >&2; exit 1; }; XML_DIR="$2";              shift 2 ;;
         --tree_free)              TREE_FREE="true";          shift   ;;
         --max_threads)            [[ $# -lt 2 ]] && { echo "[error] --max_threads requires a value" >&2; exit 1; }; MAX_THREADS="$2";          shift 2 ;;
+        --iqtree_mem)             [[ $# -lt 2 ]] && { echo "[error] --iqtree_mem requires a value" >&2; exit 1; }; IQTREE_MEM="$2";           shift 2 ;;
         --mmseqs_min_seq_id)      [[ $# -lt 2 ]] && { echo "[error] --mmseqs_min_seq_id requires a value" >&2; exit 1; }; MMSEQS_MIN_SEQ_ID="$2";   shift 2 ;;
         --test_max_cluster_seqs)  [[ $# -lt 2 ]] && { echo "[error] --test_max_cluster_seqs requires a value" >&2; exit 1; }; TEST_MAX_CLUSTER_SEQS="$2"; shift 2 ;;
         --email)                  [[ $# -lt 2 ]] && { echo "[error] --email requires a value" >&2; exit 1; }; EMAIL="$2";                shift 2 ;;
@@ -208,21 +211,28 @@ if (( START_STEP > 2 )); then
 fi
 
 if (( START_STEP > 8 )); then
-    mapfile -t PADDED_MSA_FILES < <(find "${WORK_DIR}" -maxdepth 1 -iname '*_merged_msa.fasta' | sort)
+    PADDED_MSA_FILES=()
+    while IFS= read -r _line; do PADDED_MSA_FILES+=("$_line"); done < <(
+        find "${WORK_DIR}" -maxdepth 1 -iname '*_merged_msa.fasta' | sort)
     [[ ${#PADDED_MSA_FILES[@]} -eq 0 ]] && echo "[warn] No *_merged_MSA.fasta found – step 9 will fail if reached" >&2
 fi
 
 if (( START_STEP > 9 )); then
-    mapfile -t DEDUP_FILES < <(
+    # `gensub` is a gawk extension; `sub` is POSIX awk and works with BSD/macOS awk too.
+    DEDUP_FILES=()
+    while IFS= read -r _line; do DEDUP_FILES+=("$_line"); done < <(
         find "${WORK_DIR}" -maxdepth 1 \( -name '*_dedup_cluster_input.fasta' -o -name '*_dedup.fasta' \) \
-        | sort | awk '!seen[gensub(/_dedup(_.+)?\.fasta$/,"","1")]++' )
+        | sort | awk '{ k=$0; sub(/_dedup(_.+)?\.fasta$/,"",k); if(!seen[k]++) print }')
     [[ ${#DEDUP_FILES[@]} -eq 0 ]] && echo "[warn] No dedup FASTA found – steps 10-12 will fail if reached" >&2
 fi
 
 if (( START_STEP > 12 )); then
-    mapfile -t MMSEQ_DIRS  < <(find "${WORK_DIR}" -maxdepth 1 -type d -name 'MMseqClusters_*'      | sort)
-    mapfile -t IQTREE_DIRS < <(find "${WORK_DIR}" -maxdepth 1 -type d -name 'IQTree_MMseqClusters_*'  | sort)
-    mapfile -t USHER_DIRS  < <(find "${WORK_DIR}" -maxdepth 1 -type d -name 'Usher*'                   | sort)
+    MMSEQ_DIRS=()
+    IQTREE_DIRS=()
+    USHER_DIRS=()
+    while IFS= read -r _line; do MMSEQ_DIRS+=("$_line");  done < <(find "${WORK_DIR}" -maxdepth 1 -type d -name 'MMseqClusters_*'          | sort)
+    while IFS= read -r _line; do IQTREE_DIRS+=("$_line"); done < <(find "${WORK_DIR}" -maxdepth 1 -type d -name 'IQTree_MMseqClusters_*'   | sort)
+    while IFS= read -r _line; do USHER_DIRS+=("$_line");  done < <(find "${WORK_DIR}" -maxdepth 1 -type d -name 'Usher*'                   | sort)
     mkdir -p "${IQTREE_INPUT_DIR}" "${USHER_INPUT_DIR}"
     for _d in "${IQTREE_DIRS[@]+"${IQTREE_DIRS[@]}"}"; do
         ln -sfn "$_d" "${IQTREE_INPUT_DIR}/$(basename "$_d")" 2>/dev/null || true
@@ -233,7 +243,9 @@ if (( START_STEP > 12 )); then
 fi
 
 if (( START_STEP > 13 )); then
-    mapfile -t PADDED_MSA_FILES < <(find "${WORK_DIR}" -maxdepth 1 -iname '*_merged_msa.fasta' | sort)
+    PADDED_MSA_FILES=()
+    while IFS= read -r _line; do PADDED_MSA_FILES+=("$_line"); done < <(
+        find "${WORK_DIR}" -maxdepth 1 -iname '*_merged_msa.fasta' | sort)
 fi
 
 echo "[info] Starting from step ${START_STEP}"
@@ -400,7 +412,9 @@ if (( STEP >= START_STEP )); then
             --skip_ids "${FILTERED_IDS}"
 fi
 # Always rediscover after step 8 in case it just ran
-mapfile -t PADDED_MSA_FILES < <(find "${WORK_DIR}" -maxdepth 1 -iname '*_merged_msa.fasta' | sort)
+PADDED_MSA_FILES=()
+while IFS= read -r _line; do PADDED_MSA_FILES+=("$_line"); done < <(
+    find "${WORK_DIR}" -maxdepth 1 -iname '*_merged_msa.fasta' | sort)
 
 # ---------------------------------------------------------------------------
 # STEP 9 – DEDUP_ALIGNMENT (seqkit rmdup) + optional test-mode subsampling
@@ -408,7 +422,7 @@ mapfile -t PADDED_MSA_FILES < <(find "${WORK_DIR}" -maxdepth 1 -iname '*_merged_
 STEP=$(( STEP + 1 ))
 if (( STEP >= START_STEP )); then
     DEDUP_FILES=()
-    for msa_file in "${PADDED_MSA_FILES[@]}"; do
+    for msa_file in "${PADDED_MSA_FILES[@]+"${PADDED_MSA_FILES[@]}"}"; do
         base="$(basename "${msa_file}" .fasta)"
         dedup_out="${WORK_DIR}/${base}_dedup.fasta"
         run_step "DEDUP_ALIGNMENT (${base})" \
@@ -447,7 +461,7 @@ if (( STEP >= START_STEP )); then
         echo "[info] tree_free + update_db: retaining existing trees from update DB"
     elif [[ "$UPDATE_MODE" == "true" ]]; then
         # Update mode: USHER only (no MMseqs / VFT / IQ-TREE rebuild)
-        for cluster_input in "${DEDUP_FILES[@]}"; do
+        for cluster_input in "${DEDUP_FILES[@]+"${DEDUP_FILES[@]}"}"; do
             base="$(basename "${cluster_input}" .fasta)"
             usher_out_dir="${WORK_DIR}/UsherUpdate_${base}"
             run_step "USHER_PLACEMENT/update (${base})" \
@@ -465,7 +479,7 @@ if (( STEP >= START_STEP )); then
         echo "[info] tree_free mode: skipping clustering and tree steps"
     else
         # Normal fresh build
-        for cluster_input in "${DEDUP_FILES[@]}"; do
+        for cluster_input in "${DEDUP_FILES[@]+"${DEDUP_FILES[@]}"}"; do
             base="$(basename "${cluster_input}" .fasta)"
             mmseq_dir="${WORK_DIR}/MMseqClusters_${base}"
 
@@ -516,10 +530,10 @@ if (( STEP >= START_STEP )); then
                 echo "[error] iqtree3 not found in PATH" >&2; exit 1
             fi
             run_step "IQ_TREE (${base})" bash -c "
-                ulimit -s unlimited
+                ulimit -s unlimited 2>/dev/null || ulimit -s hard 2>/dev/null || true
                 '${IQTREE_BIN}' -s '${CLUSTER_REP}' -t '${guide_tree}' \
                     -T ${MAX_THREADS} -m GTR \
-                    -pre '${iqtree_dir}/iqtree' -mem 300G"
+                    -pre '${iqtree_dir}/iqtree' -mem ${IQTREE_MEM}"
             IQTREE_DIRS+=("${iqtree_dir}")
 
             # USHER_PLACEMENT
@@ -566,7 +580,7 @@ STEP=$(( STEP + 1 ))
 if (( STEP >= START_STEP )); then
     # Create a staging dir containing only the merged MSA fastas (mirrors Nextflow process)
     mkdir -p "${PADDED_ALN_STAGING}"
-    for _msa in "${PADDED_MSA_FILES[@]}"; do
+    for _msa in "${PADDED_MSA_FILES[@]+"${PADDED_MSA_FILES[@]}"}"; do
         cp "${_msa}" "${PADDED_ALN_STAGING}/"
     done
 
@@ -627,7 +641,7 @@ if (( STEP >= START_STEP )); then
     # Build -p flags: GenerateTables.py expects the padded MSA FASTA file(s),
     # not the work directory.  Mirrors PAD_ALIGNMENT.out.merged_msa.collect() in Nextflow.
     PADDED_ALN_ARGS=()
-    for _f in "${PADDED_MSA_FILES[@]}"; do
+    for _f in "${PADDED_MSA_FILES[@]+"${PADDED_MSA_FILES[@]}"}"; do
         PADDED_ALN_ARGS+=( -p "$_f" )
     done
 
@@ -670,8 +684,9 @@ if (( STEP >= START_STEP )); then
     [[ -n "$USHER_TREEFILE" ]] && USHER_ARG=( -ut "${USHER_TREEFILE}" )
 
     MERGED_CLUSTER_TSV="${WORK_DIR}/merged_mmseqs_clusters.tsv"
-    find -L "${WORK_DIR}/mmseqs_inputs" -type f -name '*_clusters.tsv' -print0 2>/dev/null \
-        | sort -z | xargs -0 -r cat > "${MERGED_CLUSTER_TSV}" || true
+    # Portable across GNU and BSD/macOS userland: `sort -z` and `xargs -r` are GNU-only.
+    find -L "${WORK_DIR}/mmseqs_inputs" -type f -name '*_clusters.tsv' 2>/dev/null | LC_ALL=C sort \
+        | while IFS= read -r cluster_file; do cat "$cluster_file"; done > "${MERGED_CLUSTER_TSV}" || true
     [[ -s "$MERGED_CLUSTER_TSV" ]] && CLUSTER_ARG=( -ct "${MERGED_CLUSTER_TSV}" -ci "${MMSEQS_MIN_SEQ_ID}" )
 
     [[ -f "$FILTERED_IDS" && -s "$FILTERED_IDS" ]] && FILTERED_ARG=( -fi "${FILTERED_IDS}" )

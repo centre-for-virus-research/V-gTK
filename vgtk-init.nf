@@ -98,7 +98,7 @@ def scriptDefinedParams = [
     "scripts_dir", "publish_dir", "email", "ref_list", "bulk_fillup_table", "is_flu", "gene_info",
     "xml_dir", "update", "update_file", "update_db",
     "mmseqs_min_seq_id", "mmseqs_trim_cds_file","mutation_catalog", "mutation_virus",
-    "gisaid_dir", "previous_db", "conda_path", "test_max_cluster_seqs", "max_threads", "ref_set_aligned",
+    "gisaid_dir", "previous_db", "conda_path", "test_max_cluster_seqs", "max_threads", "iqtree_mem", "ref_set_aligned",
     "min_seq_length_ratio", "max_aln_gap_proportion", "tree_free", "base_tree_only"
     // Add all parameter names defined above
 ]
@@ -160,7 +160,7 @@ process TEST_DEPENDENCIES{
     missing_count=0
     {
         echo "=== vgtk dependency preflight ==="
-        echo "date: $(date -Iseconds)"
+        echo "date: $(date +%Y-%m-%dT%H:%M:%S%z)"
         echo "python executable: $(command -v python || echo 'NOT FOUND')"
         echo "python version: $(python --version 2>&1)"
         echo "CONDA_PREFIX=${CONDA_PREFIX:-<not set>}"
@@ -693,7 +693,9 @@ process IQ_TREE{
         path "IQTree_${mmseq_cluster_dir.baseName}", emit: iqtree_out
     shell:
     '''
-        ulimit -s unlimited
+        # macOS caps RLIMIT_STACK (~64MB) and refuses "unlimited"; fall back to the
+        # hard limit rather than aborting under `bash -ue`.
+        ulimit -s unlimited 2>/dev/null || ulimit -s hard 2>/dev/null || true
         CLUSTER_REP=$(find -L !{mmseq_cluster_dir} -name "*_cluster_rep.fasta" -print -quit)
         if [ -z "$CLUSTER_REP" ]; then
             CLUSTER_REP=$(find -L !{mmseq_cluster_dir} -name "*.fasta" -print -quit)
@@ -763,7 +765,7 @@ process IQ_TREE{
         fi
 
         mkdir -p IQTree_!{mmseq_cluster_dir.baseName}
-        "$IQTREE_BIN" -s "$CLUSTER_REP" -t "$GUIDE_TREE" -T !{task.cpus} -m GTR -pre IQTree_!{mmseq_cluster_dir.baseName}/iqtree -mem 300G
+        "$IQTREE_BIN" -s "$CLUSTER_REP" -t "$GUIDE_TREE" -T !{task.cpus} -m GTR -pre IQTree_!{mmseq_cluster_dir.baseName}/iqtree -mem !{params.iqtree_mem}
     '''
 }
 
@@ -1004,7 +1006,9 @@ process CREATE_SQLITE_DB {
     CLUSTER_TSV=""
     MERGED_CLUSTER_TSV="merged_mmseqs_clusters.tsv"
     if [ -d mmseq_inputs ]; then
-        find -L mmseq_inputs -type f -name "*_clusters.tsv" -print0 | sort -z | xargs -0 -r cat > "$MERGED_CLUSTER_TSV"
+        # Portable across GNU and BSD/macOS userland: `sort -z` and `xargs -r` are GNU-only.
+        find -L mmseq_inputs -type f -name "*_clusters.tsv" | LC_ALL=C sort \
+            | while IFS= read -r CLUSTER_FILE; do cat "$CLUSTER_FILE"; done > "$MERGED_CLUSTER_TSV"
         if [ -s "$MERGED_CLUSTER_TSV" ]; then
             CLUSTER_TSV="$MERGED_CLUSTER_TSV"
         fi

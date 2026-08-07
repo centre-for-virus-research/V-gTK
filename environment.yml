@@ -14,7 +14,7 @@ dependencies:
   
   # Bioinformatics (Conda-native)
   - biopython=1.81
-  - blast=2.17.0
+  - blast >=2.16.0,<=2.17.0   # 2.17.0 has no osx-arm64 build; 2.16.0 does
   - seqkit=2.12.0
   - nextalign=2.14.0
   - nextflow=25.10.3
