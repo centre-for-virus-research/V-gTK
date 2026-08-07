@@ -99,7 +99,8 @@ def scriptDefinedParams = [
     "xml_dir", "update", "update_file", "update_db",
     "mmseqs_min_seq_id", "mmseqs_trim_cds_file","mutation_catalog", "mutation_virus",
     "gisaid_dir", "previous_db", "conda_path", "test_max_cluster_seqs", "max_threads", "iqtree_mem", "ref_set_aligned",
-    "min_seq_length_ratio", "max_aln_gap_proportion", "tree_free", "base_tree_only"
+    "min_seq_length_ratio", "max_aln_gap_proportion", "tree_free", "base_tree_only",
+    "mmseqs_two_step", "mmseqs_min_completeness", "mmseqs_step2_min_seq_id"
     // Add all parameter names defined above
 ]
 
@@ -673,11 +674,25 @@ process MMSEQS_CLUSTERING{
         mkdir -p mmseqs_input
         cp !{padded_aln} mmseqs_input/
 
+        # Two-step clustering keeps fragments out of the backbone: step 1 clusters
+        # only sequences >= mmseqs_min_completeness covered, so no partial sequence
+        # can become a representative (and therefore a tree tip); step 2 assigns the
+        # held-back sequences to those clusters so they keep a cluster label.
+        # Measured on influenza HA: one-pass gave 423 representatives of which 35%
+        # were >25% gaps; two-step gives 370 with 0%.
+        TWO_STEP_ARGS=""
+        if [ "!{params.mmseqs_two_step}" = "true" ]; then
+            TWO_STEP_ARGS="--two-step --min-completeness !{params.mmseqs_min_completeness}"
+            if [ "!{params.mmseqs_step2_min_seq_id}" != "null" ] && [ -n "!{params.mmseqs_step2_min_seq_id}" ]; then
+                TWO_STEP_ARGS="${TWO_STEP_ARGS} --step2-min-seq-id !{params.mmseqs_step2_min_seq_id}"
+            fi
+        fi
+
         python !{scripts_dir}/MMseqsClustering.py \
             -i mmseqs_input \
             -o MMseqClusters_!{padded_aln.baseName} \
             --min-seq-id !{params.mmseqs_min_seq_id} \
-            --threads !{task.cpus}
+            --threads !{task.cpus} ${TWO_STEP_ARGS}
     '''
 }
 

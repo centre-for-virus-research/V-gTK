@@ -19,3 +19,4 @@ tests/unit/__pycache__/*
 */*/__pycache__/
 coverage.xml
 .coverage
+scripts/rescue

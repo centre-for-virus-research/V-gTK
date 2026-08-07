@@ -4,6 +4,8 @@ from pathlib import Path
 import pytest
 from Bio import SeqIO
 
+import MMseqsClustering
+
 from MMseqsClustering import (
     apply_trimming,
     parse_ranges,
@@ -124,8 +126,13 @@ def test_run_mmseqs_clustering_strips_gaps_and_rebuilds_aligned_reps(tmp_path: P
     out_dir = tmp_path / "out"
 
     calls = []
+    real_run = MMseqsClustering.subprocess.run
 
-    def fake_run(cmd, check=True):
+    def fake_run(cmd, check=True, **kwargs):
+        # Only mmseqs is mocked; the external `sort` used by the informative-length
+        # ordering must really run, so let anything else through.
+        if cmd[0] != "mmseqs":
+            return real_run(cmd, check=check, **kwargs)
         calls.append(cmd)
         # Stand in for `mmseqs createtsv`, which write_aligned_representatives reads.
         if cmd[:2] == ["mmseqs", "createtsv"]:
@@ -155,8 +162,11 @@ def test_run_mmseqs_clustering_passes_max_seqs_through(tmp_path: Path, monkeypat
     write_fasta(in_fasta, [("S1", "ACGT")])
 
     calls = []
+    real_run = MMseqsClustering.subprocess.run
 
-    def fake_run(cmd, check=True):
+    def fake_run(cmd, check=True, **kwargs):
+        if cmd[0] != "mmseqs":
+            return real_run(cmd, check=check, **kwargs)
         calls.append(cmd)
         if cmd[:2] == ["mmseqs", "createtsv"]:
             Path(cmd[5]).write_text("S1\tS1\n", encoding="utf-8")
@@ -171,11 +181,16 @@ def test_run_mmseqs_clustering_passes_max_seqs_through(tmp_path: Path, monkeypat
     assert cluster_cmd[cluster_cmd.index("--max-seqs") + 1] == "2000"
 
     default_calls = []
-    monkeypatch.setattr("MMseqsClustering.subprocess.run", lambda cmd, check=True: (
-        default_calls.append(cmd),
-        Path(cmd[5]).write_text("S1\tS1\n", encoding="utf-8") if cmd[:2] == ["mmseqs", "createtsv"] else None,
-        0,
-    )[-1])
+
+    def fake_run_default(cmd, check=True, **kwargs):
+        if cmd[0] != "mmseqs":
+            return real_run(cmd, check=check, **kwargs)
+        default_calls.append(cmd)
+        if cmd[:2] == ["mmseqs", "createtsv"]:
+            Path(cmd[5]).write_text("S1\tS1\n", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr("MMseqsClustering.subprocess.run", fake_run_default)
     run_mmseqs_clustering(str(in_fasta), str(tmp_path / "out2"), min_seq_id=0.9, threads=3)
     cluster_cmd = next(c for c in default_calls if c[:2] == ["mmseqs", "cluster"])
     assert "--max-seqs" not in cluster_cmd

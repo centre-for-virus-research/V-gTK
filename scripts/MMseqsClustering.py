@@ -53,6 +53,67 @@ def apply_trimming(cds_file, input_dir, trim_output_dir):
 GAP_CHARACTERS = "-."
 
 
+INFORMATIVE_BASES = ("A", "C", "G", "T", "U")
+
+
+def informative_length(sequence):
+    """Unambiguous bases: everything that is not a gap, an N, or an IUPAC
+    ambiguity code. str.count runs in C, so this stays cheap over a full
+    segment alignment."""
+    seq = sequence.upper()
+    return sum(seq.count(base) for base in INFORMATIVE_BASES)
+
+
+def sort_fasta_by_informative_length(input_fasta, output_fasta):
+    """Rewrite a FASTA in descending order of informative (non-N, non-gap) length.
+
+    --cluster-mode 2 is greedy incremental: it sorts by length and makes the
+    longest sequence of each group the representative. But MMseqs counts N
+    toward length (verified: ACGTNNNNNNACGT is length 14), so a half-N sequence
+    outranks a shorter clean one and becomes the representative that ends up as
+    a tree tip. Ordering the input by informative length, with createdb
+    --shuffle 0, makes the tie-break prefer the highest-quality sequence
+    instead of an arbitrary one.
+
+    Sorting is done through an external sort on a temporary TSV so memory stays
+    flat regardless of segment size.
+    """
+    tmp_tsv = output_fasta + ".sort.tsv"
+    sorted_tsv = output_fasta + ".sorted.tsv"
+    try:
+        with open(tmp_tsv, "w") as handle:
+            for record in SeqIO.parse(input_fasta, "fasta"):
+                sequence = str(record.seq)
+                handle.write(f"{informative_length(sequence)}\t{record.id}\t{sequence}\n")
+
+        env = dict(os.environ, LC_ALL="C")
+        with open(sorted_tsv, "w") as handle:
+            subprocess.run(["sort", "-t", "\t", "-k1,1nr", "-s", tmp_tsv],
+                           check=True, stdout=handle, env=env)
+
+        # Write to a scratch path and swap it in only on success. This is
+        # normally called with output_fasta == input_fasta, so writing in place
+        # would truncate the input if the sort failed.
+        staged = output_fasta + ".ordered"
+        written = 0
+        with open(sorted_tsv) as src, open(staged, "w") as out:
+            for line in src:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 3:
+                    continue
+                out.write(f">{parts[1]}\n{parts[2]}\n")
+                written += 1
+        if written == 0:
+            os.remove(staged)
+            raise ValueError(f"informative-length sort produced no sequences from {input_fasta}")
+        os.replace(staged, output_fasta)
+        return written
+    finally:
+        for path in (tmp_tsv, sorted_tsv):
+            if os.path.isfile(path):
+                os.remove(path)
+
+
 def strip_alignment_gaps(input_fasta, output_fasta):
     """Write an unaligned copy of input_fasta, preserving sequence IDs.
 
@@ -78,6 +139,91 @@ def strip_alignment_gaps(input_fasta, output_fasta):
     if empty:
         print(f"[warn] Skipped {empty} sequence(s) that were entirely gaps")
     return written
+
+
+def split_by_completeness(alignment_fasta, min_completeness, complete_out, remainder_out):
+    """Split the alignment into near-complete sequences and everything else.
+
+    Completeness is informative bases / alignment width, so it measures how much
+    of the reference-coordinate alignment a sequence actually covers. Both
+    outputs are written unaligned, ready for MMseqs.
+
+    The point is to keep fragments out of the backbone. Measured on influenza HA:
+    a one-pass clustering put 35% of its representatives at >25% gaps, because
+    every fragment without a same-threshold partner becomes its own cluster and
+    therefore its own tree tip. Clustering only the >=90% complete sequences
+    gives 0% such tips while discarding ~9% of the input - and step 2 hands
+    those discarded sequences back a cluster assignment.
+    """
+    translation = str.maketrans("", "", GAP_CHARACTERS)
+    n_complete = n_remainder = 0
+    with open(complete_out, "w") as complete_handle, open(remainder_out, "w") as remainder_handle:
+        for record in SeqIO.parse(alignment_fasta, "fasta"):
+            aligned = str(record.seq)
+            width = len(aligned)
+            if width == 0:
+                continue
+            sequence = aligned.translate(translation)
+            if not sequence:
+                continue
+            if informative_length(aligned) / width >= min_completeness:
+                complete_handle.write(f">{record.id}\n{sequence}\n")
+                n_complete += 1
+            else:
+                remainder_handle.write(f">{record.id}\n{sequence}\n")
+                n_remainder += 1
+    return n_complete, n_remainder
+
+
+def assign_remainder_to_representatives(remainder_fasta, representatives_fasta, tmp_dir,
+                                        threads, min_seq_id):
+    """Search the held-back sequences against the step-1 representatives and
+    return {member_id: representative_id} for those meeting min_seq_id.
+
+    Assigning members to EXISTING representatives (rather than letting them form
+    new clusters) keeps the set of cluster centroids identical to the set of
+    tree tips, which ValidateDbTree relies on.
+    """
+    os.makedirs(tmp_dir, exist_ok=True)
+    hits_path = os.path.join(tmp_dir, "remainder_hits.m8")
+
+    # The representative FASTA is aligned (it feeds the tree), but searching
+    # against gapped sequences reintroduces the gaps-as-X problem this whole
+    # design exists to avoid - measured cost on HA: 482/707 assignments instead
+    # of 696/707. Search against an unaligned copy.
+    ungapped_reps = os.path.join(tmp_dir, "representatives_ungapped.seq")
+    strip_alignment_gaps(representatives_fasta, ungapped_reps)
+
+    subprocess.run([
+        "mmseqs", "easy-search", remainder_fasta, ungapped_reps, hits_path,
+        os.path.join(tmp_dir, "search_tmp"),
+        "--threads", str(threads),
+        # REQUIRED for nucleotide input: without it mmseqs silently produces no
+        # output at all rather than failing loudly.
+        "--search-type", "3",
+        "--cov-mode", "2", "-c", "0.8",
+        "--max-seqs", "10",
+        "--format-output", "query,target,pident",
+    ], check=True)
+
+    threshold = float(min_seq_id) * 100.0
+    best = {}
+    if os.path.isfile(hits_path):
+        with open(hits_path) as handle:
+            for line in handle:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 3:
+                    continue
+                query, target = parts[0], parts[1]
+                try:
+                    pident = float(parts[2])
+                except ValueError:
+                    continue
+                if pident < threshold:
+                    continue
+                if query not in best or pident > best[query][1]:
+                    best[query] = (target, pident)
+    return {query: target for query, (target, _) in best.items()}
 
 
 def write_aligned_representatives(alignment_fasta, cluster_tsv, output_fasta):
@@ -111,7 +257,9 @@ def write_aligned_representatives(alignment_fasta, cluster_tsv, output_fasta):
     return len(written)
 
 
-def run_mmseqs_clustering(input_fasta, output_dir, min_seq_id, threads=8, strip_gaps=True, max_seqs=None):
+def run_mmseqs_clustering(input_fasta, output_dir, min_seq_id, threads=8, strip_gaps=True, max_seqs=None,
+                          sort_by_quality=True, two_step=False, min_completeness=0.9,
+                          step2_min_seq_id=None):
     base_name = os.path.splitext(os.path.basename(input_fasta))[0]
     mmseqs_dir = os.path.join(output_dir, base_name)
     segments_db_dir = os.path.join(mmseqs_dir, "segments_DB")
@@ -136,10 +284,31 @@ def run_mmseqs_clustering(input_fasta, output_dir, min_seq_id, threads=8, strip_
     # picked up in place of the representatives - and VeryFastTree has no
     # equal-length guard to catch it.
     cluster_source = input_fasta
-    if strip_gaps:
+    remainder_source = None
+    if two_step:
+        # Step 1 clusters only the near-complete sequences, so fragments cannot
+        # become representatives (and therefore tree tips). Step 2 gives them a
+        # cluster assignment afterwards.
+        cluster_source = os.path.join(segments_db_dir, f"{base_name}_complete.seq")
+        remainder_source = os.path.join(segments_db_dir, f"{base_name}_remainder.seq")
+        n_complete, n_remainder = split_by_completeness(
+            input_fasta, min_completeness, cluster_source, remainder_source)
+        print(f"[info] Two-step clustering: {n_complete} sequences >= {min_completeness:.0%} complete "
+              f"form the backbone, {n_remainder} held back for assignment")
+        if n_complete == 0:
+            raise ValueError(
+                f"No sequences in {input_fasta} reach {min_completeness:.0%} completeness; "
+                f"lower --min-completeness or disable --two-step")
+        if n_remainder == 0:
+            remainder_source = None
+    elif strip_gaps:
         cluster_source = os.path.join(segments_db_dir, f"{base_name}_ungapped.seq")
         count = strip_alignment_gaps(input_fasta, cluster_source)
         print(f"[info] Clustering {count} gap-stripped sequences (representatives stay aligned)")
+    if (strip_gaps or two_step) and sort_by_quality:
+        count = sort_fasta_by_informative_length(cluster_source, cluster_source)
+        print(f"[info] Ordered {count} sequences by descending informative length so the "
+              f"greedy clustering prefers complete sequences as representatives")
 
     cluster_cmd = [
         "mmseqs", "cluster",
@@ -154,9 +323,14 @@ def run_mmseqs_clustering(input_fasta, output_dir, min_seq_id, threads=8, strip_
         cluster_cmd += ["--max-seqs", str(max_seqs)]
 
     try:
-        subprocess.run(["mmseqs", "createdb", cluster_source, db_path, "--threads", str(threads)], check=True)
+        createdb_cmd = ["mmseqs", "createdb", cluster_source, db_path, "--threads", str(threads)]
+        if (strip_gaps or two_step) and sort_by_quality:
+            # createdb shuffles by default (--shuffle 1), which would discard the
+            # informative-length ordering established above.
+            createdb_cmd += ["--shuffle", "0"]
+        subprocess.run(createdb_cmd, check=True)
     finally:
-        if strip_gaps and os.path.isfile(cluster_source):
+        if (strip_gaps or two_step) and os.path.isfile(cluster_source):
             # The DB now holds the sequences, so drop the scratch copy - in a
             # finally block so a failed run cannot leave an unaligned FASTA
             # behind for the generic `*.fasta` fallbacks to pick up later.
@@ -166,7 +340,7 @@ def run_mmseqs_clustering(input_fasta, output_dir, min_seq_id, threads=8, strip_
     tsv_output = os.path.join(mmseqs_dir, f"{base_name}_clusters.tsv")
     subprocess.run(["mmseqs", "createtsv", db_path, db_path, cluster_path, tsv_output, "--threads", str(threads)], check=True)
 
-    if not strip_gaps:
+    if not strip_gaps and not two_step:
         # segments_DB/<base>_cluster_seq.fasta is read by nothing in this repo -
         # only reachable via the generic `*.fasta` fallbacks - and when clustering
         # gap-stripped input it would be an unaligned copy of every sequence, the
@@ -176,7 +350,29 @@ def run_mmseqs_clustering(input_fasta, output_dir, min_seq_id, threads=8, strip_
         subprocess.run(["mmseqs", "result2flat", db_path, db_path, cluster_seq_path, f"{cluster_seq_path}.fasta"], check=True)
 
     rep_fasta = os.path.join(mmseqs_dir, f"{base_name}_cluster_rep.fasta")
-    if strip_gaps:
+    if two_step:
+        # Representatives come from step 1 only, so the tree gets complete
+        # sequences. Write them before step 2 so the search has a target DB.
+        count = write_aligned_representatives(input_fasta, tsv_output, rep_fasta)
+        print(f"[info] Backbone: {count} aligned representatives from complete sequences")
+
+        if remainder_source:
+            step2_id = min_seq_id if step2_min_seq_id is None else step2_min_seq_id
+            assignments = assign_remainder_to_representatives(
+                remainder_source, rep_fasta, os.path.join(mmseqs_dir, "step2_tmp"),
+                threads, step2_id)
+            with open(tsv_output, "a") as handle:
+                for member, representative in sorted(assignments.items()):
+                    handle.write(f"{representative}\t{member}\n")
+            held = sum(1 for _ in SeqIO.parse(remainder_source, "fasta"))
+            print(f"[info] Step 2: assigned {len(assignments)}/{held} held-back sequences to a "
+                  f"backbone cluster at >= {float(step2_id):.0%} identity; "
+                  f"{held - len(assignments)} left unassigned (NULL cluster)")
+            shutil.rmtree(os.path.join(mmseqs_dir, "step2_tmp"), ignore_errors=True)
+        for path in (remainder_source,):
+            if path and os.path.isfile(path):
+                os.remove(path)
+    elif strip_gaps:
         # convert2fasta would emit the ungapped sequences MMseqs clustered on,
         # which IQ-TREE rejects as ragged, so rebuild from the padded MSA.
         count = write_aligned_representatives(input_fasta, tsv_output, rep_fasta)
@@ -199,6 +395,25 @@ if __name__ == "__main__":
                         help="Cluster the padded alignment as-is instead of stripping gaps first. MMseqs treats "
                              "'-' as sequence content, which inflates the cluster count; only use this to "
                              "reproduce pre-existing results.")
+    parser.add_argument("--two-step", action="store_true",
+                        help="Two-step clustering. Step 1 clusters only sequences at least "
+                             "--min-completeness covered, so fragments never become representatives "
+                             "(and never become tree tips). Step 2 searches the held-back sequences "
+                             "against those representatives and assigns each to its best match, so "
+                             "they keep a cluster label without polluting the backbone.")
+    parser.add_argument("--min-completeness", type=float, default=0.9,
+                        help="Fraction of the alignment width a sequence must cover with unambiguous "
+                             "bases to join step 1 (default: 0.9)")
+    parser.add_argument("--step2-min-seq-id", type=float, default=None,
+                        help="Identity required to assign a held-back sequence to a backbone cluster "
+                             "(default: same as --min-seq-id). On influenza HA, 0.98 assigns 63%% of "
+                             "held-back sequences, 0.95 assigns 78%%, 0.90 assigns 99%%; unassigned "
+                             "sequences get a NULL cluster in the database.")
+    parser.add_argument("--no-quality-sort", action="store_true",
+                        help="Do not order clustering input by informative (non-N, non-gap) length. "
+                             "By default the input is sorted longest-informative-first and createdb "
+                             "--shuffle is disabled, so --cluster-mode 2 picks the most complete "
+                             "sequence of each cluster as its representative rather than an N-padded one.")
     parser.add_argument("--max-seqs", type=int, default=None,
                         help="Prefilter candidates kept per query (MMseqs default). Raise it if a large "
                              "near-identical group appears to be crowding true neighbours out of the candidate list.")
@@ -217,7 +432,10 @@ if __name__ == "__main__":
             for original_filename, trimmed_fasta in trimmed_files.items():
                 print(f"Clustering trimmed file: {trimmed_fasta}")
                 run_mmseqs_clustering(trimmed_fasta, args.output_dir, args.min_seq_id, args.threads,
-                                      strip_gaps=not args.keep_gaps, max_seqs=args.max_seqs)
+                                      strip_gaps=not args.keep_gaps, max_seqs=args.max_seqs,
+                                      sort_by_quality=not args.no_quality_sort,
+                                      two_step=args.two_step, min_completeness=args.min_completeness,
+                                      step2_min_seq_id=args.step2_min_seq_id)
             print("All processing completed.")
             exit(0)
 
@@ -234,7 +452,10 @@ if __name__ == "__main__":
             input_fasta_path = os.path.join(args.input_dir, fasta_file)
             print(f"Clustering original file: {input_fasta_path}")
             run_mmseqs_clustering(input_fasta_path, args.output_dir, args.min_seq_id, args.threads,
-                                  strip_gaps=not args.keep_gaps, max_seqs=args.max_seqs)
+                                  strip_gaps=not args.keep_gaps, max_seqs=args.max_seqs,
+                                      sort_by_quality=not args.no_quality_sort,
+                                      two_step=args.two_step, min_completeness=args.min_completeness,
+                                      step2_min_seq_id=args.step2_min_seq_id)
 
     print("All processing completed.")
 
