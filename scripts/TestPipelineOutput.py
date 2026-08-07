@@ -387,7 +387,12 @@ def run_segmented(args) -> Tuple[List[str], bool]:
             out.append("✗ FAIL: Pivoted matrix missing Complete_status column")
             return out, False
 
-        segment_cols = sum(1 for col in p_header if col in {str(x) for x in range(1, 9)})
+        # Segment columns are whatever the virus's reference list defines, so they
+        # are counted by exclusion rather than against a hardcoded influenza 1-8.
+        RESERVED_PIVOT_COLS = {"Complete_status", "isolate_key_source",
+                               "Segments_present", "Missing_segments", "Duplicate_segments"}
+        segment_cols = sum(1 for i, col in enumerate(p_header)
+                           if i > 0 and col not in RESERVED_PIVOT_COLS)
         out.append(f"  - Found {segment_cols} segment columns")
 
         status_idx = p_header.index("Complete_status")

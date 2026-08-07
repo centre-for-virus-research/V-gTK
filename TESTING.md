@@ -16,17 +16,26 @@ The pipeline includes automated validation tests that run when `--test 1` is set
    - reference accession
    - alignment score
    - strand orientation
-   - **segment number** (the key column for segmented viruses)
+   - **segment** (the key column for segmented viruses; a number for influenza,
+     but any label the reference list uses, e.g. `L`/`M`/`S`)
 
 2. **Segment validation in matrix** - Checks that:
    - `segment_validated` column exists in the GenBank matrix
-   - At least some records have valid segment assignments (1-8 for influenza)
+   - At least some records have valid segment assignments
    - Reports count of validated vs. total records
 
-3. **Pivoted segments matrix** (flu only) - Verifies that:
+3. **Pivoted segments matrix** - runs for every `is_segmented = "Y"` build, not just
+   influenza. Verifies that:
    - Pivoted matrix has `Complete_status` column
-   - Segment columns (1-8) are present
+   - Segment columns are present. These are the expected segment set derived from
+     the `master` rows of the reference list (1-8 for influenza, `L`/`S` for an
+     arenavirus, and so on), so the count is virus-dependent.
    - Reports counts of Complete vs. Incomplete genomes
+
+   The first column is the elected isolate key: `Parsed_strain` on flu runs,
+   otherwise the GenBank `isolate` or `strain` qualifier. Which column was elected,
+   and how well populated each candidate was, is recorded in
+   `gB_matrix_pivoted_segments.summary.tsv` alongside the table.
 
 **Output**: `test_segmented_results.txt` in the publish directory
 
@@ -183,7 +192,7 @@ Test 2: Checking segment_validated column in matrix...
 
 Test 3: Checking pivoted segments matrix...
 ✓ PASS: Pivoted matrix has Complete_status column
-  - Found 8 segment columns
+  - Found 8 segment columns          # virus-dependent: the ref_list master segments
   - Complete genomes: 15
   - Incomplete genomes: 10
 ✓ PASS: Pivoted matrix contains strain data

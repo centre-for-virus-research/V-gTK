@@ -1,0 +1,14 @@
+primary_accession	Parsed_strain	isolate	strain	segment_validated	exclusion
+A1	StrainComplete	iso1	A/complete	1	
+A2	StrainComplete	iso1	A/complete	2	
+A3	StrainComplete	iso1	A/complete	3	
+A4	StrainComplete	iso1	A/complete	4	
+A5	StrainComplete	iso1	A/complete	5	
+A6	StrainComplete	iso1	A/complete	6	
+A7	StrainComplete	iso1	A/complete	7	
+A8	StrainComplete	iso1	A/complete	8	
+B1	StrainIncomplete	iso2	A/incomplete	1	
+B2	StrainIncomplete	iso2	A/incomplete	2.0	
+B2b	StrainIncomplete	iso2	A/incomplete	2	
+EXCL	StrainExcluded	iso3	A/excluded	3	manual exclusion
+REF1	StrainRef	iso4	A/ref		

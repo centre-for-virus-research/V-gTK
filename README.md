@@ -107,7 +107,29 @@ A tab-separated values file listing the references and masters for the virus. It
     * `master`: The principal reference sequence used to establish coordinate mapping space. **Exactly one** master is required per segment (unless a segment only contains exclusions).
     * `reference`: Valid representative reference sequences.
     * `exclusion_list`: Sequences to ignore/quarantine.
-  * **`segment`** values must contain segment names or numbers if `--is_segmented Y` is set. Numeric digits are automatically normalized to their clean integer form (e.g., `"Segment 4"` or `"04"` maps to `"4"`).
+  * **`segment`** values must contain segment names or numbers if `--is_segmented Y` is set. Numeric digits are automatically normalized to their clean integer form (e.g., `"Segment 4"` or `"04"` maps to `"4"`). Non-numeric labels such as `L`, `M` and `S` are kept verbatim and matched case-insensitively.
+  * For segmented builds the **`master`** rows also define the expected segment set for the per-isolate completeness table (see below), so adding a master raises the bar for calling an isolate complete.
+
+### Per-isolate segment completeness
+
+Every `--is_segmented Y` build publishes `gB_matrix_pivoted_segments.tsv`: one row
+per isolate, one column per expected segment, each cell holding the accession(s)
+contributing that segment, plus a `Complete_status` of `Complete`/`Incomplete`.
+This used to be influenza-only; it now works for any segmented genome.
+
+* The **expected segment set** comes from the `master` rows of the reference list
+  (`exclusion_list` rows are ignored, so decoy references do not inflate the bar).
+  Override with `--pivot_required_segments L,S`.
+* The **isolate key** is elected once per run from the first sufficiently populated
+  column of `Parsed_strain`, `isolate`, `strain`. `Parsed_strain` only exists on
+  influenza runs, so non-flu builds normally group on the GenBank `isolate`
+  qualifier. Override with `--pivot_isolate_key <col1,col2,...>`.
+* A row whose isolate key is blank becomes its own single-accession isolate rather
+  than being merged with every other unkeyed record.
+* `gB_matrix_pivoted_segments.summary.tsv` records the segment set and its source,
+  which key column was elected and the coverage of each candidate, and counts of
+  excluded / unkeyed / segment-less / unexpected-segment rows. Check it first if
+  the completeness numbers look wrong.
 
 ### 2. Gene Info TSV (`--gene_info`)
 This file defines display metadata for the genes/proteins associated with the virus database. It must contain a header and the following columns:
