@@ -10,7 +10,7 @@ source:
   git_rev: main
 
 build:
-  number: 1
+  number: 2
 
 requirements:
 

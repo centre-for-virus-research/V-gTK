@@ -22,26 +22,88 @@ fi
 # Create the V-gTK launcher
 cat > "${PREFIX}/bin/vgtk" <<'EOF'
 #!/usr/bin/env python3
+# VGTK_LAUNCHER_VERSION_2
 
 import os
 import sys
 import subprocess
 
 
+def get_scripts():
+
+    scripts_dir = os.path.join(
+        sys.prefix,
+        "share",
+        "vgtk",
+        "scripts"
+    )
+
+    scripts = []
+
+    if not os.path.isdir(scripts_dir):
+        return scripts
+
+    for filename in os.listdir(scripts_dir):
+
+        if not filename.endswith(".py"):
+            continue
+
+        if filename.startswith("__"):
+            continue
+
+        script_name = filename[:-3]
+        scripts.append(script_name)
+
+    return sorted(scripts)
+
+
+def show_help():
+
+    print("V-gTK")
+    print("")
+    print("Usage:")
+    print("  vgtk <command> [arguments]")
+    print("")
+    print("Options:")
+    print("  -h, --help       Show this help message")
+    print("  --list           List available V-gTK commands")
+    print("")
+    print("Examples:")
+    print("  vgtk --list")
+    print("  vgtk DownloadGFF --help")
+    print("  vgtk GenBankParser --help")
+
+
+def show_commands():
+
+    scripts = get_scripts()
+
+    print("Available V-gTK commands:")
+    print("")
+
+    if not scripts:
+        print("No V-gTK scripts found.")
+        return
+
+    for script in scripts:
+        print(f"  {script}")
+
+
 def main():
 
     if len(sys.argv) < 2:
-        print("V-gTK")
-        print("")
-        print("Usage:")
-        print("  vgtk <command> [arguments]")
-        print("")
-        print("Examples:")
-        print("  vgtk DownloadGFF --help")
-        print("  vgtk GenBankParser --help")
+        show_help()
         sys.exit(0)
 
     command = sys.argv[1]
+
+    if command in ["-h", "--help"]:
+        show_help()
+        sys.exit(0)
+
+    if command == "--list":
+        show_commands()
+        sys.exit(0)
 
     if command.endswith(".py"):
         command = command[:-3]
@@ -59,7 +121,14 @@ def main():
     )
 
     if not os.path.isfile(script_path):
+
         print(f"V-gTK command not found: {command}")
+        print("")
+        print("Run:")
+        print("  vgtk --list")
+        print("")
+        print("to see available commands.")
+
         sys.exit(1)
 
     cmd = [
@@ -74,6 +143,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 EOF
 
 chmod +x "${PREFIX}/bin/vgtk"
