@@ -1,0 +1,62 @@
+{% set name = "vgtk" %}
+{% set version = "1.0.0" %}
+
+package:
+  name: {{ name }}
+  version: {{ version }}
+
+source:
+  git_url: https://github.com/centre-for-virus-research/V-gTK.git
+  git_rev: main
+
+build:
+  number: 1
+
+requirements:
+
+  host:
+    - python =3.10
+
+  run:
+    - python =3.10
+
+    # Python packages
+    - numpy
+    - pandas
+    - matplotlib
+    - requests
+    - biopython
+    - openpyxl
+    - tqdm
+    - python-dateutil
+
+    # Bioinformatics tools
+    - blast
+    - seqkit
+    - nextalign
+    - nextflow
+    - veryfasttree
+    - usher
+    - mmseqs2
+    - iqtree
+    - ucsc-fatovcf
+    - epa-ng
+    - gappa
+
+test:
+  commands:
+
+    - vgtk
+    - test -f "${PREFIX}/share/vgtk/scripts/DownloadGFF.py"
+    - test -f "${PREFIX}/share/vgtk/scripts/GenBankParser.py"
+
+about:
+  home: https://github.com/centre-for-virus-research/V-gTK
+  license: AGPL-3.0-only
+  license_file: LICENSE
+  summary: Viral genome toolkit
+
+extra:
+
+  additional-platforms:
+    - osx-arm64
