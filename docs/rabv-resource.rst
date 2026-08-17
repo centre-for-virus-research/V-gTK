@@ -438,3 +438,49 @@ When preparing clade assignment files, consider the following:
 Clade assignment depends heavily on the quality of the reference sequence set and
 reference tree. Therefore, the reference tree should include a diverse set of
 sequences covering all known major and minor RABV clades where possible.
+
+Using Custom GFF Files for Annotation
+-------------------------------------
+
+V-gTK downloads GFF files for the specified master accessions. These files
+can be customised according to the annotation requirements of your analysis.
+
+The recommended approach is to modify the GFF file downloaded by V-gTK rather
+than creating a new GFF file from scratch. This helps avoid potential issues
+caused by missing or incorrectly formatted columns.
+
+For appropriate annotation details, make sure that the ninth column of the
+GFF file contains both the ``symbol`` and ``product`` tags.
+
+Example
+~~~~~~~
+
+If you download the GFF file for the master accession ``NC_001542`` and look
+at the CDS feature spanning positions ``71-1423``, the ninth column may look
+similar to:
+
+.. code-block:: text
+
+   ID=cds-NP_056793.1;Parent=rna-RABVgp1;Dbxref=GenBank:NP_056793.1,GeneID:1489853;Name=NP_056793.1;gbkey=CDS;locus_tag=RABVgp1;product=nucleoprotein N;protein_id=NP_056793.1
+
+In this example, the ``symbol`` tag is missing. It can be added manually.
+After modification, the annotation should look like:
+
+.. code-block:: text
+
+   ID=cds-NP_056793.1;Parent=rna-RABVgp1;Dbxref=GenBank:NP_056793.1,GeneID:1489853;Name=NP_056793.1;gbkey=CDS;locus_tag=RABVgp1;symbol=N;product=nucleoprotein N;protein_id=NP_056793.1
+
+Here:
+
+* ``symbol=N`` defines the abbreviated gene or protein symbol used in the
+  annotation.
+
+* ``product=nucleoprotein N`` provides the corresponding descriptive product
+  name.
+
+Both the ``symbol`` and ``product`` values can be modified according to your
+annotation requirements.
+
+When editing the file, retain the original nine-column GFF structure and the
+existing attributes unless they specifically need to be changed. In
+particular, avoid removing attributes required by downstream V-gTK processing.
