@@ -20,3 +20,5 @@ tests/unit/__pycache__/*
 coverage.xml
 .coverage
 scripts/rescue
+claude.md
+CLAUDE.md
