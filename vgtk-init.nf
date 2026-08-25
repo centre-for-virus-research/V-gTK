@@ -101,7 +101,7 @@ def scriptDefinedParams = [
     "gisaid_dir", "previous_db", "conda_path", "test_max_cluster_seqs", "max_threads", "iqtree_mem", "ref_set_aligned",
     "min_seq_length_ratio", "max_aln_gap_proportion", "tree_free", "base_tree_only",
     "pivot_isolate_key", "pivot_required_segments",
-    "mmseqs_two_step", "mmseqs_min_completeness"
+    "mmseqs_two_step", "mmseqs_min_completeness", "iqtree_model"
     // Add all parameter names defined above
 ]
 
@@ -778,7 +778,7 @@ process IQ_TREE{
         fi
 
         mkdir -p IQTree_!{mmseq_cluster_dir.baseName}
-        "$IQTREE_BIN" -s "$CLUSTER_REP" -t "$GUIDE_TREE" -T !{task.cpus} -m GTR -pre IQTree_!{mmseq_cluster_dir.baseName}/iqtree -mem !{params.iqtree_mem}
+        "$IQTREE_BIN" -s "$CLUSTER_REP" -t "$GUIDE_TREE" -T !{task.cpus} -m !{params.iqtree_model} -pre IQTree_!{mmseq_cluster_dir.baseName}/iqtree -mem !{params.iqtree_mem}
     '''
 }
 
