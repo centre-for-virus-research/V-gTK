@@ -952,6 +952,892 @@ def format_feature_integrity_result(result, show_n=25):
                 )
             )
     return "\n".join(lines)
+# ---------------------------------------------------------------------------
+# Extended DB invariants
+#
+# The checks below answer "is this finished database internally coherent?" as
+# opposed to "did the pipeline crash?".  Every failure mode they cover is one
+# that produces a database that opens fine, loads fine, and is quietly wrong:
+# a column that stopped being written, a gene whose name was eaten by a bad
+# delimiter, an alignment that grew residues the submitted sequence never had,
+# a tree leaf that resolves to nothing.  They are reported as warnings by
+# default (see --strict-invariants) because a legitimate build can trip some of
+# them (e.g. a reference list with no genotype labels).
+# ---------------------------------------------------------------------------
+
+NUCLEOTIDE_ALPHABET = "ACGTURYSWKMBDHVN"
+ALIGNMENT_EXTRA_CHARS = "-."
+GENE_PARENT_SENTINELS = {"", "na", "n/a", "null", "none", "nan", "-"}
+
+# meta_data columns that a finished DB should essentially always have populated
+# for at least one row.  A column here that is 100% blank means the writer for
+# it silently stopped producing values (the influenza neuraminidase "NA" case
+# erased a whole column exactly this way).
+CORE_META_COLUMNS = [
+    "primary_accession",
+    "accession_version",
+    "organism",
+    "taxonomy",
+    "accession_type",
+    "length",
+    "real_length",
+    "segment",
+    "collection_date",
+    "collection_year",
+    "country",
+    "host",
+    "host_taxa_id",
+    "host_scientific_name",
+    "country_validated",
+]
+
+# Columns whose emptiness means "the labelling mechanism never ran".  Kept
+# separate so the report can say precisely what is missing.
+REFERENCE_LABEL_META_COLUMNS = ["nearest_reference_genotype", "nearest_reference_subtype"]
+
+MONTH_ABBREVIATIONS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
+def quote_ident(name):
+    """Quote a SQLite identifier. Column names come from PRAGMA table_info, but
+    quoting keeps a column literally called "segment"/"Segment"/"index" safe."""
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def invariant_result(title, findings=None, skipped=False, reason=None, error=None, severity="warning"):
+    result = {"title": title, "severity": severity, "findings": findings or []}
+    if error is not None:
+        result["ok"] = False
+        result["error"] = error
+        return result
+    if skipped:
+        result["ok"] = True
+        result["skipped"] = True
+        result["reason"] = reason or "not applicable to this DB"
+        return result
+    result["ok"] = not result["findings"]
+    return result
+
+
+def add_finding(findings, code, count, detail, examples=None):
+    if count:
+        findings.append(
+            {
+                "code": code,
+                "count": int(count),
+                "detail": detail,
+                "examples": [str(x) for x in (examples or [])][:25],
+            }
+        )
+
+
+def _blank_sql(column):
+    col = quote_ident(column)
+    return f"({col} IS NULL OR TRIM(CAST({col} AS TEXT)) = '')"
+
+
+def validate_meta_column_population(conn, meta_cols, where_sql=None, params=()):
+    """Flag meta_data columns that are 100% NULL/blank.
+
+    Real trigger: pandas read the influenza gene name "NA" as a null and the
+    shipped DB ended up with a nameless gene; the same class of accident makes a
+    whole metadata column silently empty, and nothing else in the pipeline
+    notices because empty is a legal value everywhere."""
+    title = "meta_data column population"
+    if not table_exists(conn, "meta_data"):
+        return invariant_result(title, skipped=True, reason="Table 'meta_data' not present.")
+
+    cursor = conn.cursor()
+    where_clause = f" WHERE {where_sql}" if where_sql else ""
+    empty_core = []
+    empty_other = []
+    empty_labels = []
+
+    # One pass over the table, not one per column. A query per column is a full
+    # table scan per column, and meta_data is wide: on a real influenza build
+    # that is 106 scans of a 28 GB table - about 3 TB of reads, and it ran for
+    # half an hour without finishing. Rolled into a single SELECT of N
+    # conditional sums it is one scan. Chunked because SQLite caps an expression
+    # tree at SQLITE_MAX_COLUMN (2000 by default), and to keep the SQL readable.
+    populated = {}
+    chunk_size = 64
+    for start in range(0, len(meta_cols), chunk_size):
+        chunk = meta_cols[start:start + chunk_size]
+        sums = ", ".join(
+            f"SUM(CASE WHEN NOT {_blank_sql(col)} THEN 1 ELSE 0 END)" for col in chunk
+        )
+        cursor.execute(f"SELECT {sums} FROM meta_data{where_clause}", params)
+        row = cursor.fetchone() or ()
+        for col, value in zip(chunk, row):
+            populated[col] = int(value or 0)
+
+    for col in meta_cols:
+        if populated.get(col):
+            continue
+        if col in REFERENCE_LABEL_META_COLUMNS:
+            empty_labels.append(col)
+        elif col in CORE_META_COLUMNS:
+            empty_core.append(col)
+        else:
+            empty_other.append(col)
+
+    findings = []
+    add_finding(
+        findings,
+        "core_meta_column_entirely_empty",
+        len(empty_core),
+        "meta_data columns that a finished DB should populate are 100% NULL/blank",
+        empty_core,
+    )
+    add_finding(
+        findings,
+        "reference_label_columns_unpopulated",
+        len(empty_labels),
+        (
+            "genotype/subtype label columns exist but not one row carries a value; "
+            "if the reference list ships genotype labels the labelling step did not run"
+        ),
+        empty_labels,
+    )
+    result = invariant_result(title, findings)
+    result["empty_other_columns"] = empty_other
+    result["checked_columns"] = len(meta_cols)
+    return result
+
+
+def validate_segment_labels(conn, meta_cols, exclusion_column="exclusion_status", exclude_value="1"):
+    """Segment must be a segment label, present, and agree across every table.
+
+    Real trigger: a segment/Segment case collision plus ten divergent segment
+    normalisers left most rows with an empty segment and some carrying a gene
+    name instead of a segment number.  An empty or gene-named segment does not
+    raise anything - it just silently partitions the DB wrongly."""
+    title = "segment label integrity"
+    if not table_exists(conn, "meta_data") or "segment" not in meta_cols:
+        return invariant_result(title, skipped=True, reason="meta_data has no 'segment' column.")
+
+    cursor = conn.cursor()
+    findings = []
+
+    where_sql, params = get_meta_nonexcluded_filter(meta_cols, exclusion_column, exclude_value)
+    suffix = f" AND ({where_sql})" if where_sql else ""
+    cursor.execute(f"SELECT COUNT(*) FROM meta_data WHERE {_blank_sql('segment')}{suffix}", params)
+    blank_segments = int(cursor.fetchone()[0])
+    add_finding(
+        findings,
+        "blank_segment_in_meta_data",
+        blank_segments,
+        "non-excluded meta_data rows carry no segment label",
+    )
+
+    meta_segments = fetch_distinct_values(conn, "meta_data", "segment")
+
+    if len(meta_segments) == 1:
+        only = next(iter(meta_segments))
+        if only != "1":
+            add_finding(
+                findings,
+                "single_segment_not_labelled_1",
+                1,
+                "a non-segmented DB should label every row segment='1'",
+                [only],
+            )
+
+    for table_name, _acc_col in (
+        ("sequences", "header"),
+        ("sequence_alignment", "primary_accession"),
+        ("features", "accession"),
+        ("insertions", "primary_accession"),
+        ("trees", "name"),
+    ):
+        if not table_exists(conn, table_name):
+            continue
+        if "segment" not in get_table_columns(conn, table_name):
+            continue
+        observed = fetch_distinct_values(conn, table_name, "segment")
+        unknown = sorted(observed - meta_segments)
+        add_finding(
+            findings,
+            f"segment_absent_from_meta_data:{table_name}",
+            len(unknown),
+            f"{table_name}.segment values that no meta_data row uses",
+            unknown,
+        )
+
+    gene_like = set()
+    if table_exists(conn, "genes"):
+        gene_cols = get_table_columns(conn, "genes")
+        for col in ("name", "display_name"):
+            if col in gene_cols:
+                gene_like |= {v.lower() for v in fetch_distinct_values(conn, "genes", col)}
+    if table_exists(conn, "features") and "product" in get_table_columns(conn, "features"):
+        gene_like |= {v.lower() for v in fetch_distinct_values(conn, "features", "product")}
+    gene_like.discard("whole_genome")
+    segment_gene_names = sorted(v for v in meta_segments if v.lower() in gene_like)
+    add_finding(
+        findings,
+        "segment_holds_a_gene_name",
+        len(segment_gene_names),
+        "meta_data.segment values that are gene/product names rather than segment labels",
+        segment_gene_names,
+    )
+
+    result = invariant_result(title, findings)
+    result["meta_segments"] = sorted(meta_segments)
+    return result
+
+
+def validate_referential_integrity(conn, expected_accessions, accession_column="primary_accession"):
+    """Every child-table row must point at a meta_data accession, and every
+    non-excluded accession must own a raw sequence.
+
+    Real trigger: an update run that re-wrote meta_data but not its children (or
+    vice versa) leaves rows addressed to accessions the DB no longer describes.
+    Those rows are invisible to every join the toolkit does, so nothing errors -
+    the data is simply unreachable."""
+    title = "cross-table referential integrity"
+    if not table_exists(conn, "meta_data"):
+        return invariant_result(title, skipped=True, reason="Table 'meta_data' not present.")
+
+    cursor = conn.cursor()
+    meta_accession_set = fetch_distinct_values(conn, "meta_data", accession_column)
+    findings = []
+    children = [
+        ("sequences", "header", True),
+        ("sequence_alignment", "primary_accession", False),
+        ("insertions", "primary_accession", False),
+        ("features", "accession", False),
+    ]
+    for table_name, child_col, check_reverse in children:
+        if not table_exists(conn, table_name):
+            continue
+        cols = get_table_columns(conn, table_name)
+        col = find_first_present(cols, [child_col, "primary_accession", "accession", "header"])
+        if col is None:
+            continue
+        # Set difference in Python rather than a LEFT JOIN on TRIM(CAST(...)):
+        # the expression wrapper stops SQLite building an automatic index, and
+        # the join degrades to O(rows x rows) - minutes on a production DB for
+        # an answer two hash sets give in a second.
+        observed_ids = fetch_distinct_values(conn, table_name, col)
+        orphans = sorted(observed_ids - meta_accession_set)
+        add_finding(
+            findings,
+            f"orphan_rows:{table_name}",
+            len(orphans),
+            f"{table_name}.{col} values with no matching meta_data.{accession_column}",
+            orphans,
+        )
+        if check_reverse:
+            observed = fetch_distinct_values(conn, table_name, col)
+            missing = sorted(set(expected_accessions) - observed)
+            add_finding(
+                findings,
+                f"missing_from_child:{table_name}",
+                len(missing),
+                f"non-excluded meta_data accessions with no row in {table_name}",
+                missing,
+            )
+
+    # Pointer columns: each names the reference an accession was aligned or
+    # projected against.  sequence_alignment.alignment_name in particular is how
+    # CreateSqliteDB._add_reference_columns resolves a query's genotype from its
+    # best BLAST hit - an unresolvable value there does not raise, it just makes
+    # nearest_reference_genotype come back empty for that query.
+    pointer_columns = [
+        ("sequence_alignment", "alignment_name"),
+        ("insertions", "reference"),
+        ("features", "master_ref_accession"),
+        ("features", "reference_accession"),
+    ]
+    for table_name, pointer_col in pointer_columns:
+        if not table_exists(conn, table_name):
+            continue
+        if pointer_col not in get_table_columns(conn, table_name):
+            continue
+        observed = fetch_distinct_values(conn, table_name, pointer_col)
+        unresolved = sorted(observed - meta_accession_set)
+        add_finding(
+            findings,
+            f"reference_pointer_unresolved:{table_name}.{pointer_col}",
+            len(unresolved),
+            f"{table_name}.{pointer_col} values that name no meta_data.{accession_column}",
+            unresolved,
+        )
+    return invariant_result(title, findings)
+
+
+def _alphabet_offenders(text, allowed):
+    """Return True when `text` uses a character outside `allowed`.
+
+    Done in Python on a streamed row rather than in SQL: a GLOB negated class
+    (`*[^ACGT...]*`) backtracks from every offset and costs ~150s over a
+    production alignment table, and a nested-REPLACE chain copies the column
+    once per allowed letter.  One set() per row is an order of magnitude
+    cheaper than either."""
+    return bool(set(text) - allowed)
+
+
+def validate_sequence_content(conn, accession_column="primary_accession"):
+    """Stored sequences must be non-empty, nucleotide-alphabet, and must agree
+    with the lengths meta_data advertises for them.
+
+    Real trigger: meta_data.length / real_length / a,t,g,c,n are computed by a
+    different step than the one that stores the sequence.  If either side is
+    written for the wrong accession, or a sequence is truncated on the way in,
+    both tables still look plausible on their own; only the cross-check shows
+    it.  meta_data.length must equal the stored sequence length and real_length
+    must equal a+t+g+c - both hold exactly on every shipped DB."""
+    title = "sequence content and length coherence"
+    if not table_exists(conn, "sequences"):
+        return invariant_result(title, skipped=True, reason="Table 'sequences' not present.")
+
+    seq_cols = get_table_columns(conn, "sequences")
+    header_col = find_first_present(seq_cols, ["header", "primary_accession", "accession"])
+    if header_col is None or "sequence" not in seq_cols:
+        return invariant_result(title, skipped=True, reason=f"sequences table lacks header/sequence columns: {seq_cols}")
+
+    findings = []
+    qh = quote_ident(header_col)
+    allowed = set(NUCLEOTIDE_ALPHABET) | set(NUCLEOTIDE_ALPHABET.lower())
+
+    # One streaming pass over the sequence text: emptiness, alphabet and stored
+    # length all come out of it, so the column is read once rather than once per
+    # check (it is over a gigabyte on a production HCV database).
+    empty_rows = 0
+    bad_alphabet = []
+    bad_alphabet_count = 0
+    stored_lengths = {}
+    for header, sequence in conn.execute(f"SELECT {qh}, sequence FROM sequences"):
+        if sequence is None or not str(sequence).strip():
+            empty_rows += 1
+            continue
+        text = str(sequence)
+        key = str(header).strip() if header is not None else ""
+        if key:
+            stored_lengths[key] = len(text)
+        if _alphabet_offenders(text, allowed):
+            bad_alphabet_count += 1
+            if len(bad_alphabet) < 25:
+                bad_alphabet.append(key)
+
+    add_finding(findings, "empty_sequence_rows", empty_rows, "sequences rows with a NULL/zero-length sequence")
+    add_finding(
+        findings,
+        "sequence_outside_nucleotide_alphabet",
+        bad_alphabet_count,
+        f"sequences containing characters outside {NUCLEOTIDE_ALPHABET}",
+        bad_alphabet,
+    )
+
+    meta_cols = get_table_columns(conn, "meta_data") if table_exists(conn, "meta_data") else []
+    qacc = quote_ident(accession_column)
+    if accession_column in meta_cols and "length" in meta_cols:
+        rows = []
+        for accession, declared in conn.execute(f'SELECT {qacc}, "length" FROM meta_data'):
+            if accession is None:
+                continue
+            key = str(accession).strip()
+            declared_text = "" if declared is None else str(declared).strip()
+            if not declared_text or key not in stored_lengths:
+                continue
+            try:
+                declared_int = int(float(declared_text))
+            except ValueError:
+                continue
+            if declared_int != stored_lengths[key]:
+                rows.append((key, declared_text, stored_lengths[key]))
+        add_finding(
+            findings,
+            "meta_length_disagrees_with_stored_sequence",
+            len(rows),
+            "meta_data.length differs from LENGTH(sequences.sequence)",
+            [f"{r[0]} meta={r[1]} stored={r[2]}" for r in rows],
+        )
+
+    if accession_column in meta_cols and {"real_length", "a", "t", "g", "c"}.issubset(set(meta_cols)):
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT m.{qacc}, m."real_length",
+                   (CAST(m."a" AS INTEGER)+CAST(m."t" AS INTEGER)+CAST(m."g" AS INTEGER)+CAST(m."c" AS INTEGER))
+            FROM meta_data m
+            WHERE NOT {_blank_sql('real_length')}
+              AND CAST(m."real_length" AS INTEGER) !=
+                  (CAST(m."a" AS INTEGER)+CAST(m."t" AS INTEGER)+CAST(m."g" AS INTEGER)+CAST(m."c" AS INTEGER))
+            """
+        )
+        rows = cursor.fetchall()
+        add_finding(
+            findings,
+            "real_length_disagrees_with_base_counts",
+            len(rows),
+            "meta_data.real_length differs from a+t+g+c",
+            [f"{r[0]} real_length={r[1]} atgc={r[2]}" for r in rows],
+        )
+    return invariant_result(title, findings)
+
+
+def validate_alignment_geometry(conn, accession_column="primary_accession"):
+    """An alignment row is the stored sequence with gaps inserted, so stripping
+    the gaps can never make it longer than the raw sequence, and every row in
+    one alignment must have the same width.
+
+    Real trigger: the padding step splices reference flanks onto short queries.
+    When it over-reaches it appends residues the submitted sequence never had -
+    the DB then serves an aligned sequence that disagrees with its own raw
+    sequence, with nothing logged.  A ragged alignment width means one row was
+    padded against a different reference than the rest of its segment."""
+    title = "alignment geometry"
+    if not table_exists(conn, "sequence_alignment"):
+        return invariant_result(title, skipped=True, reason="Table 'sequence_alignment' not present.")
+
+    aln_cols = get_table_columns(conn, "sequence_alignment")
+    acc_col = find_first_present(aln_cols, ["primary_accession", "accession", "sequence_id"])
+    if acc_col is None or "alignment" not in aln_cols:
+        return invariant_result(title, skipped=True, reason=f"sequence_alignment lacks accession/alignment columns: {aln_cols}")
+
+    findings = []
+    qa = quote_ident(acc_col)
+    allowed = set(NUCLEOTIDE_ALPHABET + ALIGNMENT_EXTRA_CHARS)
+    allowed |= {c.lower() for c in allowed}
+
+    raw_lengths = {}
+    if table_exists(conn, "sequences"):
+        seq_cols = get_table_columns(conn, "sequences")
+        header_col = find_first_present(seq_cols, ["header", "primary_accession", "accession"])
+        if header_col and "sequence" in seq_cols:
+            qh = quote_ident(header_col)
+            # LENGTH() is evaluated inside SQLite so no sequence text is
+            # transferred; the accession match then happens in a dict.  A SQL
+            # join on TRIM(CAST(...)) cannot use an index and runs quadratically.
+            for header, seq_len in conn.execute(f"SELECT {qh}, LENGTH(sequence) FROM sequences WHERE sequence IS NOT NULL"):
+                if header is not None:
+                    raw_lengths[str(header).strip()] = seq_len
+
+    group_col = "segment" if "segment" in aln_cols else ("alignment_name" if "alignment_name" in aln_cols else None)
+    select_cols = [qa, "alignment"] + ([quote_ident(group_col)] if group_col else [])
+
+    empty_rows = 0
+    all_gap = []
+    all_gap_count = 0
+    bad_alphabet = []
+    bad_alphabet_count = 0
+    over_long = []
+    widths = {}
+    # Single streaming pass: emptiness, all-gap rows, alphabet, ungapped length
+    # and per-group width all come from the same read of the alignment column.
+    for row in conn.execute(f"SELECT {', '.join(select_cols)} FROM sequence_alignment"):
+        accession = str(row[0]).strip() if row[0] is not None else ""
+        alignment = row[1]
+        group_value = str(row[2]).strip() if group_col and row[2] is not None else ""
+        if alignment is None or not str(alignment).strip():
+            empty_rows += 1
+            continue
+        text = str(alignment)
+        if group_col:
+            widths.setdefault(group_value, set()).add(len(text))
+        ungapped = len(text) - text.count("-") - text.count(".")
+        if ungapped == 0:
+            all_gap_count += 1
+            if len(all_gap) < 25:
+                all_gap.append(accession)
+        if _alphabet_offenders(text, allowed):
+            bad_alphabet_count += 1
+            if len(bad_alphabet) < 25:
+                bad_alphabet.append(accession)
+        raw_len = raw_lengths.get(accession)
+        if raw_len is not None and ungapped > raw_len:
+            over_long.append((accession, ungapped, raw_len))
+
+    add_finding(findings, "empty_alignment_rows", empty_rows, "sequence_alignment rows with no alignment string")
+    add_finding(findings, "all_gap_alignment_rows", all_gap_count, "alignment rows that are nothing but gaps", all_gap)
+    add_finding(
+        findings,
+        "alignment_outside_nucleotide_alphabet",
+        bad_alphabet_count,
+        f"alignments containing characters outside {NUCLEOTIDE_ALPHABET}{ALIGNMENT_EXTRA_CHARS}",
+        bad_alphabet,
+    )
+    add_finding(
+        findings,
+        "alignment_longer_than_raw_sequence",
+        len(over_long),
+        "ungapped alignment has more residues than the stored raw sequence (padding invented bases)",
+        [f"{r[0]} ungapped={r[1]} raw={r[2]}" for r in over_long],
+    )
+    ragged = sorted((g, lens) for g, lens in widths.items() if len(lens) > 1)
+    add_finding(
+        findings,
+        "ragged_alignment_width",
+        len(ragged),
+        f"alignment rows sharing a {group_col} disagree on alignment length" if group_col else "alignment rows disagree on length",
+        [f"{group_col}={g} distinct_lengths={len(lens)} min={min(lens)} max={max(lens)}" for g, lens in ragged],
+    )
+    return invariant_result(title, findings)
+
+
+def validate_duplicate_records(conn, accession_column="primary_accession"):
+    """One accession may appear once per segment, never twice.
+
+    Real trigger: an incremental --update that re-inserts instead of upserting
+    doubles rows.  Counts still look sane, joins still work, but every
+    downstream aggregate silently double-counts the duplicated accessions."""
+    title = "duplicate record keys"
+    findings = []
+    cursor = conn.cursor()
+    targets = [
+        ("meta_data", accession_column),
+        ("sequences", "header"),
+        ("sequence_alignment", "primary_accession"),
+    ]
+    for table_name, key_col in targets:
+        if not table_exists(conn, table_name):
+            continue
+        cols = get_table_columns(conn, table_name)
+        col = find_first_present(cols, [key_col, "primary_accession", "accession", "header"])
+        if col is None:
+            continue
+        group_cols = [quote_ident(col)]
+        if "segment" in cols:
+            group_cols.append("COALESCE(TRIM(CAST(\"segment\" AS TEXT)), '')")
+        group_sql = ", ".join(group_cols)
+        # NB: HAVING must reference COUNT(*) directly. meta_data has a column
+        # literally named "n" (the ambiguous-base count), so `HAVING n > 1`
+        # silently resolves to that column instead of the alias and reports
+        # every row with more than one N as a duplicate.
+        cursor.execute(
+            f"""
+            SELECT {quote_ident(col)}, COUNT(*)
+            FROM {quote_ident(table_name)}
+            WHERE {quote_ident(col)} IS NOT NULL AND TRIM(CAST({quote_ident(col)} AS TEXT)) != ''
+            GROUP BY {group_sql}
+            HAVING COUNT(*) > 1
+            """
+        )
+        rows = cursor.fetchall()
+        add_finding(
+            findings,
+            f"duplicate_key:{table_name}",
+            len(rows),
+            f"{table_name} has repeated ({col}, segment) keys",
+            [f"{r[0]} x{r[1]}" for r in rows],
+        )
+    return invariant_result(title, findings)
+
+
+def validate_gene_table(conn):
+    """Every gene needs a name, and its parent must exist.
+
+    Real trigger: generic/rabv/Tables/gene_info.csv and
+    generic/other/Tables/gene_info.csv end their last row with spaces / a comma
+    instead of a tab, so the whole_genome row is loaded as a single field named
+    'whole_genome    NULL'.  Every other gene points at parent 'whole_genome',
+    which then does not exist - the gene hierarchy is silently broken.  The
+    influenza gene 'NA' being read as a null produced a nameless gene the same
+    way."""
+    title = "genes table integrity"
+    if not table_exists(conn, "genes"):
+        return invariant_result(title, skipped=True, reason="Table 'genes' not present.")
+
+    gene_cols = get_table_columns(conn, "genes")
+    if "name" not in gene_cols:
+        return invariant_result(title, skipped=True, reason=f"genes table has no 'name' column: {gene_cols}")
+
+    cursor = conn.cursor()
+    findings = []
+
+    cursor.execute(f"SELECT COUNT(*) FROM genes WHERE {_blank_sql('name')}")
+    blank_names = cursor.fetchone()[0]
+    cursor.execute(f"SELECT description FROM genes WHERE {_blank_sql('name')} LIMIT 25")
+    add_finding(
+        findings,
+        "gene_with_no_name",
+        blank_names,
+        "genes rows with a blank name (a gene name that looks like a null, e.g. influenza 'NA', was erased)",
+        [str(r[0]) for r in cursor.fetchall()],
+    )
+
+    if "display_name" in gene_cols:
+        cursor.execute(f"SELECT COUNT(*) FROM genes WHERE {_blank_sql('display_name')}")
+        add_finding(findings, "gene_with_no_display_name", cursor.fetchone()[0], "genes rows with a blank display_name")
+
+    cursor.execute("SELECT name FROM genes WHERE name IS NOT NULL")
+    names = [str(r[0]) for r in cursor.fetchall()]
+    merged = [n for n in names if "\t" in n or "  " in n.strip() or "," in n]
+    add_finding(
+        findings,
+        "gene_name_looks_like_a_merged_field",
+        len(merged),
+        "gene names containing a tab, a comma or a run of spaces - the source row was split on the wrong delimiter",
+        merged,
+    )
+
+    name_set = {n.strip() for n in names if n.strip()}
+    if "parent_name" in gene_cols:
+        cursor.execute("SELECT name, parent_name FROM genes")
+        dangling = []
+        for name, parent in cursor.fetchall():
+            parent_text = str(parent).strip() if parent is not None else ""
+            if parent_text.lower() in GENE_PARENT_SENTINELS:
+                continue
+            if parent_text not in name_set:
+                dangling.append(f"{name} -> {parent_text}")
+        add_finding(
+            findings,
+            "gene_parent_does_not_resolve",
+            len(dangling),
+            "genes.parent_name values that match no genes.name",
+            dangling,
+        )
+
+    cursor.execute(
+        f"SELECT name, COUNT(*) FROM genes WHERE NOT {_blank_sql('name')} GROUP BY name HAVING COUNT(*) > 1"
+    )
+    rows = cursor.fetchall()
+    add_finding(findings, "duplicate_gene_name", len(rows), "genes table has repeated names", [f"{r[0]} x{r[1]}" for r in rows])
+    return invariant_result(title, findings)
+
+
+def validate_tree_tip_resolution(conn, accession_column="primary_accession"):
+    """Every leaf label in every stored tree must name a meta_data accession.
+
+    Real trigger: the reference alignment carries backbone genomes that are not
+    part of the curated reference list, so they end up as leaves in the segment
+    trees but have no metadata, no sequence and no alignment anywhere in the DB.
+    Clicking one in the toolkit resolves to nothing.  The existing validator
+    only cross-checks the single 'best' tree, and in segmented mode it returns
+    before that check runs at all."""
+    title = "tree tip resolution"
+    if not table_exists(conn, "trees"):
+        return invariant_result(title, skipped=True, reason="Table 'trees' not present.")
+
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM trees WHERE newick IS NOT NULL AND LENGTH(TRIM(newick)) > 0")
+    if cursor.fetchone()[0] == 0:
+        return invariant_result(title, skipped=True, reason="No non-empty trees stored (tree-free build).")
+
+    meta_accessions = set()
+    if table_exists(conn, "meta_data"):
+        meta_accessions = fetch_distinct_values(conn, "meta_data", accession_column)
+
+    findings = []
+    cursor.execute("SELECT COUNT(*) FROM trees WHERE newick IS NULL OR LENGTH(TRIM(newick)) = 0")
+    add_finding(findings, "empty_tree_rows", cursor.fetchone()[0], "trees rows with a NULL/empty newick")
+
+    unresolved = set()
+    unparsable = []
+    per_tree = {}
+    trees_seen = 0
+    for row in fetch_trees(conn):
+        trees_seen += 1
+        try:
+            tree = Phylo.read(StringIO(row["newick"]), "newick")
+        except Exception as exc:  # a malformed newick is itself a finding
+            unparsable.append(f"{row['name']}: {exc}")
+            continue
+        tips = {tip.name.strip() for tip in tree.get_terminals() if tip.name}
+        if not tips:
+            unparsable.append(f"{row['name']}: tree has no labelled tips")
+            continue
+        missing = tips - meta_accessions
+        if missing:
+            per_tree[row["name"]] = len(missing)
+            unresolved |= missing
+
+    add_finding(findings, "unparsable_tree", len(unparsable), "stored newick strings that could not be parsed", unparsable)
+    add_finding(
+        findings,
+        "tree_tip_absent_from_meta_data",
+        len(unresolved),
+        "distinct tree leaf labels that match no meta_data accession",
+        sorted(unresolved),
+    )
+
+    result = invariant_result(title, findings)
+    result["trees_checked"] = trees_seen
+    result["trees_with_unresolved_tips"] = per_tree
+    return result
+
+
+def validate_segment_tree_coverage(conn, meta_cols):
+    """Each segment carried in meta_data should have at least one tree.
+
+    Real trigger: a segmented build where one segment's tree job failed still
+    writes a complete-looking DB; the segment simply has no phylogeny and the
+    toolkit shows an empty tree panel for it."""
+    title = "segment tree coverage"
+    if not table_exists(conn, "trees") or "segment" not in meta_cols:
+        return invariant_result(title, skipped=True, reason="No trees table or no meta_data.segment column.")
+    tree_cols = get_table_columns(conn, "trees")
+    if "segment" not in tree_cols:
+        return invariant_result(title, skipped=True, reason="trees table has no 'segment' column.")
+
+    tree_segments = fetch_distinct_values(conn, "trees", "segment", where_sql="newick IS NOT NULL AND LENGTH(TRIM(newick)) > 0")
+    if not tree_segments:
+        return invariant_result(title, skipped=True, reason="No segment-labelled trees stored.")
+    meta_segments = fetch_distinct_values(conn, "meta_data", "segment")
+    missing = sorted(meta_segments - tree_segments)
+    findings = []
+    add_finding(findings, "segment_without_tree", len(missing), "meta_data segments with no tree row", missing)
+    return invariant_result(title, findings)
+
+
+def _parse_collection_date(text):
+    """Return (year, month, day) with None for parts the string does not carry.
+    Handles the GenBank 'DD-Mon-YYYY'/'Mon-YYYY'/'YYYY' forms and the ISO
+    'YYYY-MM-DD'/'YYYY-MM' forms that GISAID and newer records use."""
+    raw = "" if text is None else str(text).strip()
+    if not raw or raw.lower() in {"na", "n/a", "-", "unknown", "none", "null"}:
+        return None, None, None
+    parts = raw.split("-")
+    try:
+        if len(parts) == 3 and len(parts[0]) == 4 and parts[0].isdigit():
+            return int(parts[0]), int(parts[1]), int(parts[2])
+        if len(parts) == 3 and parts[0].isdigit():
+            return int(parts[2]), MONTH_ABBREVIATIONS.get(parts[1][:3].lower()), int(parts[0])
+        if len(parts) == 2 and len(parts[0]) == 4 and parts[0].isdigit():
+            return int(parts[0]), int(parts[1]), None
+        if len(parts) == 2:
+            return int(parts[1]), MONTH_ABBREVIATIONS.get(parts[0][:3].lower()), None
+        if len(parts) == 1 and parts[0].isdigit() and len(parts[0]) == 4:
+            return int(parts[0]), None, None
+    except (ValueError, IndexError):
+        return None, None, None
+    return None, None, None
+
+
+def validate_collection_dates(conn, meta_cols, today=None):
+    """Collection dates must be in the past, plausible, and must not lose their
+    day/month on the way into the split columns.
+
+    Real trigger: the day/month splitter only understands GenBank's
+    'DD-Mon-YYYY'.  Every record whose collection_date arrives as ISO
+    'YYYY-MM-DD' - which is what GISAID and recent GenBank submissions use -
+    keeps its year and silently loses day and month, so date-resolution filters
+    quietly drop those samples.  A future collection_date means a two-digit year
+    was expanded into the wrong century."""
+    title = "collection date sanity"
+    if not table_exists(conn, "meta_data") or "collection_date" not in meta_cols:
+        return invariant_result(title, skipped=True, reason="meta_data has no 'collection_date' column.")
+
+    import datetime as _datetime
+
+    today = today or _datetime.date.today()
+    cursor = conn.cursor()
+    select_cols = ["primary_accession" if "primary_accession" in meta_cols else "rowid", "collection_date"]
+    for optional in ("collection_year", "collection_mon", "collection_day"):
+        if optional in meta_cols:
+            select_cols.append(optional)
+    cursor.execute(f"SELECT {', '.join(quote_ident(c) for c in select_cols)} FROM meta_data")
+
+    future_dates = []
+    implausible = []
+    year_disagreements = []
+    lost_precision = []
+    # Stream the cursor rather than fetchall(): a production DB carries millions
+    # of meta_data rows and this check does not need them all in memory at once.
+    for row in cursor:
+        record = dict(zip(select_cols, row))
+        accession = str(record[select_cols[0]])
+        year, month, day = _parse_collection_date(record.get("collection_date"))
+        if year is None:
+            continue
+        if year > today.year or (
+            month and day and _datetime.date(year, month, day) > today
+        ):
+            future_dates.append(f"{accession} collection_date={record.get('collection_date')}")
+        if year < 1900:
+            implausible.append(f"{accession} collection_date={record.get('collection_date')}")
+        stored_year = str(record.get("collection_year") or "").strip()
+        if stored_year and stored_year.isdigit() and int(stored_year) != year:
+            year_disagreements.append(
+                f"{accession} collection_date={record.get('collection_date')} collection_year={stored_year}"
+            )
+        blank_parts = []
+        if month is not None and "collection_mon" in select_cols and not str(record.get("collection_mon") or "").strip():
+            blank_parts.append("collection_mon")
+        if day is not None and "collection_day" in select_cols and not str(record.get("collection_day") or "").strip():
+            blank_parts.append("collection_day")
+        if blank_parts:
+            lost_precision.append(
+                f"{accession} collection_date={record.get('collection_date')} blank={'+'.join(blank_parts)}"
+            )
+
+    findings = []
+    add_finding(findings, "collection_date_in_the_future", len(future_dates), "collection dates later than today", future_dates)
+    add_finding(findings, "collection_year_before_1900", len(implausible), "collection years that predate viral sequencing", implausible)
+    add_finding(
+        findings,
+        "collection_year_disagrees_with_collection_date",
+        len(year_disagreements),
+        "collection_year does not match the year in collection_date",
+        year_disagreements,
+    )
+    add_finding(
+        findings,
+        "date_precision_lost_in_split_columns",
+        len(lost_precision),
+        "collection_date carries a month/day that collection_mon/collection_day did not receive",
+        lost_precision,
+    )
+    return invariant_result(title, findings)
+
+
+def run_extended_invariant_checks(
+    conn,
+    meta_cols,
+    expected_accessions,
+    accession_column="primary_accession",
+    exclusion_column="exclusion_status",
+    exclude_value="1",
+    where_sql=None,
+    where_params=(),
+):
+    """Run every extended invariant check and return the ordered result list."""
+    return [
+        validate_meta_column_population(conn, meta_cols, where_sql=where_sql, params=where_params),
+        validate_segment_labels(conn, meta_cols, exclusion_column=exclusion_column, exclude_value=exclude_value),
+        validate_referential_integrity(conn, expected_accessions, accession_column=accession_column),
+        validate_duplicate_records(conn, accession_column=accession_column),
+        validate_sequence_content(conn, accession_column=accession_column),
+        validate_alignment_geometry(conn, accession_column=accession_column),
+        validate_gene_table(conn),
+        validate_tree_tip_resolution(conn, accession_column=accession_column),
+        validate_segment_tree_coverage(conn, meta_cols),
+        validate_collection_dates(conn, meta_cols),
+    ]
+
+
+def format_invariant_result(result, show_n=10):
+    lines = [f"[{result['title']}]"]
+    if result.get("skipped"):
+        lines.append("  OK: True (skipped)")
+        lines.append(f"  Reason: {result.get('reason', 'not provided')}")
+        return "\n".join(lines)
+    if "error" in result:
+        lines.append("  OK: False")
+        lines.append(f"  ERROR: {result['error']}")
+        return "\n".join(lines)
+    lines.append(f"  OK: {result.get('ok')}")
+    other_empty = result.get("empty_other_columns")
+    if other_empty:
+        # Informational only: optional columns (GISAID merge artefacts, run-mode
+        # specific fields) that are legitimately empty in many builds.  Listed so
+        # a reviewer can spot one that should NOT have been empty.
+        lines.append(f"  (also entirely empty, not treated as a finding: {', '.join(other_empty)})")
+    if not result.get("findings"):
+        return "\n".join(lines)
+    for finding in result["findings"]:
+        lines.append(f"  - {finding['code']}: {finding['count']} ({finding['detail']})")
+        for example in finding.get("examples", [])[:show_n]:
+            lines.append(f"      * {example}")
+    return "\n".join(lines)
+
+
 def get_extra_tree_label(tree_source):
     if tree_source == "usher":
         return "Non-centroid UShER leaves"
@@ -1012,6 +1898,16 @@ def main(argv=None):
         "--exclude-value",
         default="1",
         help="Value in the exclusion column that marks a row as excluded",
+    )
+    parser.add_argument(
+        "--skip-invariant-checks",
+        action="store_true",
+        help="Skip the extended DB invariant checks (column population, segment labels, referential integrity, sequence/alignment geometry, genes, tree tips, dates)",
+    )
+    parser.add_argument(
+        "--strict-invariants",
+        action="store_true",
+        help="Fail validation when an extended DB invariant check reports a finding (default: report as warnings)",
     )
     args = parser.parse_args(argv)
 
@@ -1123,6 +2019,19 @@ def main(argv=None):
             ),
         }
         mutation_integrity_results = validate_mutation_tables(conn, expected_meta_set)
+        if args.skip_invariant_checks:
+            invariant_results = []
+        else:
+            invariant_results = run_extended_invariant_checks(
+                conn,
+                meta_columns,
+                expected_meta_set,
+                accession_column=args.accession_column,
+                exclusion_column=args.exclusion_column,
+                exclude_value=args.exclude_value,
+                where_sql=where_sql,
+                where_params=where_params,
+            )
         feature_integrity_result = validate_feature_projection_integrity(conn) if args.check_update_integrity else {
             "title": "feature projection integrity",
             "ok": True,
@@ -1380,6 +2289,13 @@ def main(argv=None):
                     report.write(format_mutation_integrity_result(result))
                     report.write("\n\n")
 
+            if invariant_results:
+                report.write("\nExtended DB invariant checks")
+                report.write(" (fatal)\n" if args.strict_invariants else " (warnings only)\n")
+                for result in invariant_results:
+                    report.write(format_invariant_result(result))
+                    report.write("\n\n")
+
             report.write("\nValidation status: PASS\n")
 
         if missing_in_tree:
@@ -1440,6 +2356,19 @@ def main(argv=None):
                     print(f"[info]   {title} missing (present in meta_data but missing in {result.get('table', 'table')}, first 10): {', '.join(missing[:10])}")
                 if extra:
                     print(f"[info]   {title} extra (present in {result.get('table', 'table')} but missing/excluded in meta_data, first 10): {', '.join(extra[:10])}")
+        for result in invariant_results:
+            if result.get("skipped"):
+                print(f"[info] {result['title']}: skipped ({result.get('reason')})")
+            elif "error" in result:
+                print(f"[warn] {result['title']}: ERROR: {result['error']}")
+            elif result.get("ok"):
+                print(f"[info] {result['title']}: ok=True")
+            else:
+                print(f"[warn] {result['title']}: ok=False")
+                for finding in result.get("findings", []):
+                    print(f"[warn]   {finding['code']}: {finding['count']} - {finding['detail']}")
+                    for example in finding.get("examples", [])[:10]:
+                        print(f"[warn]     * {example}")
         for result in mutation_integrity_results:
             if result.get("skipped"):
                 print(f"[info] {result['title']}: skipped ({result.get('reason')})")
@@ -1567,6 +2496,12 @@ def main(argv=None):
                         validation_fail("Validation failed: segment contamination detected in features table")
             if result_failed(feature_integrity_result):
                 validation_fail("Validation failed: feature projection integrity check failed")
+
+        failed_invariant_checks = [result["title"] for result in invariant_results if result_failed(result)]
+        if failed_invariant_checks and args.strict_invariants:
+            validation_fail(
+                "Validation failed: DB invariant checks failed for " + ", ".join(failed_invariant_checks)
+            )
 
         failed_consistency_checks = [title for title, result in consistency_results.items() if result_failed(result)]
         failed_mutation_checks = [result["title"] for result in mutation_integrity_results if result_failed(result)]

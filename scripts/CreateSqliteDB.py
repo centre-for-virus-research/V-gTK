@@ -47,7 +47,10 @@ class CreateSqliteDB:
 		update=False,
 		update_db=None,
 		batch_id=None,
+		is_segmented=None,
 	):
+		# None = infer from the data (legacy behaviour). True/False = authoritative.
+		self.is_segmented = is_segmented
 		self.meta_data = meta_data
 		self.features = features
 		self.pad_aln = pad_aln
@@ -521,6 +524,25 @@ class CreateSqliteDB:
 		return {str(row[0]).strip() for row in rows if row and str(row[0]).strip()}
 
 	def _should_force_unsegmented_segment_one(self, conn, dfs):
+		"""Should blank segments be filled in with '1'?
+
+		For a non-segmented virus every row is segment 1 by definition, so filling
+		blanks is right. For a segmented one it is a fabrication: a blank means the
+		segment could not be determined, and stamping '1' on it silently asserts
+		PB2 for influenza.
+
+		The two cases are indistinguishable from the data alone - a segmented build
+		whose rows happen to all be segment 1 (a small test subset, or one where
+		every other segment was excluded) looks exactly like a non-segmented one.
+		So when the caller tells us, we believe them; inference is only the
+		fallback for callers that do not pass the flag.
+		"""
+		# getattr: callers that build the object with __new__ (several tests do)
+		# never run __init__, so the attribute may not exist.
+		declared = getattr(self, 'is_segmented', None)
+		if declared is not None:
+			return not declared
+
 		observed = set()
 		for df in dfs:
 			observed.update(self._collect_nonblank_segments_from_df(df))
@@ -679,13 +701,20 @@ class CreateSqliteDB:
 			"1.#IND", "1.#QNAN", "<NA>", "N/A", "NA", "NULL", "NaN", "None",
 			"n/a", "nan", "null",
 		}
-		for column in frame.columns:
-			if column in self.NA_IS_A_VALUE_COLUMNS:
-				# Blank still means missing even here; only the NA-like words stay.
-				frame[column] = frame[column].replace("", float("nan"))
-			else:
-				frame[column] = frame[column].replace(list(sentinels), float("nan"))
-		return frame
+		# One vectorised mask over the whole frame rather than a per-column loop.
+		# .replace() would route through pandas' deprecated silent-downcasting
+		# path, and assigning column by column fragments a 101-column x 3.9M-row
+		# frame badly enough that pandas warns about it.
+		#
+		# For the segment columns only a blank is missing, so that influenza's
+		# neuraminidase - genuinely named "NA" - survives. Everywhere else the
+		# full sentinel set applies, because there 'NA' means "not applicable"
+		# and is meant to reach SQL as NULL.
+		protected = frame.columns.isin(list(self.NA_IS_A_VALUE_COLUMNS))
+		condition = frame.isin(sentinels)
+		if protected.any():
+			condition.loc[:, protected] = frame.loc[:, protected].eq("")
+		return frame.mask(condition)
 
 	def _ensure_update_columns(self, conn, table, df):
 		if not self.update or not self._table_exists(conn, table):
@@ -950,9 +979,14 @@ class CreateSqliteDB:
 				if "primary_accession" in ref_df.columns and "segment" in ref_df.columns:
 					for _, row in ref_df.iterrows():
 						acc = str(row["primary_accession"]).strip()
-						seg = str(row["segment"]).strip()
-						digits = ''.join(ch for ch in seg if ch.isdigit())
-						normalized_seg = digits if digits else seg
+						# The same normaliser meta_data.segment went through above.
+						# This was an inline digit-scrape, which disagreed with it in
+						# three ways: '01' stayed '01' and so matched nothing, '1.0'
+						# became segment 10, and a gene name like 'PB1' became segment
+						# 1 (PB1 is segment 2). A mismatch here is silent - the value
+						# is only used to backfill, and a wrong backfill then drops the
+						# row from valid_pairs.
+						normalized_seg = self._normalize_segment_value(row["segment"])
 						if acc and normalized_seg:
 							ref_to_seg[acc] = normalized_seg
 			except Exception as e:
@@ -1415,6 +1449,7 @@ def process(args):
 		update=args.update,
 		update_db=args.update_db,
 		batch_id=args.batch_id,
+		is_segmented=(None if args.is_segmented is None else args.is_segmented == 'Y'),
 	)
 	db_creator.create_db()
 
@@ -1427,6 +1462,8 @@ if __name__ == "__main__":
 	parser.add_argument('-rf', '--features', help='Features table', default="tmp/Tables/features.tsv")
 	parser.add_argument('-p', '--pad_aln', help='Padded alignment file', default="tmp/Tables/sequence_alignment.tsv")
 	parser.add_argument('-g', '--gene_info', help='Gene table', default=None)
+	parser.add_argument('--is_segmented', choices=['Y', 'N'], default=None,
+		help="Whether the virus is segmented. When given it is authoritative for the 'fill blank segments with 1' decision, which otherwise has to be inferred from the data and cannot tell a non-segmented build from a segmented one that happens to hold only segment 1.")
 	parser.add_argument('-mc', '--m49_countries', help='M49 countries', default="assets/m49_country.csv")
 	parser.add_argument('-mir', '--m49_interm_region', help='M49 intermediate regions', default="assets/m49_intermediate_region.csv")
 	parser.add_argument('-mr', '--m49_regions', help='M49 regions', default="assets/m49_region.csv")
