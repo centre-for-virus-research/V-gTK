@@ -144,3 +144,82 @@ This directory must contain precomputed multiple sequence alignment (MSA) FASTA 
 * **Naming Convention**:
   Files must be named **`refset_<segment>_aln.fasta`** where `<segment>` is the normalized segment value (e.g. `refset_1_aln.fasta`, `refset_2_aln.fasta`).
   *Fallback:* If the specific pattern is not found, the pipeline scans the directory for a FASTA file whose name contains the segment number digits.
+
+---
+
+## Appendix: `vgtk-rabv.sh` — Nextflow-free runner and step-level resume
+
+`vgtk-rabv.sh` is a straight bash re-implementation of `vgtk-init.nf`. It calls the
+same scripts in `scripts/` with the same arguments, in the same order, and produces
+the same SQLite database — but with no Nextflow, no JVM and no `work/` hash directories.
+Its defaults mirror the `test` profile, so a bare `./vgtk-rabv.sh` reproduces
+`nextflow run vgtk-init.nf -profile test`.
+
+```bash
+conda activate vgtk
+./vgtk-rabv.sh --help          # full option list (parsed from the header comment)
+./vgtk-rabv.sh                 # = -profile test
+./vgtk-rabv.sh \
+  --tax_id 11292 --db_name rabv-full --is_segmented N --test 0 \
+  --ref_list test_data/rabv_test_ref_list.txt \
+  --publish_dir test_out/rabv_full --max_threads 16
+```
+
+It accepts the same parameters as the pipeline (`--tax_id`, `--db_name`, `--ref_list`,
+`--publish_dir`, `--is_segmented`, `--test`, `--update_db`, `--xml_dir`, `--tree_free`,
+`--mutation_catalog`, …) plus a few runner-local knobs (`--max_threads`, `--iqtree_mem`).
+
+### Why it exists: re-running from an intermediate point
+
+This is the main reason to reach for the bash runner during development or debugging.
+
+All intermediates are written **flat, under stable, human-readable names** into
+`<publish_dir>/work_sh/` — `gB_matrix_validated.tsv`, `query_seq.fa`,
+`query_uniq_tophits.tsv`, `*_merged_msa.fasta`, `MMseqClusters_*/`, `Usher*/`,
+`Tables/sequence_alignment.tsv`, `<db_name>.db`, and so on. Nothing is hidden behind a
+content hash, so you can inspect, hand-edit or delete any intermediate and then pick the
+pipeline back up from exactly the step you want:
+
+```bash
+# Re-run only the DB build onwards, reusing the alignments and trees already on disk
+./vgtk-rabv.sh --publish_dir test_out/basic_test --start_step 16
+```
+
+`--start_step N` skips every step below `N` and rediscovers the variables those steps
+would normally have set by globbing `work_sh/` (the GFF file, the padded MSAs, the dedup
+FASTAs, the MMseqs/IQ-TREE/UShER output directories). All intermediate paths are declared
+up front, so **any** value of `--start_step` works without editing the script. If a
+required intermediate is missing you get a `[warn]` at startup naming the step that will
+fail, rather than a failure deep into the run.
+
+This complements — rather than replaces — `nextflow run -resume`. Nextflow invalidates a
+task and everything downstream of it whenever its inputs or command change, which is the
+correct behaviour for a production run but painful when you are iterating on, say,
+`CreateSqliteDB.py` and want to re-run only the last four steps against fixed upstream
+output. `--start_step` gives you that, at the cost of trusting the on-disk intermediates
+yourself.
+
+### Step numbers
+
+| Step | Stage | Step | Stage |
+|---|---|---|---|
+| 1 | `FETCH_GENBANK` (skipped with `--xml_dir`) | 11 | `BUILD_TREE_MANIFEST` |
+| 2 | `DOWNLOAD_GFF` | 12 | `CALC_ALIGNMENT_CORD` |
+| 3 | `GENBANK_PARSER` + `VALIDATE_MATRIX` | 13 | `SOFTWARE_VERSION` |
+| 4 | `FILTER_AND_EXTRACT_SEQUENCES` | 14 | `HOST_TAXA_TABLE` |
+| 5 | `BLAST_ALIGNMENT` | 15 | `GENERATE_TABLES` |
+| 6 | `NEXTALIGN_ALIGNMENT` | 16 | `CREATE_SQLITE_DB` (+ `ANNOTATE_MUTATIONS`) |
+| 7 | `COLLECT_FILTERED_SEQUENCES` | 17 | `VALIDATE_DB_TREE` (test mode only) |
+| 8 | `PAD_ALIGNMENT` | 18 | `TEST_NON_SEGMENTED_OUTPUT` (test, non-segmented) |
+| 9 | `DEDUP_ALIGNMENT` (+ test subsampling) | 19 | `VERIFY_MUTATIONS` (needs `--mutation_catalog`) |
+| 10 | `MMSEQS_CLUSTERING` → `VERY_FAST_TREE` → `IQ_TREE` → `USHER_PLACEMENT` | | |
+
+Each stage prints a `[step]` / `[done]` banner, so the last banner in the log tells you
+where to set `--start_step` for the next attempt.
+
+> [!NOTE]
+> Caveats: the runner is sequential — per-cluster work that Nextflow would fan out runs
+> one after another, so full builds are slower. It also assumes every dependency
+> (`python`, `seqkit`, `mmseqs`, `iqtree3`, `VeryFastTree`/`FastTree`) is on `PATH` and
+> checks for them up front. Use Nextflow for production builds; use the bash runner for
+> debugging, for step-level resume, and on machines where a JVM is inconvenient.

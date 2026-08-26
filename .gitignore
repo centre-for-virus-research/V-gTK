@@ -22,3 +22,14 @@ coverage.xml
 scripts/rescue
 claude.md
 CLAUDE.md
+# Run outputs that land in the repo root when scripts are driven by hand
+/Tables/
+/pad_out/
+/padded_alignments/
+/db_summary.txt
+/tree_manifest.tsv
+
+# Test / coverage scratch
+htmlcov/
+.pytest_cache/
+.venv/

@@ -89,7 +89,7 @@ def _make_processor(tmp_path: Path):
         reference_alignment=str(DATA_DIR / "master_ref.aligned.fasta"),
         input_dir=str(tmp_path / "query_aln"),
         base_dir=str(tmp_path),
-        output_dir="pad_out",
+        output_dir=str(tmp_path / "pad_out"),
         keep_intermediate_files=True,
         new_outputfile=False,
     )
@@ -305,7 +305,7 @@ def test_process_all_masters_strict_mode_fails_when_db_segment_backbone_missing(
         reference_alignment=str(DATA_DIR / "master_ref.aligned.fasta"),
         input_dir=str(tmp_path / "query_aln"),
         base_dir=str(tmp_path),
-        output_dir="pad_out",
+        output_dir=str(tmp_path / "pad_out"),
         keep_intermediate_files=True,
         strict_segment_backbone=True,
     )
@@ -335,7 +335,7 @@ def test_process_all_masters_ambiguous_db_segment_backbones_pick_deterministic_f
         reference_alignment=str(DATA_DIR / "master_ref.aligned.fasta"),
         input_dir=str(tmp_path / "query_aln"),
         base_dir=str(tmp_path),
-        output_dir="pad_out",
+        output_dir=str(tmp_path / "pad_out"),
         keep_intermediate_files=True,
         strict_segment_backbone=False,
     )
@@ -373,7 +373,7 @@ def test_export_update_backbones_writes_segment_fastas(tmp_path: Path, basic_upd
         reference_alignment=str(DATA_DIR / "master_ref.aligned.fasta"),
         input_dir=str(tmp_path / "query_aln"),
         base_dir=str(tmp_path),
-        output_dir="pad_out",
+        output_dir=str(tmp_path / "pad_out"),
         keep_intermediate_files=True,
         update_db=str(basic_update_db),
     )
@@ -405,7 +405,7 @@ def test_get_master_segment_map_uses_update_db_and_normalizes_blank_segment(tmp_
         reference_alignment=str(DATA_DIR / "master_ref.aligned.fasta"),
         input_dir=str(tmp_path / "query_aln"),
         base_dir=str(tmp_path),
-        output_dir="pad_out",
+        output_dir=str(tmp_path / "pad_out"),
         keep_intermediate_files=True,
         update_db=str(update_db),
     )
@@ -431,7 +431,7 @@ def test_process_all_masters_update_db_blank_segment_uses_refset_zero(tmp_path: 
         reference_alignment=str(DATA_DIR / "master_ref.aligned.fasta"),
         input_dir=str(tmp_path / "query_aln"),
         base_dir=str(tmp_path),
-        output_dir="pad_out",
+        output_dir=str(tmp_path / "pad_out"),
         keep_intermediate_files=True,
         strict_segment_backbone=True,
         update_db=str(update_db),
@@ -487,7 +487,7 @@ def test_export_update_backbones_deduplicates_same_accession(tmp_path: Path):
         reference_alignment=str(DATA_DIR / "master_ref.aligned.fasta"),
         input_dir=str(tmp_path / "query_aln"),
         base_dir=str(tmp_path),
-        output_dir="pad_out",
+        output_dir=str(tmp_path / "pad_out"),
         keep_intermediate_files=True,
         update_db=str(update_db),
     )
@@ -517,7 +517,7 @@ def test_export_update_backbones_normalizes_text_segment_labels(tmp_path: Path):
         reference_alignment=str(DATA_DIR / "master_ref.aligned.fasta"),
         input_dir=str(tmp_path / "query_aln"),
         base_dir=str(tmp_path),
-        output_dir="pad_out",
+        output_dir=str(tmp_path / "pad_out"),
         keep_intermediate_files=True,
         update_db=str(update_db),
     )
@@ -548,7 +548,7 @@ def test_resolve_precomputed_ref_dir_prefers_explicit_dir_over_db_export(tmp_pat
         reference_alignment=str(DATA_DIR / "master_ref.aligned.fasta"),
         input_dir=str(tmp_path / "query_aln"),
         base_dir=str(tmp_path),
-        output_dir="pad_out",
+        output_dir=str(tmp_path / "pad_out"),
         keep_intermediate_files=True,
         update_db=str(update_db),
     )
@@ -587,7 +587,7 @@ def test_process_all_masters_update_mode_end_to_end_handles_orphans_and_referenc
         reference_alignment=None,
         input_dir=str(query_dir),
         base_dir=str(tmp_path),
-        output_dir="pad_out",
+        output_dir=str(tmp_path / "pad_out"),
         keep_intermediate_files=True,
         segment_manifest_out=str(tmp_path / "pad_manifest.tsv"),
         strict_segment_backbone=True,
@@ -628,7 +628,7 @@ def test_process_all_masters_uses_only_backbone_file_when_segment_unknown_and_si
         reference_alignment=str(DATA_DIR / "master_ref.aligned.fasta"),
         input_dir=str(tmp_path / "query_aln"),
         base_dir=str(tmp_path),
-        output_dir="pad_out",
+        output_dir=str(tmp_path / "pad_out"),
         keep_intermediate_files=True,
         strict_segment_backbone=True,
     )
