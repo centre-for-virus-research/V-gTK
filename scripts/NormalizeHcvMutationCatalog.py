@@ -13,6 +13,27 @@ PHDR_PREFIX = "phdr_ras:"
 MUTATION_TOKEN_RE = re.compile(r"^(?P<position>\d+)(?P<alt_residue>[A-Z*]|del)$")
 CONJUNCT_INDEX_RE = re.compile(r"CONJUNCT_NAME_(?P<index>\d+)$")
 
+# PHDR scores every resistance finding inside a genotype/subtype alignment
+# bucket named ``AL_<code>`` (AL_1a, AL_1b, AL_3, AL_6a ...).  Stripping the
+# prefix yields the bare genotype/subtype code used by the genotype scope gate
+# in AnnotateMutations.
+ALIGNMENT_NAME_PREFIX = "AL_"
+
+# Every finding PHDR ships for HCV is a drug-resistance phenotype, and the
+# committed catalog carries the constant on every row - including the 75 rows
+# with no drug annotation at all.  The column exists so a virus whose catalog
+# mixes phenotypes (immune escape, host adaptation) can distinguish them;
+# writing it unconditionally is what the curated artifact records today.
+DEFAULT_PHENOTYPE = "drug_resistance"
+
+
+def alignment_name_to_genotype_code(value: str) -> str:
+    """``AL_1a`` -> ``1a``; anything already bare is returned unchanged."""
+    value = (value or "").strip()
+    if value.upper().startswith(ALIGNMENT_NAME_PREFIX):
+        value = value[len(ALIGNMENT_NAME_PREFIX):]
+    return value.strip()
+
 
 def read_delimited(path: Path, delimiter: str = ",") -> List[Dict[str, str]]:
     with path.open("r", encoding="utf-8", newline="") as handle:
@@ -126,6 +147,8 @@ class HcvMutationCatalogNormalizer:
         "phdr_alignment_ras_id",
         "phdr_drug_id",
         "drug",
+        "phenotype",
+        "relevant_genotypes",
     ]
 
     def __init__(
@@ -232,6 +255,8 @@ class HcvMutationCatalogNormalizer:
                             )
                         )
 
+        self._assign_relevant_genotypes(rows)
+
         return self._sorted_rows(
             rows,
             (
@@ -247,6 +272,27 @@ class HcvMutationCatalogNormalizer:
                 "id",
             ),
         )
+
+    @staticmethod
+    def _assign_relevant_genotypes(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        """Stamp every row with the genotype scope of its whole signature.
+
+        A signature is scored once per alignment bucket, so its genotype scope
+        is the union of the buckets across *all* of its rows - not the bucket of
+        the single row being written.  A signature with no alignment bucket at
+        all (the manufactured wild-type anchors) gets an empty value, which the
+        matcher reads as "applies to any genotype".
+        """
+        scope_by_signature: Dict[str, set] = defaultdict(set)
+        for row in rows:
+            code = alignment_name_to_genotype_code(row.get("alignment_name", ""))
+            if code:
+                scope_by_signature[row.get("signature_id", "")].add(code)
+        for row in rows:
+            row["relevant_genotypes"] = ",".join(
+                sorted(scope_by_signature.get(row.get("signature_id", ""), ()))
+            )
+        return rows
 
     @staticmethod
     def _build_alignment_context_map(alignment_rows: Iterable[Dict[str, str]]) -> Dict[str, List[Dict[str, str]]]:
@@ -318,7 +364,7 @@ class HcvMutationCatalogNormalizer:
             "signature_kind": signature_kind,
             "combination_id": combination_id,
             "combination_size": combination_size,
-            "phenotype": "",
+            "phenotype": DEFAULT_PHENOTYPE,
             "component_order": component_order,
             "source_variation_name": source_variation_name,
             "source_phdr_ras_id": source_phdr_ras_id,
@@ -336,6 +382,7 @@ class HcvMutationCatalogNormalizer:
             "phdr_alignment_ras_id": drug_row.get("phdr_alignment_ras_id", alignment_context.get("phdr_alignment_ras_id", "")),
             "phdr_drug_id": drug_row.get("phdr_drug_id", ""),
             "drug": drug_row.get("phdr_drug_id", ""),
+            "relevant_genotypes": "",
         }
 
     def _build_mutation_catalog(self, variation_rows: Iterable[Dict[str, str]]) -> Dict[str, Dict[str, str]]:

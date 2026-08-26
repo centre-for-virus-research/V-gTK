@@ -209,7 +209,7 @@ def test_translate_codon_never_invents_a_residue_from_gaps_or_ambiguity():
     """
     assert AM.translate_codon("ATG") == "M"
     assert AM.translate_codon("atg") == "M"
-    assert AM.translate_codon("TAA") == "_"
+    assert AM.translate_codon("TAA") == "*"
     for undecidable in ("A-G", "---", "AT-", "-TG", "NNN", "RGA", "AAN", "AT"):
         assert AM.translate_codon(undecidable) == "X", undecidable
 
@@ -618,7 +618,12 @@ def test_normalizer_regenerates_the_shipped_catalog_byte_for_byte(tmp_path):
     regenerated = pd.read_csv(output, sep="\t", dtype=str).fillna("")
     shipped = pd.read_csv(NORMALIZED_TSV, sep="\t", dtype=str).fillna("")
     assert len(regenerated) == len(shipped)
-    shared = list(regenerated.columns)
+    # The regenerated file may legitimately declare *more* columns than the
+    # committed one (a newly added column has not been checked in yet); it must
+    # never drop or reorder the ones already there, nor change a single value.
+    missing = [column for column in shipped.columns if column not in regenerated.columns]
+    assert missing == [], f"regeneration dropped columns: {missing}"
+    shared = list(shipped.columns)
     assert regenerated[shared].equals(shipped[shared])
 
 

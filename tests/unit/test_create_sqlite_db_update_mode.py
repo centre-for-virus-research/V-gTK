@@ -662,7 +662,16 @@ def test_update_mode_autofills_missing_cluster_98pct_with_placeholder(tmp_path: 
         conn.close()
 
 
-def test_update_mode_autofills_missing_cluster_95pct_with_placeholder(tmp_path: Path):
+def test_update_mode_autofills_missing_cluster_95pct_only_for_new_accessions(tmp_path: Path):
+    """The placeholder is for rows the DB has never seen, not for rows it has.
+
+    An update run without ``--cluster_tsv`` carries no ``cluster_95pct`` column at
+    all.  A brand-new accession has nothing to keep, so it is stored with the
+    "NA- see tree" placeholder ValidateDbTree recognises.  An accession that is
+    already in the database keeps the cluster representative the clustering run
+    computed for it - writing the placeholder over it destroyed data that no
+    later run re-derives.
+    """
     cluster_tsv = tmp_path / "clusters.tsv"
     cluster_tsv.write_text("REP_A\tA\n", encoding="utf-8")
 
@@ -679,17 +688,23 @@ def test_update_mode_autofills_missing_cluster_95pct_with_placeholder(tmp_path: 
     meta_df = pd.read_csv(update_inputs["meta"], sep="\t", dtype=str)
     if "cluster_95pct" in meta_df.columns:
         meta_df = meta_df.drop(columns=["cluster_95pct"])
+    # A row already in the DB (A) plus one it has never seen (NEW1).
+    new_row = meta_df.iloc[[0]].copy()
+    new_row["primary_accession"] = "NEW1"
+    meta_df = pd.concat([meta_df, new_row], ignore_index=True)
     meta_df.to_csv(update_inputs["meta"], sep="\t", index=False)
 
     out_db = _build_db(tmp_path, update_inputs, update=True, update_db=seed_db)
 
     conn = sqlite3.connect(str(out_db))
     try:
-        row = conn.execute(
-            "SELECT cluster_95pct FROM meta_data WHERE primary_accession='A' AND segment='1' ORDER BY rowid DESC LIMIT 1"
-        ).fetchone()
-        assert row is not None
-        assert row[0] == "NA- see tree"
+        stored = dict(
+            conn.execute(
+                "SELECT primary_accession, cluster_95pct FROM meta_data WHERE segment='1'"
+            ).fetchall()
+        )
+        assert stored["A"] == "REP_A", "an update without --cluster_tsv erased a stored cluster rep"
+        assert stored["NEW1"] == "NA- see tree"
     finally:
         conn.close()
 

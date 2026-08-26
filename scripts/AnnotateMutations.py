@@ -6,7 +6,7 @@ import argparse
 import os
 import re
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 
 from Bio import Entrez, SeqIO
 
@@ -53,8 +53,8 @@ CODON_TABLE = {
     'GGA':'G', 'GGC':'G', 'GGG':'G', 'GGT':'G',
     'TCA':'S', 'TCC':'S', 'TCG':'S', 'TCT':'S',
     'TTC':'F', 'TTT':'F', 'TTA':'L', 'TTG':'L',
-    'TAC':'Y', 'TAT':'Y', 'TAA':'_', 'TAG':'_',
-    'TGC':'C', 'TGT':'C', 'TGA':'_', 'TGG':'W',
+    'TAC':'Y', 'TAT':'Y', 'TAA':'*', 'TAG':'*',
+    'TGC':'C', 'TGT':'C', 'TGA':'*', 'TGG':'W',
 }
 
 def translate_codon(codon):
@@ -62,6 +62,358 @@ def translate_codon(codon):
     if len(codon) < 3:
         return 'X'
     return CODON_TABLE.get(codon, 'X')
+
+
+# ---------------------------------------------------------------------------
+# Residue vocabulary.
+#
+# One spelling per concept, everywhere: a stop codon is '*' and a deleted
+# residue is '-'.  The legacy spellings still have to be *readable* because
+# catalogs shipped before this change spell stop '_' (the old CODON_TABLE
+# value) and deletion 'del' (PHDR's own wording), but they are never written.
+# ---------------------------------------------------------------------------
+STOP_RESIDUE = '*'
+DELETION_RESIDUE = '-'
+
+def clean_cell(value):
+    """Text of a possibly-missing dataframe cell, with NaN read as empty.
+
+    ``str(value or '')`` is not enough: float('nan') is truthy, so a missing TSV
+    cell becomes the literal string 'nan' and then looks like a real genotype
+    code or residue.  Every parser below goes through here instead.
+    """
+    if value is None:
+        return ''
+    try:
+        if pd.isna(value):
+            return ''
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip()
+
+
+LEGACY_RESIDUE_SPELLINGS = {
+    '_': STOP_RESIDUE,
+    'STOP': STOP_RESIDUE,
+    'DEL': DELETION_RESIDUE,
+    'DELETION': DELETION_RESIDUE,
+}
+
+
+def normalize_residue(value):
+    """Fold a residue token from any source onto the standard vocabulary.
+
+    Accepts the legacy spellings ('_' for stop, 'del' for a deletion) and
+    tolerates the stray whitespace and lower case that hand-maintained TSVs
+    accumulate, so a curator typo cannot silently disable a catalog row.
+    """
+    text = clean_cell(value)
+    if not text:
+        return ''
+    upper = text.upper()
+    if upper in LEGACY_RESIDUE_SPELLINGS:
+        return LEGACY_RESIDUE_SPELLINGS[upper]
+    if text in (STOP_RESIDUE, DELETION_RESIDUE):
+        return text
+    return upper
+
+
+def alignment_covered_span(alignment):
+    """First and last non-gap column of a padded alignment, or None if all gaps.
+
+    Everything outside this span is padding added to square the alignment up -
+    it is sequence the submitter never reported, not sequence that is missing
+    from the virus.
+    """
+    text = str(alignment or '')
+    first = None
+    last = None
+    for index, base in enumerate(text):
+        if base != '-':
+            if first is None:
+                first = index
+            last = index
+    if first is None:
+        return None
+    return (first, last)
+
+
+def residue_from_aligned_codon(codon, covered_span=None, alignment_indices=None):
+    """Translate an aligned codon, or report a deletion when it is all gaps.
+
+    A deletion has no codon to translate: the evidence for it is that every
+    aligned column of the codon is a gap.  translate_codon() strips the gaps and
+    then fails its length guard, so it can only ever answer 'X' here - which is
+    indistinguishable from an unsequenced codon.  Reading the gap *before*
+    translating is what makes catalogued deletions (NS5A 29/30/32del) findable.
+
+    A gap only counts as a deletion when it sits *inside* the sequence's covered
+    span.  A partial GenBank record is padded with gaps out to the full genome
+    width, and in the shipped HCV build that padding covers NS5A 29/30/32 in 35
+    sequences - reading it as a deletion would turn "we never sequenced this"
+    into a resistance call on the worst-covered records.  Callers that have no
+    alignment context (a unit test handing over a bare codon) get the plain
+    deletion reading.
+    """
+    if codon is None:
+        return None
+    text = str(codon).strip()
+    if text and set(text) == {'-'}:
+        if covered_span is None or not alignment_indices:
+            return DELETION_RESIDUE
+        first_covered, last_covered = covered_span
+        if min(alignment_indices) > first_covered and max(alignment_indices) < last_covered:
+            return DELETION_RESIDUE
+        return translate_codon(text)
+    return translate_codon(text)
+
+
+# ---------------------------------------------------------------------------
+# Genotype scope (rule A) and per-genotype wild type (rule B).
+# ---------------------------------------------------------------------------
+ALIGNMENT_NAME_PREFIX = 'AL_'
+
+# WT + position + ALT, where WT may be several residues separated by '/' and
+# either side may be spelled 'del': R155C, D168A, K/Q80K, L/M31L, 32del.
+DISPLAY_STRUCTURE_COMPONENT_RE = re.compile(
+    r'^(?P<wild_type>(?:del|[A-Za-z*])(?:/(?:del|[A-Za-z*]))*)?'
+    r'(?P<position>\d+)'
+    r'(?P<alt_residue>del|[A-Za-z*])$'
+)
+
+SCOPE_TIER_SUBTYPE = 'subtype'
+SCOPE_TIER_GENOTYPE = 'genotype'
+SCOPE_TIER_UNSCOPED = 'unscoped'
+SCOPE_TIER_OUT_OF_SCOPE = 'out_of_scope'
+
+RESIDUE_STATUS_CHANGE = 'change'
+RESIDUE_STATUS_ANCHOR = 'anchor'
+RESIDUE_STATUS_WT_UNKNOWN = 'wt_unknown'
+
+#: Generic, virus-agnostic catalog columns. Both are OPTIONAL: a catalog with
+#: neither behaves exactly as it did before genotype gating existed, which is
+#: what keeps non-HCV viruses - which have no subtypes at all - working
+#: unchanged. Everything HCV-specific (alignment codes such as AL_1a) is
+#: resolved into these at catalog build time by
+#: scripts/BuildCatalogGenotypeColumns.py, so no pipeline code depends on it.
+RELEVANT_GENOTYPES_COLUMN = 'relevant_genotypes'
+WILD_TYPE_RESIDUES_COLUMN = 'wild_type_residues'
+
+#: Semicolon between entries, colon between an entry's fields.
+GENOTYPE_ENTRY_SEP = ';'
+GENOTYPE_FIELD_SEP = ':'
+
+CALL_STATUS_EMITTED = 'emitted'
+CALL_STATUS_SUPPRESSED_OUT_OF_SCOPE = 'suppressed_out_of_scope'
+CALL_STATUS_SUPPRESSED_WILD_TYPE = 'suppressed_wild_type'
+
+SCOPE_TIER_RANK = {
+    SCOPE_TIER_SUBTYPE: 0,
+    SCOPE_TIER_GENOTYPE: 1,
+    SCOPE_TIER_UNSCOPED: 2,
+    SCOPE_TIER_OUT_OF_SCOPE: 3,
+}
+
+
+
+def genotype_of_code(value):
+    """Leading digits of a genotype/subtype code: ``6xd`` -> ``6``, ``1a`` -> ``1``."""
+    match = re.match(r'\d+', clean_cell(value))
+    return match.group(0) if match else ''
+
+
+def build_subtype_code(genotype, subtype):
+    """Join a genotype and a subtype letter into a catalog-style code.
+
+    meta_data stores them apart ('1' + 'a'); the catalog spells them together
+    ('1a').  A subtype that already carries its genotype is left alone, and a
+    value the catalog has no vocabulary for (e.g. 'NA') simply fails to match
+    any subtype bucket and falls through to the genotype tier.
+    """
+    genotype_text = clean_cell(genotype)
+    subtype_text = clean_cell(subtype)
+    if not subtype_text:
+        return genotype_text
+    if not genotype_text:
+        return subtype_text
+    if subtype_text.lower().startswith(genotype_text.lower()):
+        return subtype_text
+    return f'{genotype_text}{subtype_text}'
+
+
+
+def parse_genotype_entry_list(value):
+    """Parse a semicolon-separated ``code[:field...[:frequency]]`` column.
+
+    Returns ``{code: [fields...]}``. Used for both generic genotype columns:
+
+        relevant_genotypes   1a:36.09;3:0.10        -> {'1a': ['36.09'], '3': ['0.10']}
+        relevant_genotypes   1a;1b                  -> {'1a': [],        '1b': []}
+        wild_type_residues   1a:Q:60.89;1b:R:92.26  -> {'1a': ['Q','60.89'], ...}
+        wild_type_residues   1a:Q;1b:R              -> {'1a': ['Q'], '1b': ['R']}
+
+    The trailing frequency is OPTIONAL throughout, so a virus that knows its
+    wild types but has no frequency data can still supply the column.
+    """
+    parsed = {}
+    for entry in clean_cell(value).split(GENOTYPE_ENTRY_SEP):
+        entry = entry.strip()
+        if not entry:
+            continue
+        fields = [part.strip() for part in entry.split(GENOTYPE_FIELD_SEP)]
+        code = fields[0]
+        if code:
+            parsed[code] = fields[1:]
+    return parsed
+
+
+def build_wild_type_tables(catalog):
+    """Read the per-genotype wild type from the generic ``wild_type_residues``
+    column.
+
+    Deliberately NOT derived from ``alignment_name`` / ``display_structure``.
+    Those are PHDR/HCV artefacts - a rabies or influenza catalog will never
+    have them - so all genotype resolution happens once at catalog build time
+    (see scripts/BuildCatalogGenotypeColumns.py) and the pipeline reads only
+    columns any virus can supply.
+
+    The column is optional. Without it the tables are empty, nothing is ever
+    suppressed, and behaviour is exactly what it was before genotype gating
+    existed.
+
+    Returns ``(by_subtype, by_genotype)`` keyed by ``(code, protein, position)``.
+    A genotype-level entry is the union of its subtypes' wild types, which is
+    the right fallback for a sequence whose own subtype has no data.
+    """
+    by_subtype = defaultdict(set)
+    by_genotype = defaultdict(set)
+    if WILD_TYPE_RESIDUES_COLUMN not in catalog.columns:
+        return {}, {}
+    protein_column = '_canonical_protein' if '_canonical_protein' in catalog.columns else 'protein_name'
+    for _, row in catalog.iterrows():
+        protein = clean_cell(row.get(protein_column, ''))
+        position = clean_cell(row.get('aa_position', ''))
+        if not protein or not position:
+            continue
+        for code, fields in parse_genotype_entry_list(row.get(WILD_TYPE_RESIDUES_COLUMN, '')).items():
+            if not fields:
+                continue
+            residue = normalize_residue(fields[0])
+            if not residue:
+                continue
+            by_subtype[(code, protein, str(position))].add(residue)
+            by_genotype[(genotype_of_code(code), protein, str(position))].add(residue)
+    return dict(by_subtype), dict(by_genotype)
+
+
+def lookup_wild_type_residues(wild_type_tables, subtype_code, genotype, protein, position):
+    """Wild type for this sequence's genotype: exact subtype first, then genotype.
+
+    Returns ``(residues, tier)``; ``(None, '')`` when no wild type is known,
+    which must NOT be read as 'the residue is a change' - it is 'we do not
+    know', and the caller records it as such rather than suppressing.
+    """
+    by_subtype, by_genotype = wild_type_tables
+    if subtype_code:
+        residues = by_subtype.get((subtype_code, protein, str(position)))
+        if residues:
+            return residues, SCOPE_TIER_SUBTYPE
+    if genotype:
+        residues = by_genotype.get((genotype, protein, str(position)))
+        if residues:
+            return residues, SCOPE_TIER_GENOTYPE
+    return None, ''
+
+
+def parse_relevant_genotypes(value):
+    """Genotype codes from the generic column.
+
+    Entries are semicolon separated and each may carry an optional trailing
+    frequency: ``1a:36.09;3:0.10`` and ``1a;3`` both yield ``{'1a', '3'}``.
+    A comma is still accepted so a catalog written before the separator was
+    settled keeps working.
+    """
+    text = clean_cell(value).replace(',', GENOTYPE_ENTRY_SEP)
+    return set(parse_genotype_entry_list(text))
+
+
+def build_signature_genotype_scope(catalog):
+    """Genotype scope per signature: the union over every row of that signature.
+
+    Read only from the generic ``relevant_genotypes`` column. Deriving scope
+    from ``alignment_name`` would tie the pipeline to a PHDR/HCV artefact that
+    no other virus has, so that resolution happens once at catalog build time
+    (scripts/BuildCatalogGenotypeColumns.py) and never here.
+
+    The column is optional. Without it no signature has a scope, the gate lets
+    everything through, and behaviour is what it was before gating existed - so
+    a virus with no genotypes, or no subtypes, needs to supply nothing.
+    A signature whose entry is blank likewise gets an empty set, which the gate
+    reads as 'applies to any genotype'.
+    """
+    if 'signature_id' not in catalog.columns:
+        return {}
+    if RELEVANT_GENOTYPES_COLUMN not in catalog.columns:
+        return {}
+
+    scope = defaultdict(set)
+    for _, row in catalog.iterrows():
+        signature_id = clean_cell(row.get('signature_id', ''))
+        if not signature_id:
+            continue
+        scope[signature_id] |= parse_relevant_genotypes(row.get(RELEVANT_GENOTYPES_COLUMN, ''))
+    return {signature_id: frozenset(codes) for signature_id, codes in scope.items()}
+
+
+def classify_genotype_scope(scope_codes, genotype, subtype_code):
+    """Rule A, matched at genotype level.
+
+    Exact subtype wins; otherwise any bucket whose leading digits agree with the
+    sequence's genotype counts, because observed subtypes such as 6n, 6xd, 6xc
+    and 4v have no catalog bucket of their own and exact matching would throw
+    away nearly every call.  An empty scope means the entry applies anywhere.
+    """
+    if not scope_codes:
+        return SCOPE_TIER_UNSCOPED
+    if subtype_code and subtype_code in scope_codes:
+        return SCOPE_TIER_SUBTYPE
+    if genotype and any(genotype_of_code(code) == genotype for code in scope_codes):
+        return SCOPE_TIER_GENOTYPE
+    return SCOPE_TIER_OUT_OF_SCOPE
+
+
+def build_sequence_genotype_map(meta_data):
+    """``{accession: (genotype, subtype_code)}`` from meta_data, tolerant of schema drift."""
+    genotype_map = {}
+    if meta_data is None or getattr(meta_data, 'empty', True):
+        return genotype_map
+    columns = set(meta_data.columns)
+    if 'primary_accession' not in columns:
+        return genotype_map
+    genotype_column = next(
+        (name for name in ['nearest_reference_genotype', 'genotype'] if name in columns), None
+    )
+    subtype_column = next(
+        (name for name in ['nearest_reference_subtype', 'subtype'] if name in columns), None
+    )
+    if genotype_column is None and subtype_column is None:
+        return genotype_map
+
+    def clean(value):
+        text = clean_cell(value)
+        return '' if text.lower() in {'', 'nan', 'none', 'null'} else text
+
+    for _, row in meta_data.iterrows():
+        accession = clean(row.get('primary_accession'))
+        if not accession:
+            continue
+        genotype = clean(row.get(genotype_column)) if genotype_column else ''
+        subtype = clean(row.get(subtype_column)) if subtype_column else ''
+        subtype_code = build_subtype_code(genotype, subtype)
+        if not genotype:
+            genotype = genotype_of_code(subtype_code)
+        genotype_map[accession] = (genotype, subtype_code)
+    return genotype_map
 
 
 class AnnotationMappingError(RuntimeError):
@@ -426,6 +778,7 @@ def prepare_catalog(catalog, alias_lookup):
     prepared = catalog.copy()
     prepared['_canonical_protein'] = prepared['protein_name'].apply(lambda value: canonicalize_product(value, alias_lookup))
     prepared['_segment_norm'] = prepared['segment'].apply(normalize_segment)
+    prepared['_alt_residue_norm'] = prepared['alt_residue'].apply(normalize_residue)
 
     aa_positions = []
     invalid_positions = 0
@@ -551,7 +904,15 @@ def extract_feature_codon(alignment, coord_map, cds_start, aa_pos):
 
 
 
-def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_lookup, db_gff_maps, allow_genbank_reference_gff):
+def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_lookup, db_gff_maps, allow_genbank_reference_gff, call_evidence=None):
+    """Annotate every sequence, gated by genotype scope and per-genotype wild type.
+
+    ``call_evidence``, when a list is supplied, is filled with one record per
+    *evaluated* residue match - emitted and suppressed alike - each carrying the
+    scope tier it matched on and whether the residue was a change, an anchor
+    (equal to the wild type) or wild-type-unknown.  The returned mutation list
+    contains only the emitted calls.
+    """
     master_candidates = []
     if meta_data is not None and not meta_data.empty and {'primary_accession', 'accession_type'}.issubset(meta_data.columns):
         masters = meta_data[
@@ -722,7 +1083,7 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
         position_catalog = grouped_positions.setdefault(
             (protein_name, aa_pos, tuple(alignment_indices)), {}
         )
-        position_catalog.setdefault(row['alt_residue'], []).append(row)
+        position_catalog.setdefault(row['_alt_residue_norm'], []).append(row)
         mappable_catalog_rows += 1
 
     if mappable_catalog_rows == 0:
@@ -739,29 +1100,82 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
     # positions.  Because all padded alignments share the same column space,
     # these indices are valid for every row regardless of alignment_name.
     # -----------------------------------------------------------------------
+    signature_scope = build_signature_genotype_scope(catalog)
+    wild_type_tables = build_wild_type_tables(catalog)
+    sequence_genotypes = build_sequence_genotype_map(meta_data)
+
     for _, seq_row in seq_aln.iterrows():
         alignment = seq_row['alignment']
         primary_accession = seq_row['sequence_id']
+        genotype, subtype_code = sequence_genotypes.get(str(primary_accession).strip(), ('', ''))
+        if not genotype:
+            diagnostics['sequences_without_genotype'] += 1
+        covered_span = alignment_covered_span(alignment)
         for (protein_name, aa_pos, alignment_indices), alt_lookup in grouped_positions.items():
             codon = extract_aligned_codon(alignment, alignment_indices)
             if codon is None:
                 diagnostics['codon_out_of_bounds'] += 1
                 continue
-            aa = translate_codon(codon)
+            aa = residue_from_aligned_codon(codon, covered_span, alignment_indices)
             matched_rows = alt_lookup.get(aa, [])
             if not matched_rows:
                 continue
+
+            wild_type_residues, wild_type_tier = lookup_wild_type_residues(
+                wild_type_tables, subtype_code, genotype, protein_name, aa_pos
+            )
             for row in matched_rows:
-                mutations_found.append({
+                signature_id = clean_cell(row.get('signature_id', ''))
+                scope_codes = signature_scope.get(signature_id, frozenset())
+                scope_tier = classify_genotype_scope(scope_codes, genotype, subtype_code)
+
+                if wild_type_residues is None:
+                    residue_status = RESIDUE_STATUS_WT_UNKNOWN
+                elif aa in wild_type_residues:
+                    residue_status = RESIDUE_STATUS_ANCHOR
+                else:
+                    residue_status = RESIDUE_STATUS_CHANGE
+
+                if scope_tier == SCOPE_TIER_OUT_OF_SCOPE:
+                    call_status = CALL_STATUS_SUPPRESSED_OUT_OF_SCOPE
+                elif residue_status == RESIDUE_STATUS_ANCHOR:
+                    call_status = CALL_STATUS_SUPPRESSED_WILD_TYPE
+                else:
+                    call_status = CALL_STATUS_EMITTED
+
+                record = {
                     'primary_accession': primary_accession,
                     'mutation_id': row['mutation_id'],
                     'protein_name': protein_name,
                     'segment': row['_segment_norm'],
                     'aa_position': aa_pos,
-                    'alt_residue': row['alt_residue'],
-                    'combination_id': row.get('combination_id', ''),
-                })
+                    'alt_residue': row['_alt_residue_norm'],
+                    'combination_id': clean_cell(row.get('combination_id', '')),
+                    'signature_id': signature_id,
+                    'signature_kind': clean_cell(row.get('signature_kind', '')),
+                    'observed_residue': aa,
+                    'sequence_genotype': genotype,
+                    'sequence_subtype': subtype_code,
+                    'relevant_genotypes': ','.join(sorted(scope_codes)),
+                    'scope_tier': scope_tier,
+                    'wild_type_residues': ''.join(sorted(wild_type_residues)) if wild_type_residues else '',
+                    'wild_type_scope_tier': wild_type_tier,
+                    'residue_status': residue_status,
+                    'call_status': call_status,
+                }
+                if call_evidence is not None:
+                    call_evidence.append(record)
+
+                if call_status != CALL_STATUS_EMITTED:
+                    diagnostics[call_status] += 1
+                    continue
+
+                mutations_found.append(record)
                 diagnostics['mutation_hits'] += 1
+                diagnostics[f'emitted_{scope_tier}'] += 1
+                diagnostics[f'emitted_{residue_status}'] += 1
+                if aa == DELETION_RESIDUE:
+                    diagnostics['emitted_deletions'] += 1
 
     if proteins_missing_from_reference:
         preview = ', '.join(
@@ -782,23 +1196,59 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
 
     return mutations_found, diagnostics, resolved_maps
 
-def write_mutation_tables(conn, catalog, mutations_found, catalog_column_profile):
-    df_mut = pd.DataFrame(
-        mutations_found,
-        columns=[
-            'primary_accession',
-            'mutation_id',
-            'protein_name',
-            'segment',
-            'aa_position',
-            'alt_residue',
-            'combination_id',
-        ],
+MUTATION_CALL_IDENTITY_COLUMNS = [
+    'primary_accession',
+    'mutation_id',
+    'protein_name',
+    'segment',
+    'aa_position',
+    'alt_residue',
+    'combination_id',
+]
+
+MUTATION_CALL_PROVENANCE_COLUMNS = [
+    'signature_id',
+    'signature_kind',
+    'observed_residue',
+    'sequence_genotype',
+    'sequence_subtype',
+    'relevant_genotypes',
+    'scope_tier',
+    'wild_type_residues',
+    'wild_type_scope_tier',
+    'residue_status',
+    'call_status',
+]
+
+MUTATION_CALL_COLUMNS = MUTATION_CALL_IDENTITY_COLUMNS + MUTATION_CALL_PROVENANCE_COLUMNS
+
+
+def build_mutation_call_table(records):
+    """One row per evaluated residue match, best scope tier first.
+
+    Keeping the *reason* next to the call is the point: a reader can tell a
+    genuine change from an entry that only fired because no wild type was known
+    for that genotype, and a suppressed anchor from one that was never in scope.
+    """
+    df_calls = pd.DataFrame(records, columns=MUTATION_CALL_COLUMNS)
+    if df_calls.empty:
+        return df_calls
+    df_calls = df_calls.fillna('')
+    df_calls['_scope_rank'] = df_calls['scope_tier'].map(SCOPE_TIER_RANK).fillna(len(SCOPE_TIER_RANK))
+    df_calls = df_calls.sort_values(
+        MUTATION_CALL_IDENTITY_COLUMNS + ['_scope_rank', 'signature_id'], kind='mergesort'
     )
+    return df_calls.drop(columns=['_scope_rank']).drop_duplicates().reset_index(drop=True)
+
+
+def write_mutation_tables(conn, catalog, mutations_found, catalog_column_profile, call_evidence=None):
+    # The compact layout tables are keyed on the identity columns alone, so the
+    # provenance columns are kept out of them and land in
+    # sequence_mutation_calls instead - joining on a wider frame would change
+    # which columns the layout builders collide on.
+    df_mut = pd.DataFrame(mutations_found, columns=MUTATION_CALL_IDENTITY_COLUMNS)
     if not df_mut.empty:
-        df_mut = df_mut.drop_duplicates(
-            subset=['primary_accession', 'mutation_id', 'protein_name', 'segment', 'aa_position', 'alt_residue', 'combination_id']
-        )
+        df_mut = df_mut.drop_duplicates(subset=MUTATION_CALL_IDENTITY_COLUMNS)
         df_mut = df_mut.fillna('')
 
     cursor = conn.cursor()
@@ -821,6 +1271,20 @@ def write_mutation_tables(conn, catalog, mutations_found, catalog_column_profile
 
     cursor.execute('DROP TABLE IF EXISTS sequence_mutations')
     cursor.execute('DROP TABLE IF EXISTS sequence_drug_resistance')
+
+    print('Writing per-call genotype scope / wild-type evidence...')
+    df_calls = build_mutation_call_table(mutations_found if call_evidence is None else call_evidence)
+    cursor.execute('DROP TABLE IF EXISTS sequence_mutation_calls')
+    if not df_calls.empty:
+        df_calls.to_sql('sequence_mutation_calls', conn, if_exists='replace', index=False)
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_seq_mut_calls_acc ON sequence_mutation_calls(primary_accession)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_seq_mut_calls_status ON sequence_mutation_calls(call_status)')
+    else:
+        cursor.execute(
+            'CREATE TABLE sequence_mutation_calls ('
+            + ', '.join(f'{column} TEXT' for column in MUTATION_CALL_COLUMNS)
+            + ')'
+        )
 
     cursor.execute('DROP TABLE IF EXISTS sequence_relevant_mutation_summary')
     if not df_relevant_summary.empty:
@@ -891,6 +1355,7 @@ def main():
         db_gff_maps = load_db_gff_feature_maps(conn, gene_alias_lookup)
 
         print('Extracting mutations...')
+        call_evidence = []
         mutations_found, diagnostics, resolved_maps = annotate_from_reference_coordinates(
             catalog,
             seq_aln[['sequence_id', 'primary_accession', 'alignment', 'alignment_name']].copy(),
@@ -898,6 +1363,7 @@ def main():
             gene_alias_lookup,
             db_gff_maps,
             args.allow_genbank_reference_gff,
+            call_evidence=call_evidence,
         )
         print(
             '[AnnotateMutations] Resolved reference coordinate maps for: '
@@ -914,7 +1380,7 @@ def main():
                 raise AnnotationMappingError('No mutations were annotated because coordinate mapping failed for all available reference groups.')
             print('[AnnotateMutations][warn] No mutation hits were found after successful coordinate mapping')
 
-        write_mutation_tables(conn, catalog, mutations_found, args.catalog_column_profile)
+        write_mutation_tables(conn, catalog, mutations_found, args.catalog_column_profile, call_evidence=call_evidence)
     except AnnotationMappingError as exc:
         print(f'Error: {exc}', file=sys.stderr)
         conn.close()

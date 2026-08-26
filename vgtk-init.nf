@@ -1087,9 +1087,14 @@ process CREATE_SQLITE_DB {
         fi
     fi
 
+    # info.creation_type is the only record of how a published database was built,
+    # and this process never passed -ds - so CreateSqliteDB kept the CLI default
+    # and every --update run stamped itself "new db". Say which run mode this is.
     UPDATE_ARGS=""
+    DB_STATUS="new db"
     if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
         UPDATE_ARGS="--update --update_db !{params.update_db} --batch_id nf_!{workflow.runName}"
+        DB_STATUS="last updated"
     fi
 
     GENE_ARG=""
@@ -1109,6 +1114,7 @@ process CREATE_SQLITE_DB {
     -mr !{projectDir}/assets/m49_region.csv \
     -msr !{projectDir}/assets/m49_sub_region.csv \
     --is_segmented !{params.is_segmented} \
+    -ds "${DB_STATUS}" \
     -d !{params.db_name} -b . -o . ${IQTREE_ARG} ${USHER_ARG} ${CLUSTER_ARG} ${FILTERED_ARG} ${FILTERED_DETAILS_ARG} ${TREE_MANIFEST_ARG} ${REFERENCE_ARG} ${CLADE_ARG} ${UPDATE_ARGS} | tee db_summary.txt
     if [ "!{params.mutation_catalog}" != "null" ] && [ -n "!{params.mutation_catalog}" ]; then
         if [ ! -f "!{params.mutation_catalog}" ]; then

@@ -42,7 +42,7 @@ def _completed_signatures_by_accession(completed_df):
 def test_translate_codon():
     assert AnnotateMutations.translate_codon('ATG') == 'M'
     assert AnnotateMutations.translate_codon('A-G') == 'X'
-    assert AnnotateMutations.translate_codon('TAA') == '_'
+    assert AnnotateMutations.translate_codon('TAA') == '*'
 
 def test_annotate_mutations_db_creation(tmp_path):
     db_path = tmp_path / "test.db"

@@ -80,6 +80,11 @@ class CreateSqliteDB:
 		self.update = bool(update)
 		self.update_db = update_db
 		self.batch_id = batch_id or datetime.now().strftime("batch_%Y%m%d_%H%M%S")
+		# Columns fabricated for rows that do not exist yet (today: the cluster
+		# placeholder). They are written on INSERT and deliberately left out of the
+		# ON CONFLICT ... DO UPDATE SET list so a re-supplied accession keeps the
+		# value an earlier run computed for it. {table: [column, ...]}
+		self._insert_only_columns = {}
 
 	@staticmethod
 	def _normalize_segment_value(value):
@@ -324,36 +329,50 @@ class CreateSqliteDB:
 		}
 
 	def _candidate_assignment_trees(self):
-		"""Newick strings that can carry queries + labelled references, most
+		"""(origin, newick) pairs that can carry queries + labelled references, most
 		trustworthy first. The UShER tree holds every placed sample, so it is
-		preferred; the IQ-TREE backbone only holds cluster representatives."""
+		preferred; the IQ-TREE backbone only holds cluster representatives.
+
+		`origin` is the provenance token stored in meta_data.genotype_origin. The
+		agreed vocabulary has exactly two tree tokens, so UShER trees are
+		'tree_usher' and every other tree - IQ-TREE, VeryFastTree, an unrecognised
+		manifest source - is recorded under the generic 'tree_iqtree'.
+		"""
 		candidates = []
 		manifest = self._load_tree_manifest(self.tree_manifest)
 
-		def _add(path):
+		def _add(path, origin):
 			newick = self._read_tree_file(path)
 			if newick:
-				candidates.append(newick)
+				candidates.append((origin, newick))
 
-		_add(self.usher_tree)
+		_add(self.usher_tree, "tree_usher")
 		for entry in manifest:
 			if entry.get("source") == "usher":
-				_add(entry.get("path"))
-		_add(self.iqtree_file)
+				_add(entry.get("path"), "tree_usher")
+		_add(self.iqtree_file, "tree_iqtree")
 		for entry in manifest:
 			if entry.get("source") == "iqtree":
-				_add(entry.get("path"))
-		_add(self.tree_file)
+				_add(entry.get("path"), "tree_iqtree")
+		_add(self.tree_file, "tree_iqtree")
 		for entry in manifest:
 			if entry.get("source") not in {"usher", "iqtree"}:
-				_add(entry.get("path"))
+				_add(entry.get("path"), "tree_iqtree")
 		return candidates
 
 	def _tree_based_reference_labels(self, lookup):
 		"""Assign genotype/subtype to query tips from their nearest labelled
-		reference in the phylogenetic tree. Merges across all available trees
-		(e.g. one per segment); the first tree to label an accession wins, which
-		respects the trust order in _candidate_assignment_trees()."""
+		reference in the phylogenetic tree.
+
+		Several trees routinely contain the same accession (one UShER tree per
+		segment plus an IQ-TREE backbone). The first tree that says ANYTHING about
+		an accession supplies BOTH of its fields, and later trees are not consulted
+		for it. Merging the two fields independently - which is what this did -
+		produced chimeric labels: a genotype from the UShER neighbourhood and a
+		subtype from the IQ-TREE neighbourhood, a pair no reference in either tree
+		carries. 69 of the HCV references have a genotype and no subtype, so "this
+		tree gives a genotype but no subtype" is the normal case, not a corner.
+		"""
 		candidates = self._candidate_assignment_trees()
 		if not candidates:
 			return {}
@@ -365,18 +384,20 @@ class CreateSqliteDB:
 			for acc, labels in lookup.items()
 		}
 		merged = {}
-		for newick in candidates:
+		for origin, newick in candidates:
 			try:
 				assignments = assign_labels_from_tree(newick, reference_labels)
 			except Exception as exc:  # never let a malformed tree break the DB build
 				print(f"[warn] Tree-based clade assignment skipped for one tree: {exc}")
 				continue
 			for acc, labels in assignments.items():
-				existing = merged.setdefault(acc, {"genotype": "", "subtype": ""})
-				if not existing["genotype"] and labels.get("genotype"):
-					existing["genotype"] = labels["genotype"]
-				if not existing["subtype"] and labels.get("subtype"):
-					existing["subtype"] = labels["subtype"]
+				if acc in merged:
+					continue
+				genotype = str(labels.get("genotype") or "").strip()
+				subtype = str(labels.get("subtype") or "").strip()
+				if not genotype and not subtype:
+					continue
+				merged[acc] = {"genotype": genotype, "subtype": subtype, "origin": origin}
 		return merged
 
 	def _load_clade_assignments(self):
@@ -398,24 +419,78 @@ class CreateSqliteDB:
 					assignments[accession] = {"genotype": genotype, "subtype": subtype}
 		return assignments
 
+	#: meta_data.genotype_origin / meta_data.subtype_origin vocabulary, in
+	#: precedence order: the first source that supplies a value wins, and the value
+	#: it supplied is the one stored. A curated reference-list entry is never
+	#: overwritten by inference.
+	GENOTYPE_ORIGINS = (
+		"curated_reflist",
+		"tree_usher",
+		"tree_iqtree",
+		"epa_placement",
+		"blast_tophit",
+		"gisaid_declared",
+		"ncbi_declared",
+	)
+	GENOTYPE_ORIGIN_UNRESOLVED = "unresolved"
+
+	@staticmethod
+	def _vendor_declared_label_columns(df_meta_data):
+		"""meta_data columns holding a genotype/subtype the *vendor* declared.
+
+		Only columns that literally name a genotype or a subtype are read. Notably
+		NOT `serotype`: influenza's H1N1 is a serotype, not a subtype in the sense
+		nearest_reference_subtype carries, and quietly copying it in would relabel
+		half a database.
+		"""
+		gisaid, ncbi = {}, {}
+		for col in df_meta_data.columns:
+			name = str(col).strip().lower()
+			if name.startswith("nearest_reference"):
+				continue
+			if name.endswith("genotype"):
+				field = "genotype"
+			elif name.endswith("subtype"):
+				field = "subtype"
+			else:
+				continue
+			if name.startswith("gisaid"):
+				gisaid.setdefault(field, col)
+			elif name in {"genotype", "subtype"} or name.startswith(("ncbi", "genbank")):
+				ncbi.setdefault(field, col)
+		return {"gisaid_declared": gisaid, "ncbi_declared": ncbi}
+
 	def _add_reference_columns(self, df_meta_data, df_aln):
+		"""Resolve nearest_reference_genotype/_subtype and record WHERE each came from.
+
+		Four columns are written: the two labels and, beside each, the source that
+		produced it (see GENOTYPE_ORIGINS). Without the origin columns a stored
+		'6a' on a reference curated as "genotype 6, subtype not assigned" is
+		indistinguishable from a curated one - the subtype letter is inferred from
+		whatever the sequence aligned against, and nothing in the database said so.
+
+		The two fields are taken from the SAME source wherever that source has
+		both, because they used to be resolved by two independent climbs and could
+		be assembled out of two different neighbourhoods. A source that carries a
+		genotype but no subtype still falls through for the subtype alone - that is
+		deliberate (a curated subtype of "NA" means "not assigned", and inference
+		may fill it) and the origin columns are what make the fall-through visible.
+		"""
 		lookup = self._load_reference_lookup()
 		if not lookup or "primary_accession" not in df_meta_data.columns:
 			return df_meta_data
 
 		meta_accessions = df_meta_data["primary_accession"].fillna("").astype(str).str.strip()
-		direct_genotype = meta_accessions.map(lambda accession: lookup.get(accession, {}).get("nearest_reference_genotype", ""))
-		direct_subtype = meta_accessions.map(lambda accession: lookup.get(accession, {}).get("nearest_reference_subtype", ""))
 
 		# Preferred source for queries: the phylogenetic tree neighbourhood.
 		tree_labels = self._tree_based_reference_labels(lookup)
-		tree_genotype = meta_accessions.map(lambda accession: tree_labels.get(accession, {}).get("genotype", ""))
-		tree_subtype = meta_accessions.map(lambda accession: tree_labels.get(accession, {}).get("subtype", ""))
+
+		# EPA-ng placement results, only produced when the run had no usable tree.
+		epa_labels = self._load_clade_assignments()
 
 		# Fallback for queries missing from the tree: the best BLAST hit, i.e. the
 		# reference each query was aligned against (alignment_name).
-		blast_genotype = pd.Series("", index=df_meta_data.index, dtype=str)
-		blast_subtype = pd.Series("", index=df_meta_data.index, dtype=str)
+		nearest_ref_map = {}
 		if df_aln is not None and not df_aln.empty and {"primary_accession", "alignment_name"}.issubset(df_aln.columns):
 			aln_map_df = df_aln[["primary_accession", "alignment_name"]].copy()
 			aln_map_df["primary_accession"] = aln_map_df["primary_accession"].fillna("").astype(str).str.strip()
@@ -423,23 +498,80 @@ class CreateSqliteDB:
 			aln_map_df = aln_map_df[(aln_map_df["primary_accession"] != "") & (aln_map_df["alignment_name"] != "")]
 			aln_map_df = aln_map_df.drop_duplicates(subset=["primary_accession"], keep="first")
 			nearest_ref_map = dict(zip(aln_map_df["primary_accession"], aln_map_df["alignment_name"]))
-			nearest_ref_accession = meta_accessions.map(nearest_ref_map)
-			blast_genotype = nearest_ref_accession.map(lambda accession: lookup.get(accession, {}).get("nearest_reference_genotype", "") if accession else "")
-			blast_subtype = nearest_ref_accession.map(lambda accession: lookup.get(accession, {}).get("nearest_reference_subtype", "") if accession else "")
 
-		# EPA-ng placement results, only produced when the run had no usable tree.
-		epa_labels = self._load_clade_assignments()
-		epa_genotype = meta_accessions.map(lambda accession: epa_labels.get(accession, {}).get("genotype", ""))
-		epa_subtype = meta_accessions.map(lambda accession: epa_labels.get(accession, {}).get("subtype", ""))
+		# Vendor-declared labels, read positionally alongside the accessions.
+		vendor_columns = self._vendor_declared_label_columns(df_meta_data)
+		vendor_values = {}
+		for origin, fields in vendor_columns.items():
+			if not fields:
+				continue
+			vendor_values[origin] = {
+				field: df_meta_data[col].fillna("").astype(str).str.strip().tolist()
+				for field, col in fields.items()
+			}
 
-		# Resolution order per accession: it is itself a reference (direct) >
-		# tree neighbourhood > EPA-ng placement > best BLAST hit.
-		fallback_genotype = epa_genotype.where(epa_genotype != "", blast_genotype)
-		fallback_subtype = epa_subtype.where(epa_subtype != "", blast_subtype)
-		fallback_genotype = tree_genotype.where(tree_genotype != "", fallback_genotype)
-		fallback_subtype = tree_subtype.where(tree_subtype != "", fallback_subtype)
-		df_meta_data["nearest_reference_genotype"] = fallback_genotype.where(direct_genotype == "", direct_genotype)
-		df_meta_data["nearest_reference_subtype"] = fallback_subtype.where(direct_subtype == "", direct_subtype)
+		def _clean(value):
+			return self._normalize_reference_field(value)
+
+		genotypes, subtypes, genotype_origins, subtype_origins = [], [], [], []
+		for position, accession in enumerate(meta_accessions):
+			candidates = []
+
+			direct = lookup.get(accession)
+			if direct:
+				candidates.append((
+					"curated_reflist",
+					_clean(direct.get("nearest_reference_genotype", "")),
+					_clean(direct.get("nearest_reference_subtype", "")),
+				))
+
+			tree = tree_labels.get(accession)
+			if tree:
+				candidates.append((tree.get("origin", "tree_iqtree"), _clean(tree.get("genotype")), _clean(tree.get("subtype"))))
+
+			epa = epa_labels.get(accession)
+			if epa:
+				candidates.append(("epa_placement", _clean(epa.get("genotype")), _clean(epa.get("subtype"))))
+
+			blast_ref = nearest_ref_map.get(accession, "")
+			blast = lookup.get(blast_ref) if blast_ref else None
+			if blast:
+				candidates.append((
+					"blast_tophit",
+					_clean(blast.get("nearest_reference_genotype", "")),
+					_clean(blast.get("nearest_reference_subtype", "")),
+				))
+
+			for origin in ("gisaid_declared", "ncbi_declared"):
+				fields = vendor_values.get(origin)
+				if not fields:
+					continue
+				candidates.append((
+					origin,
+					_clean(fields.get("genotype", [""] * len(meta_accessions))[position] if "genotype" in fields else ""),
+					_clean(fields.get("subtype", [""] * len(meta_accessions))[position] if "subtype" in fields else ""),
+				))
+
+			genotype = subtype = ""
+			genotype_origin = subtype_origin = self.GENOTYPE_ORIGIN_UNRESOLVED
+			for origin, candidate_genotype, candidate_subtype in candidates:
+				if not genotype and candidate_genotype:
+					genotype, genotype_origin = candidate_genotype, origin
+				if not subtype and candidate_subtype:
+					subtype, subtype_origin = candidate_subtype, origin
+				if genotype and subtype:
+					break
+
+			genotypes.append(genotype)
+			subtypes.append(subtype)
+			genotype_origins.append(genotype_origin)
+			subtype_origins.append(subtype_origin)
+
+		index = df_meta_data.index
+		df_meta_data["nearest_reference_genotype"] = pd.Series(genotypes, index=index, dtype=object)
+		df_meta_data["nearest_reference_subtype"] = pd.Series(subtypes, index=index, dtype=object)
+		df_meta_data["genotype_origin"] = pd.Series(genotype_origins, index=index, dtype=object)
+		df_meta_data["subtype_origin"] = pd.Series(subtype_origins, index=index, dtype=object)
 		return df_meta_data
 
 	def load_fasta(self):
@@ -453,9 +585,71 @@ class CreateSqliteDB:
 		s = (db_status or "").strip().lower()
 		if s in {"new", "new db", "create", "created", "fresh"}:
 			return "new db"
-		if s in {"modified", "update", "updated", "changed"}:
+		if s in {"modified", "update", "updated", "changed", "last modified", "last updated"}:
 			return "last updated"
 		return db_status
+
+	def _resolve_creation_type(self):
+		"""What info.creation_type should say about THIS run.
+
+		The pipeline never passed -ds, and the CLI default is the literal string
+		"new db", so `if db_status` was always true and every --update run stamped
+		itself as a fresh build: the shipped update-mode database carries two rows
+		that both say 'new db' and nothing in it distinguishes "built once" from
+		"built then updated". The run mode is the authority when the declared
+		status contradicts it, and the contradiction is reported rather than
+		absorbed.
+		"""
+		accurate = "last updated" if self.update else "new db"
+		declared = self._normalize_db_status(self.db_status) if self.db_status else ""
+		if not declared:
+			return accurate
+		if self.update and declared == "new db":
+			print(
+				"[CreateSqliteDB][warn] --update was requested but --db_status says 'new db'. "
+				"Recording info.creation_type='last updated' instead: this run modified an "
+				"existing database. Pass -ds 'last updated' from the caller to silence this."
+			)
+			return accurate
+		return declared
+
+	def _check_update_history(self, conn):
+		"""Refuse or warn when the target's recorded history contradicts --update.
+
+		info.creation_type is the only human-facing "how was this database built?"
+		record, and update mode is the one path that runs against years of curated
+		data. Pointing it at something that is not a database this pipeline built is
+		not recoverable afterwards, so it is refused; a database with no recorded
+		history (built before info was populated, or by hand) is allowed through
+		with a loud warning because that is a legitimate legacy state.
+		"""
+		if not self.update:
+			return
+		if not self._table_exists(conn, "meta_data"):
+			raise ValueError(
+				f"--update was pointed at '{self.update_db}', which has no meta_data table. "
+				"That is not a database this pipeline built, so there is nothing to update "
+				"incrementally - run without --update to build it, or pass the right --update_db."
+			)
+		history = []
+		if self._table_exists(conn, "info"):
+			cols = self._table_columns(conn, "info")
+			if "creation_type" in cols:
+				history = [
+					str(row[0] or "").strip()
+					for row in conn.execute("SELECT creation_type FROM info").fetchall()
+				]
+		if not history:
+			print(
+				"[CreateSqliteDB][warn] --update target has no recorded build history "
+				"(info.creation_type is empty or absent). Proceeding, but this database "
+				"cannot say how it was built; every run from now on records itself."
+			)
+			return
+		print(
+			f"[CreateSqliteDB] --update target records {len(history)} previous build(s): "
+			f"{history[:5]}{'...' if len(history) > 5 else ''}"
+		)
 
 	def _db_path(self):
 		if self.update and not self.update_db:
@@ -568,8 +762,34 @@ class CreateSqliteDB:
 		for table in tables:
 			if not self._table_exists(conn, table):
 				continue
-			if "segment" not in self._table_columns(conn, table):
+			columns = self._table_columns(conn, table)
+			if "segment" not in columns:
 				continue
+			# For a non-segmented virus a blank segment and segment '1' are the same
+			# row, so stamping '1' on the blank one can collide with a row that is
+			# already there - and now that every upsert table carries a UNIQUE index
+			# over its key, that collision is an IntegrityError that aborts the build
+			# rather than a silent duplicate. The blank row is the stale one (it is
+			# the state a database has before it learns about segments), so drop it
+			# in favour of the row this run just wrote.
+			key_cols = self._infer_key_cols(table, pd.DataFrame(columns=columns))
+			other_keys = [c for c in key_cols if c != "segment" and c in columns]
+			if other_keys:
+				match = " AND ".join(
+					f"TRIM(COALESCE(CAST(other.{self._quote_identifier(c)} AS TEXT), '')) = "
+					f"TRIM(COALESCE(CAST({table}.{self._quote_identifier(c)} AS TEXT), ''))"
+					for c in other_keys
+				)
+				cursor = conn.execute(
+					f"DELETE FROM {table} WHERE TRIM(COALESCE(CAST(segment AS TEXT), '')) = '' "
+					f"AND EXISTS (SELECT 1 FROM {table} AS other WHERE other.rowid <> {table}.rowid "
+					f"AND TRIM(COALESCE(CAST(other.segment AS TEXT), '')) = '1' AND {match})"
+				)
+				if cursor.rowcount:
+					print(
+						f"[CreateSqliteDB] Dropped {cursor.rowcount} blank-segment row(s) from '{table}' "
+						f"superseded by the segment '1' row with the same key {other_keys}"
+					)
 			conn.execute(
 				f"UPDATE {table} SET segment='1' WHERE TRIM(COALESCE(CAST(segment AS TEXT), '')) = ''"
 			)
@@ -606,11 +826,52 @@ class CreateSqliteDB:
 			)
 			df = df.drop(columns=extra_cols)
 
+		# A dropped column that differs from a stored one only by case is not an
+		# extra column at all - SQLite identifiers are case-insensitive, so the
+		# incoming values were headed for that stored column and have just been
+		# thrown away. This has to raise BEFORE the tolerant path below, which
+		# would otherwise read 'Segment' as "absent from this batch, keep what is
+		# stored" and write the row with its segment silently unchanged.
+		existing_by_case = {str(c).casefold(): c for c in existing_cols}
+		case_collisions = [
+			(c, existing_by_case[str(c).casefold()])
+			for c in extra_cols
+			if str(c).casefold() in existing_by_case
+		]
+		if case_collisions:
+			pairs = "; ".join(f"incoming {inc!r} vs stored {db!r}" for inc, db in case_collisions)
+			raise ValueError(
+				f"Incoming '{table}' dataframe is missing columns required by existing DB schema: "
+				f"{[db for _, db in case_collisions]}. These differ from the incoming columns only by "
+				f"case ({pairs}), and SQLite identifiers are case-insensitive, so the incoming values "
+				"would be dropped rather than stored. Rename one column of each pair - in the incoming "
+				"table or in the database - so the two spellings match exactly."
+			)
+
 		missing_cols = [c for c in existing_cols if c not in df.columns]
-		if self.update and table == "meta_data":
+		if self.update and table in self.UPSERT_TABLES:
+			# A column the incoming batch does not carry must LEAVE THE STORED VALUE
+			# ALONE. Fabricating it here and handing it to INSERT OR REPLACE is how a
+			# run without --cluster_tsv wrote the literal string 'NA- see tree' over
+			# the cluster representative an earlier run had computed (100 such rows in
+			# test_out/update_test/rabv-jul0425-update-test.db). The upsert now omits
+			# absent columns from the UPDATE half instead, so they survive untouched.
+			insert_only = []
 			for cluster_col in self._cluster_placeholder_columns(missing_cols):
+				# Still fabricated - but only for rows being INSERTed, i.e. accessions
+				# the database has never seen. An existing row keeps its own value.
 				df[cluster_col] = "NA- see tree"
-			missing_cols = [c for c in existing_cols if c not in df.columns]
+				insert_only.append(cluster_col)
+			self._record_insert_only_columns(table, insert_only)
+			preserved = [c for c in existing_cols if c not in df.columns]
+			if preserved:
+				shown = preserved[:10]
+				suffix = "" if len(preserved) == len(shown) else f" (+{len(preserved) - len(shown)} more)"
+				print(
+					f"[CreateSqliteDB] Incoming '{table}' does not carry {len(preserved)} column(s) "
+					f"present in the DB; their stored values are preserved: {shown}{suffix}"
+				)
+			return df[[c for c in existing_cols if c in df.columns]]
 		if missing_cols:
 			# External columns are now namespaced at the merge step, so a DB built
 			# before that change holds their old raw spellings. Without this hint the
@@ -620,13 +881,21 @@ class CreateSqliteDB:
 			from merge_into_gB_matrix import NormalizeAndMerge
 
 			incoming_slugs = {NormalizeAndMerge.slugify_column(c): c for c in df.columns}
-			renamed = {
-				old_name: incoming_slugs[NormalizeAndMerge.slugify_column(old_name)]
-				for old_name in missing_cols
-				if NormalizeAndMerge.slugify_column(old_name) in incoming_slugs
-				or any(NormalizeAndMerge.slugify_column(old_name) == s.split('_', 1)[-1]
-					   for s in incoming_slugs)
-			}
+			# The namespaced-column branch used to index incoming_slugs with a slug it
+			# had only matched against the SUFFIX of some other slug, so the lookup
+			# raised KeyError and the ValueError this hint exists to explain never
+			# reached the operator.
+			renamed = {}
+			for old_name in missing_cols:
+				slug = NormalizeAndMerge.slugify_column(old_name)
+				match = incoming_slugs.get(slug)
+				if match is None:
+					match = next(
+						(value for key, value in incoming_slugs.items() if slug == key.split('_', 1)[-1]),
+						None,
+					)
+				if match is not None:
+					renamed[old_name] = match
 			hint = ""
 			if renamed or any('_' in c for c in df.columns):
 				hint = (
@@ -814,30 +1083,211 @@ class CreateSqliteDB:
 			return cols[:1] if cols else []
 		return cols[:1] if cols else []
 
-	def _create_table_unique_indexes(self, conn, table):
-		if not self.update:
-			return
-		if table == "features":
-			cols = self._table_columns(conn, "features")
-			if all(c in cols for c in ["accession", "cds_start_OG_seq", "cds_end_OG_seq", "product", "segment"]):
-				conn.execute("""
-					CREATE UNIQUE INDEX IF NOT EXISTS idx_features_upsert 
-					ON features (accession, cds_start_OG_seq, cds_end_OG_seq, product, segment);
-				""")
-		elif table == "sequence_alignment":
-			cols = self._table_columns(conn, "sequence_alignment")
-			if all(c in cols for c in ["primary_accession", "alignment_name", "segment"]):
-				conn.execute("""
-					CREATE UNIQUE INDEX IF NOT EXISTS idx_seq_alignment_upsert 
-					ON sequence_alignment (primary_accession, alignment_name, segment);
-				""")
-		elif table == "meta_data":
-			cols = self._table_columns(conn, "meta_data")
-			if all(c in cols for c in ["primary_accession", "segment"]):
-				conn.execute("""
-					CREATE UNIQUE INDEX IF NOT EXISTS idx_metadata_upsert 
-					ON meta_data (primary_accession, segment);
-				""")
+	#: Tables written with an upsert rather than an append. Every one of them needs
+	#: a UNIQUE index over its key or the "replace" half never fires.
+	UPSERT_TABLES = frozenset({"meta_data", "sequence_alignment", "features", "insertions", "sequences"})
+
+	#: Index names are pinned per table so a database that already carries the
+	#: original three is not given a second, identical index under a new name.
+	#: sequences/insertions had none at all: they are in UPSERT_TABLES and were
+	#: written with INSERT OR REPLACE, which with nothing to conflict on degrades
+	#: to a plain INSERT - so replaying an identical update grew both tables by one
+	#: row per record.
+	UPSERT_INDEX_NAMES = {
+		"features": "idx_features_upsert",
+		"sequence_alignment": "idx_seq_alignment_upsert",
+		"meta_data": "idx_metadata_upsert",
+		"sequences": "idx_sequences_upsert",
+		"insertions": "idx_insertions_upsert",
+	}
+
+	def _record_insert_only_columns(self, table, columns):
+		store = getattr(self, "_insert_only_columns", None)
+		if store is None:
+			store = {}
+			self._insert_only_columns = store
+		store[table] = list(columns)
+
+	def _insert_only_columns_for(self, table):
+		return list((getattr(self, "_insert_only_columns", None) or {}).get(table, []))
+
+	def _blank_out_null_key_columns(self, conn, table, key_cols):
+		"""Make stored NULL key values reachable by the upsert.
+
+		SQLite treats NULLs as DISTINCT in a UNIQUE index, so a pre-existing row
+		with a NULL key column can never conflict with anything: INSERT OR REPLACE
+		appends beside it and the stale row survives forever. Incoming keys are
+		normalised to '' by _normalize_key_series, so normalising stored NULLs the
+		same way is what lets the two meet - and it matches how the rest of this
+		file compares keys (TRIM(COALESCE(col, ''))).
+
+		A row whose stored key is NULL where the batch carries a real value (a
+		database that predates the `segment` column, say) is still a different key
+		afterwards and is NOT silently merged; it is reported so an operator can
+		see that those rows will not be superseded.
+		"""
+		for col in key_cols:
+			quoted = self._quote_identifier(col)
+			row = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {quoted} IS NULL").fetchone()
+			null_count = int(row[0]) if row else 0
+			if not null_count:
+				continue
+			conn.execute(f"UPDATE {table} SET {quoted} = '' WHERE {quoted} IS NULL")
+			print(
+				f"[CreateSqliteDB][warn] '{table}'.{col} held {null_count} NULL value(s) in the "
+				f"upsert key {key_cols}; normalised to '' so the UNIQUE index can see them. "
+				"Rows whose key is blank are only superseded by an incoming row with a blank key."
+			)
+
+	def _describe_duplicate_keys(self, conn, table, key_cols, limit=5):
+		cols_sql = ", ".join(self._quote_identifier(c) for c in key_cols)
+		try:
+			rows = conn.execute(
+				f"SELECT {cols_sql}, COUNT(*) FROM {table} GROUP BY {cols_sql} "
+				f"HAVING COUNT(*) > 1 ORDER BY COUNT(*) DESC LIMIT {int(limit)}"
+			).fetchall()
+		except sqlite3.Error:
+			return []
+		return rows
+
+	def _create_table_unique_indexes(self, conn, table, key_cols):
+		"""Create the UNIQUE index that makes the upsert an upsert.
+
+		`key_cols` must be the key the merge actually resolved (see _infer_key_cols
+		and _resolve_key_cols_for_existing_schema) - an index over a different set
+		would not be a usable ON CONFLICT target, and the write would silently fall
+		back to appending.
+
+		Returns the index name, or None when no index could be built.
+		"""
+		index_name = self.UPSERT_INDEX_NAMES.get(table)
+		if not index_name:
+			return None
+		existing_cols = self._table_columns(conn, table)
+		if not existing_cols:
+			return None
+		existing_lower = {str(c).casefold(): c for c in existing_cols}
+		resolved = [existing_lower[str(c).casefold()] for c in (key_cols or []) if str(c).casefold() in existing_lower]
+		if not resolved:
+			return None
+
+		self._blank_out_null_key_columns(conn, table, resolved)
+		cols_sql = ", ".join(self._quote_identifier(c) for c in resolved)
+		try:
+			conn.execute(
+				f"CREATE UNIQUE INDEX IF NOT EXISTS {self._quote_identifier(index_name)} "
+				f"ON {table} ({cols_sql})"
+			)
+		except sqlite3.IntegrityError as exc:
+			# These indexes were only ever created in update mode, so a database
+			# built before this change has none and the first update is the first
+			# time the constraint exists. Say exactly which rows block it instead of
+			# letting "UNIQUE constraint failed" escape with no context.
+			examples = self._describe_duplicate_keys(conn, table, resolved)
+			rendered = "; ".join(
+				f"{tuple(row[:-1])} x{row[-1]}" for row in examples
+			) or "(could not be listed)"
+			raise ValueError(
+				f"Cannot create UNIQUE index '{index_name}' on {table}({', '.join(resolved)}): the "
+				f"existing database already holds rows that share a key, e.g. {rendered}. Update mode "
+				"needs this index to replace rows instead of appending them, so the duplicates have to "
+				"go first - de-duplicate the table (keep one row per key) and re-run, or rebuild the "
+				f"database from scratch. Underlying error: {exc}"
+			) from exc
+		return index_name
+
+	@staticmethod
+	def _unique_index_for_keys(conn, table, key_cols):
+		"""Find a non-partial UNIQUE index whose columns are exactly `key_cols`.
+
+		Returned in the index's own column order, which is what ON CONFLICT needs.
+		"""
+		wanted = {str(c).casefold() for c in key_cols}
+		if not wanted:
+			return None, []
+		try:
+			index_rows = conn.execute(f'PRAGMA index_list("{table}")').fetchall()
+		except sqlite3.Error:
+			return None, []
+		for row in index_rows:
+			name, is_unique = row[1], row[2]
+			partial = row[4] if len(row) > 4 else 0
+			if not is_unique or partial:
+				continue
+			info = conn.execute(f'PRAGMA index_info("{name}")').fetchall()
+			cols = [r[2] for r in info]
+			if any(c is None for c in cols):
+				continue  # index over an expression
+			if {str(c).casefold() for c in cols} == wanted:
+				return name, cols
+		return None, []
+
+	#: Columns whose blank value is a statement, not a gap: an update must be able
+	#: to CLEAR them. Everywhere else a blank incoming cell is treated as "this
+	#: batch says nothing" and the stored value is kept - a thin batch must not
+	#: erase curated metadata (a real HCV matrix carries 274k host_validated='NA'
+	#: cells, all of which reach this point as NULL).
+	CLEARABLE_ON_UPDATE_COLUMNS = frozenset({"exclusion_status", "exclusion_criteria"})
+
+	def _upsert_dataframe(self, conn, table, df, key_cols):
+		"""Column-wise upsert: replace what this batch supplies, keep the rest.
+
+		INSERT OR REPLACE deletes the conflicting row and inserts the incoming one
+		wholesale, so any column that is absent or blank in this batch silently
+		erases whatever an earlier run had stored. ON CONFLICT ... DO UPDATE SET
+		touches only the columns present in the batch, and only when they carry a
+		value.
+		"""
+		columns = list(df.columns)
+		placeholders = ", ".join(["?"] * len(columns))
+		sql_cols = ", ".join(self._quote_identifier(c) for c in columns)
+		payload = [tuple(x) for x in df.values]
+
+		index_name, index_cols = self._unique_index_for_keys(conn, table, key_cols)
+		if not index_name:
+			# No usable conflict target: keep the historical behaviour rather than
+			# failing the run, but say so - this is the state in which an update
+			# duplicates rows instead of replacing them.
+			print(
+				f"[CreateSqliteDB][warn] No UNIQUE index over {key_cols} on '{table}'; falling back to "
+				"INSERT OR REPLACE, which cannot preserve columns this batch does not carry."
+			)
+			conn.executemany(
+				f"INSERT OR REPLACE INTO {table} ({sql_cols}) VALUES ({placeholders})", payload
+			)
+			return len(df)
+
+		key_lower = {str(c).casefold() for c in index_cols}
+		insert_only = {str(c).casefold() for c in self._insert_only_columns_for(table)}
+		clearable = {c.casefold() for c in self.CLEARABLE_ON_UPDATE_COLUMNS}
+
+		assignments = []
+		for col in columns:
+			lower = str(col).casefold()
+			if lower in key_lower or lower in insert_only:
+				continue
+			quoted = self._quote_identifier(col)
+			if lower in clearable:
+				assignments.append(f"{quoted} = excluded.{quoted}")
+			else:
+				assignments.append(
+					f"{quoted} = CASE WHEN excluded.{quoted} IS NULL "
+					f"OR TRIM(CAST(excluded.{quoted} AS TEXT)) = '' "
+					f"THEN {self._quote_identifier(table)}.{quoted} ELSE excluded.{quoted} END"
+				)
+		conflict_cols = ", ".join(self._quote_identifier(c) for c in index_cols)
+		if assignments:
+			sql = (
+				f"INSERT INTO {table} ({sql_cols}) VALUES ({placeholders}) "
+				f"ON CONFLICT ({conflict_cols}) DO UPDATE SET {', '.join(assignments)}"
+			)
+		else:
+			sql = (
+				f"INSERT INTO {table} ({sql_cols}) VALUES ({placeholders}) "
+				f"ON CONFLICT ({conflict_cols}) DO NOTHING"
+			)
+		conn.executemany(sql, payload)
+		return len(df)
 
 	def merge_table_append_nonredundant(self, conn, df, table, key_cols=None, update_exclusions=None):
 		if df is None:
@@ -849,7 +1299,8 @@ class CreateSqliteDB:
 			self._ensure_update_columns(conn, table, df)
 			df = self._align_df_to_existing_schema(conn, table, df)
 			key_cols = self._resolve_key_cols_for_existing_schema(conn, table, key_cols, set(df.columns))
-			self._create_table_unique_indexes(conn, table)
+			if table in self.UPSERT_TABLES:
+				self._create_table_unique_indexes(conn, table, key_cols)
 
 		for c in key_cols:
 			if c not in df.columns:
@@ -866,23 +1317,24 @@ class CreateSqliteDB:
 
 		if not self.update:
 			df.to_sql(table, conn, if_exists="replace", index=False)
+			# Build the index on a fresh build too. to_sql(if_exists='replace') drops
+			# the table and its indexes, so this has to run after the write - and
+			# without it the very first --update against a new database is the first
+			# time the constraint exists, which is precisely when a pre-existing
+			# violation would surface as an unexplained CREATE failure.
+			if table in self.UPSERT_TABLES:
+				self._create_table_unique_indexes(conn, table, key_cols)
 			return len(df)
 
 		if not self._table_exists(conn, table):
 			df.to_sql(table, conn, if_exists="replace", index=False)
-			self._create_table_unique_indexes(conn, table)
+			if table in self.UPSERT_TABLES:
+				self._create_table_unique_indexes(conn, table, key_cols)
 			print(f"[CreateSqliteDB] Created table '{table}' with {len(df)} rows (table did not exist)")
 			return len(df)
 
-		upsert_tables = {"meta_data", "sequence_alignment", "features", "insertions", "sequences"}
-		if table in upsert_tables:
-			columns = list(df.columns)
-			placeholders = ", ".join(["?"] * len(columns))
-			sql_cols = ", ".join(self._quote_identifier(c) for c in columns)
-			upsert_sql = f"INSERT OR REPLACE INTO {table} ({sql_cols}) VALUES ({placeholders})"
-			
-			payload = [tuple(x) for x in df.values]
-			conn.executemany(upsert_sql, payload)
+		if table in self.UPSERT_TABLES:
+			self._upsert_dataframe(conn, table, df, key_cols)
 			print(f"[CreateSqliteDB] Atomically upserted {len(df)} rows into '{table}' by key {key_cols}")
 			return len(df)
 
@@ -1202,6 +1654,7 @@ class CreateSqliteDB:
 		conn = sqlite3.connect(db_path)
 		cursor = conn.cursor()
 		cursor.execute("PRAGMA foreign_keys = ON;")
+		self._check_update_history(conn)
 		cursor.execute("DROP TABLE IF EXISTS excluded_accessions;")
 		cursor.execute("CREATE TABLE IF NOT EXISTS trees (name TEXT, source TEXT, segment_key TEXT, segment TEXT, newick TEXT, created_at TEXT);")
 		cursor.execute("CREATE TABLE IF NOT EXISTS info (creation_type TEXT, date TEXT);")
@@ -1238,7 +1691,9 @@ class CreateSqliteDB:
 		self.merge_table_append_nonredundant(conn, df_host_taxa, "host_taxa", None, update_exclusions)
 		
 		if self._should_force_unsegmented_segment_one(conn, [df_meta_data, df_features, df_aln, df_insertions]):
-			self._backfill_segment_one_in_db(conn, ["meta_data", "features", "sequence_alignment", "insertions"])
+			# 'sequences' belongs here: it carries a segment column and is upserted on
+			# (header, segment), so a row left blank is a row no later batch can reach.
+			self._backfill_segment_one_in_db(conn, ["meta_data", "features", "sequence_alignment", "insertions", "sequences"])
 
 		df_excluded = pd.DataFrame(excluded_records, columns=["primary_accession", "reason"])
 		if not df_excluded.empty:
@@ -1322,7 +1777,9 @@ class CreateSqliteDB:
 						)
 				df_tree.to_sql("trees", conn, if_exists="append", index=False)
 
-		creation_type = self._normalize_db_status(self.db_status if self.db_status else ("last updated" if self.update else "new db"))
+		creation_type = self._resolve_creation_type()
+		# Two columns, appended - the info table's shape is unchanged, so anything
+		# reading (creation_type, date) keeps working; only the value is now honest.
 		pd.DataFrame([{"creation_type": creation_type, "date": now_str}]).to_sql("info", conn, if_exists="append", index=False)
 
 		after_counts = {t: self._table_row_count(conn, t) for t in tables_for_delta}
@@ -1473,7 +1930,10 @@ if __name__ == "__main__":
 	parser.add_argument('-i', '--insertion_file', help='Nextalign insertion file', default="tmp/Tables/insertions.tsv")
 	parser.add_argument('-ht', '--host_taxa_file', help='Host Taxanomy file', default="tmp/HostTaxa/Host_taxa.tsv")
 	parser.add_argument('-d', '--db_name', help='Name of the Sqlite database', default="gdb")
-	parser.add_argument('-ds', '--db_status', help='Database status: "new db" (default) or "last modified"/"last updated". Determines info.creation_type.', default="new db")
+	parser.add_argument('-ds', '--db_status', default=None,
+		help='Database status recorded in info.creation_type: "new db" or "last updated". '
+			 'Defaults to the run mode ("last updated" with --update, "new db" without), and '
+			 'the run mode wins if the two contradict each other.')
 	parser.add_argument('-t', '--tree_file', help='VeryFastTree Newick file', default=None)
 	parser.add_argument('-it', '--iqtree_file', help='IQ-TREE Newick file', default=None)
 	parser.add_argument('-ut', '--usher_tree', help='UShER output Newick file', default=None)

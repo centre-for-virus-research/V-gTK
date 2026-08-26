@@ -8,9 +8,9 @@ almost all the risk:
 * ``merge_table_append_nonredundant`` writes the *upsert* tables with
   ``INSERT OR REPLACE``, which only replaces when a UNIQUE index makes the row
   conflict, and replaces the **whole** row when it does; and
-* ``_create_table_unique_indexes`` creates those indexes only in update mode,
-  only for three of the five upsert tables, and only when every key column
-  happens to be present.
+* ``_create_table_unique_indexes`` creates those indexes over the key the merge
+  resolved for the table - it used to cover only three of the five upsert tables,
+  and only in update mode, so the other two appended silently.
 
 Every test below names the real-world trigger in its docstring.
 """
@@ -722,15 +722,30 @@ def test_update_replaces_meta_data_and_alignment_rows_in_place(tmp_path: Path):
     assert _count(updated, "features") == 1
 
 
-def test_update_creates_unique_indexes_only_for_three_of_five_upsert_tables(tmp_path: Path):
+def test_every_upsert_table_has_the_unique_index_its_upsert_needs(tmp_path: Path):
     """Pin the exact index set, because it is what decides replace-vs-append.
 
-    ``merge_table_append_nonredundant`` routes five tables through
-    ``INSERT OR REPLACE`` but ``_create_table_unique_indexes`` knows about three.
-    This test documents that asymmetry so that adding an index for ``sequences``
-    or ``insertions`` (the fix) has to come here and flip the assertion.
+    ``merge_table_append_nonredundant`` routes five tables through the upsert, so
+    all five need a UNIQUE index over the key ``_infer_key_cols`` resolved -
+    without one there is nothing to conflict on and the write degrades to a plain
+    INSERT.  ``sequences`` and ``insertions`` had no index for exactly that
+    reason, which is what made an identical replay grow both tables.
+
+    The seed (non-update) build creates them too: otherwise the first ``--update``
+    is the first time the constraint exists, and a pre-existing violation would
+    surface then as an unexplained CREATE failure.
     """
     seed = _build(tmp_path, _inputs(tmp_path / "in1"), db_name="seed")
+    upsert_tables = {"meta_data", "sequence_alignment", "features", "insertions", "sequences"}
+
+    seeded = {
+        row[0]
+        for row in _rows(
+            seed, "SELECT tbl_name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'"
+        )
+    }
+    assert seeded == upsert_tables
+
     updated = _build(
         tmp_path, _inputs(tmp_path / "in2"), db_name="updated", update=True, update_db=seed, batch_id="b"
     )
@@ -742,9 +757,8 @@ def test_update_creates_unique_indexes_only_for_three_of_five_upsert_tables(tmp_
             "SELECT tbl_name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'",
         )
     }
-    assert indexed == {"meta_data", "features", "sequence_alignment"}
-    upsert_tables = {"meta_data", "sequence_alignment", "features", "insertions", "sequences"}
-    assert upsert_tables - indexed == {"sequences", "insertions"}
+    assert indexed == upsert_tables
+    assert upsert_tables - indexed == set()
 
 
 def test_update_seed_db_is_copied_not_mutated(tmp_path: Path):
