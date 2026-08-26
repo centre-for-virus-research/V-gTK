@@ -54,6 +54,30 @@ wild_type_residues
   an entry scoped to `1b` is applied to genotype-1 sequences, so `1a`, `1c` and
   `1l` each need their own entry or nothing will be suppressed for them.
 
+### `clinical_trials`
+
+The registered clinical trials supporting this finding, **for this row's
+genotype and drug**.
+
+```
+clinical_trials
+NCT01717326;NCT02092350;NCT02105454
+                        empty: no in-vivo trial evidence for this genotype/drug
+```
+
+- Semicolon separated, plain list, same as `relevant_genotypes`.
+- Keyed per **(mutation, genotype, drug)** — not per mutation. Trial support
+  genuinely varies by genotype: `NS5A:31M` against daclatasvir cites one trial in
+  genotype 1a and **nine** in 1b. 49 of the 64 (RAS, drug) pairs curated in more
+  than one genotype have different trial sets, so unioning them would attach 1b's
+  evidence to a 1a call.
+- Only in-vivo findings carry a trial. An in-vitro EC50 has no trial behind it
+  and correctly gets nothing — 826 of 1,740 findings have an in-vivo result.
+- Populated on 746 of 1,869 rows, drawing on 97 distinct trials.
+
+Resolve an NCT identifier to a trial name through the `clinical_trials` table in
+the database, loaded with `--clinical_trials`.
+
 ---
 
 ## What a non-HCV virus needs
@@ -63,6 +87,9 @@ wild_type_residues
 | no genotypes at all (rabies, most) | omit the column | omit the column |
 | genotypes but no subtypes | `1;2;3` | `1:Q;2:R` or `1:Q:98.1;2:R:95.4` |
 | genotypes and subtypes (HCV, influenza) | `1a;1b` | `1a:Q;1b:R` or `1a:Q:60.89;1b:R:92.26` |
+
+`clinical_trials` is optional everywhere and is omitted unless a virus has a
+trial registry to link against.
 
 **Subtypes are never required.** The genotype is the leading digits of whatever
 you write; if you write `1` the genotype is `1` and there is no subtype. Nothing

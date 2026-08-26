@@ -188,6 +188,54 @@ columns are empty, including the entire epitope block.
 
 ---
 
+## 4b. Clinical trial evidence
+
+Each catalogue row carries the registered trials supporting it **for that row's
+genotype and drug**, in a `clinical_trials` column of semicolon-separated NCT
+identifiers.
+
+The chain PHDR ships:
+
+```
+resistance_finding.phdr_alignment_ras_drug_id    NS3:107I:AL_1a:grazoprevir
+    -> resistance_finding.phdr_in_vivo_result_id
+    -> result_trial.phdr_clinical_trial_id
+    -> clinical_trial.nct_id                     NCT01717326
+```
+
+Note that the first key already contains the RAS, the genotype **and** the drug,
+so the linkage is genotype-scoped at source. That is not a formality: trial
+support really does vary by genotype.
+
+| `NS5A:31M` vs daclatasvir | trials |
+|---|---|
+| genotype 1a | 1 |
+| genotype 1b | **9** |
+| genotype 2a | 5 |
+| genotype 3a | 0 |
+
+49 of the 64 (RAS, drug) pairs curated in more than one genotype have different
+trial sets, so a row takes **its own** genotype's trials rather than the union
+across the signature's scope. Unioning would attach 1b's evidence to a 1a call.
+
+Only in-vivo findings carry a trial — an in-vitro EC50 has none, and rows without
+a drug get nothing. 746 of 1,869 rows are populated, drawing on 97 distinct
+trials out of the registry's 102.
+
+**A note on what was nearly built instead.** Before the trial tables arrived
+there was no registry identifier anywhere in the PHDR export — `publication.id`
+is a PubMed ID and `url` is a DOI — so trial status could only have been guessed
+from whether a publication's title contained the word "trial". That heuristic was
+written, then deleted when the real data landed. It is worth recording only
+because a heuristic that looks like a curated fact is worse than no field at all.
+
+**A related data-shape fact.** The column named `pubmed_id` is really
+"publication reference": 8 of its 128 values are conference abstracts with no
+PMID (`AASLD_2015_Abs_718`, `EASL_2017_Abs_THU-257`). Anything parsing that
+column as an integer will break on them.
+
+---
+
 ## 5. What ends up in the database
 
 | table | contents |

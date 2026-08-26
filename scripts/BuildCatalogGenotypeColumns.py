@@ -154,6 +154,62 @@ def build_dominant_residues(typical_aa_path):
     return best
 
 
+def build_trial_links(clinical_trial_path, result_trial_path, resistance_finding_path):
+    """(ras_id, genotype_code, drug) -> sorted NCT identifiers.
+
+    The evidence chain PHDR ships is:
+
+        resistance_finding.phdr_alignment_ras_drug_id   e.g. NS3:107I:AL_1a:grazoprevir
+            -> resistance_finding.phdr_in_vivo_result_id
+            -> result_trial.phdr_clinical_trial_id
+            -> clinical_trial.nct_id                    e.g. NCT01717326
+
+    Note what the first key already contains: the RAS, the alignment, AND the
+    drug. So the linkage is genotype-scoped at source - the trials supporting
+    NS3:107I against grazoprevir in genotype 1a are not necessarily the ones
+    supporting it in 1b - and that scoping is preserved here rather than
+    flattened into a single per-mutation list.
+
+    Only in-vivo results carry a trial, which is correct: an in-vitro EC50 has
+    no trial behind it. 826 of 1,740 findings have one.
+    """
+    if not all(path and os.path.isfile(path)
+               for path in (clinical_trial_path, result_trial_path, resistance_finding_path)):
+        return {}
+
+    nct_by_trial = {}
+    for row in read_csv(clinical_trial_path):
+        nct = (row.get('nct_id') or '').strip()
+        if nct:
+            nct_by_trial[(row.get('id') or '').strip()] = nct
+
+    trials_by_result = collections.defaultdict(set)
+    for row in read_csv(result_trial_path):
+        trials_by_result[(row.get('phdr_in_vivo_result_id') or '').strip()].add(
+            (row.get('phdr_clinical_trial_id') or '').strip())
+
+    links = collections.defaultdict(set)
+    for row in read_csv(resistance_finding_path):
+        in_vivo = (row.get('phdr_in_vivo_result_id') or '').strip()
+        if not in_vivo:
+            continue
+        key = (row.get('phdr_alignment_ras_drug_id') or '').strip()
+        # 'NS3:107I:AL_1a:grazoprevir' -> ras, alignment, drug. The RAS itself
+        # contains colons, so split from the right.
+        parts = key.rsplit(':', 2)
+        if len(parts) != 3:
+            continue
+        ras, alignment, drug = parts
+        code = alignment_to_genotype_code(alignment)
+        if not code:
+            continue
+        for trial in trials_by_result.get(in_vivo, ()):
+            nct = nct_by_trial.get(trial)
+            if nct:
+                links[(ras, code, drug)].add(nct)
+    return {key: sorted(value) for key, value in links.items()}
+
+
 def format_entries(entries, with_frequency):
     """``[('1a', 'Q', 60.89)]`` -> ``1a:Q:60.89`` (or ``1a:Q`` without frequency)."""
     out = []
@@ -166,8 +222,9 @@ def format_entries(entries, with_frequency):
     return ENTRY_SEP.join(out)
 
 
-def compute_columns(catalog_rows, dominant, frequencies, with_frequency=True):
-    """Return ``relevant_genotypes`` and ``wild_type_residues`` per catalog row."""
+def compute_columns(catalog_rows, dominant, frequencies, with_frequency=True, trial_links=None):
+    """Return ``relevant_genotypes``, ``wild_type_residues`` and ``clinical_trials``."""
+    trial_links = trial_links or {}
     # Scope is a property of the SIGNATURE, not of one row: a signature scored
     # in both AL_1a and AL_1b must carry both on every one of its rows.
     signature_codes = collections.defaultdict(set)
@@ -181,7 +238,7 @@ def compute_columns(catalog_rows, dominant, frequencies, with_frequency=True):
     for (code, _feature, _pos) in dominant:
         subtypes_by_genotype[genotype_of(code)].add(code)
 
-    relevant_out, wild_type_out = [], []
+    relevant_out, wild_type_out, trials_out = [], [], []
     for row in catalog_rows:
         codes = sorted(signature_codes.get(row.get('signature_id'), set()))
         # A plain list of genotype codes. Deliberately NO frequency: the number
@@ -216,7 +273,22 @@ def compute_columns(catalog_rows, dominant, frequencies, with_frequency=True):
                 entries.append((code, hit[0], hit[1]))
         wild_type_out.append(format_entries(entries, with_frequency))
 
-    return relevant_out, wild_type_out
+        # Trials are keyed on (RAS, genotype, drug) - the same triple PHDR keys
+        # them on - so a row inherits exactly the trials that support IT, in ITS
+        # genotype, for ITS drug. A row with no drug, or an in-vitro-only
+        # finding, correctly gets nothing.
+        ras = (row.get('source_phdr_ras_id') or row.get('signature_id') or '').strip()
+        drug = (row.get('drug') or '').strip()
+        # The ROW's own genotype, not the signature's union. Trial support really
+        # does vary by genotype - NS5A:31M against daclatasvir has one trial in
+        # 1a and nine in 1b - and 49 of the 64 (RAS, drug) pairs curated in more
+        # than one genotype have different trial sets. Unioning them would
+        # attach 1b's evidence to a 1a call.
+        row_code = alignment_to_genotype_code(row.get('alignment_name'))
+        ncts = set(trial_links.get((ras, row_code, drug), ())) if row_code else set()
+        trials_out.append(ENTRY_SEP.join(sorted(ncts)))
+
+    return relevant_out, wild_type_out, trials_out
 
 
 def main(argv=None):
@@ -224,6 +296,9 @@ def main(argv=None):
     parser.add_argument('--catalog', required=True, help='catalog TSV to rewrite in place')
     parser.add_argument('--typical_aa', required=True, help='phdr_alignment_typical_aa.csv')
     parser.add_argument('--var_almt_note', default=None, help='var_almt_note.csv (optional; supplies frequencies)')
+    parser.add_argument('--clinical_trial', default=None, help='phdr_clinical_trial.csv (optional; supplies NCT ids)')
+    parser.add_argument('--result_trial', default=None, help='phdr_result_trial.csv (optional; links results to trials)')
+    parser.add_argument('--resistance_finding', default=None, help='phdr_resistance_finding.csv (optional; the evidence chain)')
     parser.add_argument('--output', default=None, help='write here instead of in place')
     parser.add_argument('--no_frequency', action='store_true',
                         help='emit residues and genotypes without the optional frequency field')
@@ -236,14 +311,17 @@ def main(argv=None):
 
     dominant = build_dominant_residues(args.typical_aa)
     frequencies, counts = build_variant_frequencies(args.var_almt_note)
-    relevant, wild_type = compute_columns(rows, dominant, frequencies, not args.no_frequency)
+    trial_links = build_trial_links(args.clinical_trial, args.result_trial, args.resistance_finding)
+    relevant, wild_type, trials = compute_columns(
+        rows, dominant, frequencies, not args.no_frequency, trial_links)
 
-    for column in ('relevant_genotypes', 'wild_type_residues'):
+    for column in ('relevant_genotypes', 'wild_type_residues', 'clinical_trials'):
         if column not in fieldnames:
             fieldnames.append(column)
-    for row, rel, wt in zip(rows, relevant, wild_type):
+    for row, rel, wt, tr in zip(rows, relevant, wild_type, trials):
         row['relevant_genotypes'] = rel
         row['wild_type_residues'] = wt
+        row['clinical_trials'] = tr
 
     destination = args.output or args.catalog
     with open(destination, 'w', newline='', encoding='utf-8') as handle:
@@ -258,6 +336,8 @@ def main(argv=None):
     print(f'  wild_type_residues populated : {with_wt}/{len(rows)}')
     print(f'  dominant-residue table       : {len(dominant)} (genotype, feature, position) entries')
     print(f'  variant frequency table      : {len(frequencies)} (variation, genotype) entries')
+    print(f'  clinical_trials populated    : {sum(1 for v in trials if v)}/{len(rows)}')
+    print(f'  trial link table             : {len(trial_links)} (ras, genotype, drug) keys')
     return 0
 
 

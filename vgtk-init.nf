@@ -98,6 +98,7 @@ def scriptDefinedParams = [
     "scripts_dir", "publish_dir", "email", "ref_list", "bulk_fillup_table", "is_flu", "gene_info",
     "xml_dir", "update", "update_file", "update_db",
     "mmseqs_min_seq_id", "mmseqs_trim_cds_file","mutation_catalog", "mutation_virus",
+    "mutation_publications", "mutation_clinical_trials",
     "gisaid_dir", "previous_db", "conda_path", "test_max_cluster_seqs", "max_threads", "iqtree_mem", "ref_set_aligned",
     "min_seq_length_ratio", "max_aln_gap_proportion", "tree_free", "base_tree_only",
     "pivot_isolate_key", "pivot_required_segments", "segment_names",
@@ -1129,11 +1130,22 @@ process CREATE_SQLITE_DB {
             CATALOG_PROFILE="!{params.mutation_virus}"
         fi
 
+        # Optional: resolves the PMIDs already in mutation_catalog.pubmed_id to
+        # titles/journals/years. Without it those stay bare numbers.
+        PUBLICATIONS_ARG=""
+        if [ "!{params.mutation_publications}" != "null" ] && [ -n "!{params.mutation_publications}" ]; then
+            PUBLICATIONS_ARG="--publications !{params.mutation_publications}"
+        fi
+        TRIALS_ARG=""
+        if [ "!{params.mutation_clinical_trials}" != "null" ] && [ -n "!{params.mutation_clinical_trials}" ]; then
+            TRIALS_ARG="--clinical_trials !{params.mutation_clinical_trials}"
+        fi
+
         python !{scripts_dir}/AnnotateMutations.py \
             --db !{params.db_name}.db \
             --mutation_catalog !{params.mutation_catalog} \
             --catalog_column_profile ${CATALOG_PROFILE} \
-            ${VIRUS_ARG}
+            ${VIRUS_ARG} ${PUBLICATIONS_ARG} ${TRIALS_ARG}
     fi
     # need to make gene info come from gff file rather than hardcoded rabv one
 

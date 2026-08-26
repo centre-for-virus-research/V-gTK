@@ -11,6 +11,8 @@ listed as the scripts actually declare them.
 |---|---|---|
 | `mutation_catalog` | `null` | Path to the catalogue TSV. **This is the master switch.** When null, `ANNOTATE_MUTATIONS` and `VERIFY_MUTATIONS` never run and no mutation tables are created. Set for `HCV_*` profiles only. |
 | `mutation_virus` | `null` | Virus context passed to the annotator as `--virus`. Set to `HCV` on the HCV profiles. Selects virus-specific handling; anything else takes the generic path. |
+| `mutation_publications` | `null` | Optional publication metadata CSV. |
+| `mutation_clinical_trials` | `null` | Optional trial registry CSV. |
 
 Set together on the HCV profiles:
 
@@ -34,6 +36,8 @@ Annotates a finished database against a catalogue. Run by the
 | `--db` | yes | — | SQLite database to annotate, modified in place. |
 | `--mutation_catalog` | yes | — | Catalogue TSV. |
 | `--virus` | no | `""` | Virus context, e.g. `HCV`. Selects virus-specific handling. |
+| `--publications` | no | none | Publication metadata CSV. Loads a `publications` table so the PMIDs in `mutation_catalog.pubmed_id` resolve to titles. Without it they stay bare references. |
+| `--clinical_trials` | no | none | Trial registry CSV. Loads a `clinical_trials` table so the NCT ids in `mutation_catalog.clinical_trials` resolve to trial names. |
 
 ```
 python scripts/AnnotateMutations.py \
@@ -67,6 +71,9 @@ Folds per-genotype knowledge out of the PHDR source tables into the catalogue.
 | `--catalog` | yes | — | Catalogue TSV, rewritten in place unless `--output` is given. |
 | `--typical_aa` | yes | — | `phdr_alignment_typical_aa.csv`. Supplies the dominant residue per alignment. |
 | `--var_almt_note` | no | none | `var_almt_note.csv`. Supplies observed frequencies. Without it the columns are written without the optional frequency field. |
+| `--clinical_trial` | no | none | `phdr_clinical_trial.csv`. Supplies NCT identifiers. |
+| `--result_trial` | no | none | `phdr_result_trial.csv`. Links in-vivo results to trials. |
+| `--resistance_finding` | no | none | `phdr_resistance_finding.csv`. The evidence chain from a (RAS, genotype, drug) key to an in-vivo result. All three are needed together to populate `clinical_trials`. |
 | `--output` | no | in place | Write elsewhere instead of rewriting the input. |
 | `--no_frequency` | no | off | Emit `1a:Q;1b:R` rather than `1a:Q:60.89;1b:R:92.26`. Smaller; loses the ability to see that a wild type is only a bare majority. |
 
@@ -144,6 +151,7 @@ FROM sequence_mutation_calls GROUP BY 1,2,3 ORDER BY 4 DESC;
 | genotype gating | use a catalogue without `relevant_genotypes` |
 | wild-type suppression | use a catalogue without `wild_type_residues` |
 | the frequency field | rebuild with `--no_frequency` |
+| trial resolution | leave `mutation_clinical_trials` null (the NCT ids stay, unresolved) |
 
 There is no flag that half-disables a rule. Either the catalogue carries the
 column and the rule applies, or it does not and behaviour is what it was before

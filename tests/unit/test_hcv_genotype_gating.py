@@ -442,8 +442,8 @@ def test_catalog_carries_relevant_genotypes_as_a_per_signature_union():
     """
     catalog = _read_catalog().fillna("")
     assert "relevant_genotypes" in catalog.columns
-    # Two generic columns are appended; order between them is not contractual.
-    assert set(catalog.columns[-2:]) == {"relevant_genotypes", "wild_type_residues"}
+    # The generic columns are appended; order between them is not contractual.
+    assert {"relevant_genotypes", "wild_type_residues", "clinical_trials"} <= set(catalog.columns)
 
     expected = {}
     for signature_id, group in catalog.groupby("signature_id"):

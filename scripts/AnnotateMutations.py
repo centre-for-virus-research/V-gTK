@@ -3,6 +3,7 @@
 import sqlite3
 import pandas as pd
 import argparse
+import csv
 import os
 import re
 import sys
@@ -1241,7 +1242,8 @@ def build_mutation_call_table(records):
     return df_calls.drop(columns=['_scope_rank']).drop_duplicates().reset_index(drop=True)
 
 
-def write_mutation_tables(conn, catalog, mutations_found, catalog_column_profile, call_evidence=None):
+def write_mutation_tables(conn, catalog, mutations_found, catalog_column_profile, call_evidence=None,
+                          publications=None, clinical_trials=None):
     # The compact layout tables are keyed on the identity columns alone, so the
     # provenance columns are kept out of them and land in
     # sequence_mutation_calls instead - joining on a wider frame would change
@@ -1263,6 +1265,18 @@ def write_mutation_tables(conn, catalog, mutations_found, catalog_column_profile
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_mut_catalog_seg_prot ON mutation_catalog(segment, protein_name)')
     if 'combination_id' in df_catalog.columns:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_mut_catalog_comb ON mutation_catalog(combination_id)')
+
+    if publications is not None and not publications.empty:
+        print(f'Writing publications table ({len(publications)} rows)...')
+        cursor.execute('DROP TABLE IF EXISTS publications')
+        publications.to_sql('publications', conn, if_exists='replace', index=False)
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_publications_pmid ON publications(pubmed_id)')
+
+    if clinical_trials is not None and not clinical_trials.empty:
+        print(f'Writing clinical_trials table ({len(clinical_trials)} rows)...')
+        cursor.execute('DROP TABLE IF EXISTS clinical_trials')
+        clinical_trials.to_sql('clinical_trials', conn, if_exists='replace', index=False)
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_clinical_trials_nct ON clinical_trials(nct_id)')
 
     print('Writing compact mutation summary tables...')
     df_catalog_for_layouts = catalog.fillna('').copy()
@@ -1302,11 +1316,80 @@ def write_mutation_tables(conn, catalog, mutations_found, catalog_column_profile
 
     conn.commit()
 
+def load_clinical_trials_table(clinical_trial_path):
+    """The trial registry entries the catalogue's NCT identifiers refer to.
+
+    ``mutation_catalog.clinical_trials`` holds semicolon-separated NCT numbers,
+    scoped per (mutation, genotype, drug) - trial support genuinely varies by
+    genotype, so NS5A:31M against daclatasvir cites one trial in genotype 1a and
+    nine in 1b. This loads the registry rows so an NCT resolves to the trial's
+    name rather than staying an opaque accession.
+
+    Optional. Without it the NCT identifiers are still present and still
+    correct, just not resolvable inside the database.
+    """
+    if not clinical_trial_path or not os.path.isfile(clinical_trial_path):
+        return None
+    rows = []
+    with open(clinical_trial_path, newline='', encoding='utf-8', errors='replace') as handle:
+        for row in csv.DictReader(handle):
+            nct = (row.get('nct_id') or '').strip()
+            if not nct:
+                continue
+            rows.append({
+                'nct_id': nct,
+                'trial_id': (row.get('id') or '').strip(),
+                'trial_name': (row.get('display_name') or '').strip(),
+            })
+    return pd.DataFrame(rows) if rows else None
+
+
+def load_publications_table(publications_path):
+    """Read the publication metadata that PMIDs in the catalogue refer to.
+
+    ``mutation_catalog.pubmed_id`` holds semicolon-separated PubMed IDs and is
+    already genotype-scoped - the same signature and drug cites different
+    publications in different genotypes, which survived the catalogue build
+    intact. But a bare PMID is not usable evidence on its own: nothing in the
+    database says what 27773808 is.
+
+    This loads the 128 rows of title / authors / year / journal / url so a PMID
+    resolves to something a reader can act on, and flags the ones whose titles
+    identify them as clinical trials.
+
+    Optional. Without it the database is exactly as it was - PMIDs present,
+    unresolvable.
+    """
+    if not publications_path or not os.path.isfile(publications_path):
+        return None
+    rows = []
+    with open(publications_path, newline='', encoding='utf-8', errors='replace') as handle:
+        for row in csv.DictReader(handle):
+            title = (row.get('title') or '').strip()
+            rows.append({
+                'pubmed_id': (row.get('id') or '').strip(),
+                'title': title,
+                'authors': (row.get('authors_short') or '').strip(),
+                'year': (row.get('year') or '').strip(),
+                'journal': (row.get('journal') or '').strip(),
+                'url': (row.get('url') or '').strip(),
+            })
+    return pd.DataFrame(rows) if rows else None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Annotate mutations and drug resistance.")
     parser.add_argument("--db", required=True, help="Path to SQLite database.")
     parser.add_argument("--mutation_catalog", required=True, help="Path to mutation catalog TSV.")
     parser.add_argument("--virus", default="", help="Virus context for specific logics (e.g. HCV)")
+    parser.add_argument("--publications", default=None,
+        help="Optional publication metadata CSV (id/title/authors_short/year/journal/url). "
+             "Loaded into a publications table so the PMIDs already in mutation_catalog.pubmed_id "
+             "resolve to something readable. Without it those PMIDs stay bare numbers.")
+    parser.add_argument("--clinical_trials", default=None,
+        help="Optional clinical trial registry CSV (id/display_name/nct_id). Loaded into a "
+             "clinical_trials table so the NCT ids in mutation_catalog.clinical_trials resolve "
+             "to trial names.")
     parser.add_argument(
         "--catalog_column_profile",
         required=True,
@@ -1380,7 +1463,10 @@ def main():
                 raise AnnotationMappingError('No mutations were annotated because coordinate mapping failed for all available reference groups.')
             print('[AnnotateMutations][warn] No mutation hits were found after successful coordinate mapping')
 
-        write_mutation_tables(conn, catalog, mutations_found, args.catalog_column_profile, call_evidence=call_evidence)
+        write_mutation_tables(conn, catalog, mutations_found, args.catalog_column_profile,
+                              call_evidence=call_evidence,
+                              publications=load_publications_table(args.publications),
+                              clinical_trials=load_clinical_trials_table(args.clinical_trials))
     except AnnotationMappingError as exc:
         print(f'Error: {exc}', file=sys.stderr)
         conn.close()

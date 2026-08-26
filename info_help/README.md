@@ -42,6 +42,12 @@ everything "typical" would have silenced it; suppressing only the dominant
 residue keeps it. This is the single most consequential decision in the design
 and there is a standing test on it.
 
+**Evidence is attached per genotype, not per mutation.** Each call carries the
+registered clinical trials (NCT identifiers) and publications supporting it *in
+that genotype, for that drug*. `NS5A:31M` against daclatasvir has one trial in
+genotype 1a and nine in 1b; flattening them would attach one genotype's evidence
+to another's call.
+
 **Nothing is suppressed silently.** Every evaluated call, emitted or not, lands
 in `sequence_mutation_calls` with the reason. A call that was gated out, one
 whose residue was wild type, and one that was never evaluated are three different
