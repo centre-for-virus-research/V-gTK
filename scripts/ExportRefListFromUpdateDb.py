@@ -4,6 +4,7 @@ import sqlite3
 from argparse import ArgumentParser
 
 import pandas as pd
+import segment_utils
 
 
 REFLIST_COLUMN_ALIASES = {
@@ -116,13 +117,16 @@ def load_master_accessions_from_file(ref_list_path):
 
 
 def _segment_norm(value):
-	if value is None:
+	"""Delegates to :mod:`segment_utils` - the single normalisation authority.
+
+	This used to scrape every digit out of the string: ``4.0`` became segment 40,
+	and the polymerase names inverted - ``PB2`` (segment 1) became ``2`` and ``PB1``
+	(segment 2) became ``1``. Missing still maps to ``"0"`` for this call site.
+	"""
+	normalised = segment_utils.normalise_segment(value)
+	if normalised is None or normalised.casefold() in segment_utils.PANDAS_NULL_TOKENS:
 		return "0"
-	s = str(value).strip()
-	if not s or s.lower() == "nan":
-		return "0"
-	digits = ''.join(ch for ch in s if ch.isdigit())
-	return digits if digits else s
+	return normalised
 
 
 def load_reference_rows(update_db):

@@ -1,5 +1,6 @@
 import os
 import csv
+import re
 from os.path import join, dirname, abspath
 from argparse import ArgumentParser
 from datetime import datetime
@@ -88,11 +89,14 @@ class NormalizeAndMerge:
         return sum(seq_lower.count(n) for n in ("a", "t", "g", "c"))
     
     def read_base_matrix_df(self) -> pd.DataFrame:
-        base_df = pd.read_csv(self.gb_matrix, sep="\t", dtype=str)
+        # keep_default_na=False: pandas' default NA sentinels include the literal
+        # string "NA", which is influenza's neuraminidase segment/gene name. Without
+        # this, every NA-segment row silently loses its label on read.
+        base_df = pd.read_csv(self.gb_matrix, sep="\t", dtype=str, keep_default_na=False)
         return base_df
 
     def read_input_tsv_df(self) -> pd.DataFrame:
-        in_df = pd.read_csv(self.input_tsv, sep="\t", dtype=str)
+        in_df = pd.read_csv(self.input_tsv, sep="\t", dtype=str, keep_default_na=False)
         return in_df
 
     def write_duplicates_report_df(self, dup_df: pd.DataFrame):
@@ -102,6 +106,84 @@ class NormalizeAndMerge:
         dup_df.to_csv(dup_file, sep="\t", index=False)
         return dup_file
 
+    #: Columns this class writes itself. They are canonical by construction and
+    #: must never be namespaced away.
+    PIPELINE_OWNED_COLUMNS = frozenset({
+        "primary_accession", "accession_version", "locus", "gi_number",
+        "sequence", "real_length", "dataset_source", "exclusion",
+    })
+
+    @staticmethod
+    def slugify_column(name: str) -> str:
+        """Reduce an arbitrary vendor header to a legal, lowercase SQL identifier.
+
+        ``"HA INSDC_Upload"`` -> ``"ha_insdc_upload"``. Unquoted identifiers with
+        spaces are not merely ugly: ``ALTER TABLE t ADD COLUMN HA INSDC_Upload TEXT``
+        parses as a column ``HA`` of type ``INSDC_Upload TEXT``, silently creating
+        the wrong column instead of raising.
+        """
+        slug = re.sub(r'[^0-9a-zA-Z]+', '_', str(name)).strip('_').lower()
+        if not slug:
+            slug = "column"
+        if slug[0].isdigit():
+            slug = f"col_{slug}"
+        return slug
+
+    @staticmethod
+    def case_insensitive_duplicates(columns):
+        seen, dupes = set(), []
+        for col in columns:
+            key = str(col).casefold()
+            if key in seen:
+                dupes.append(col)
+            else:
+                seen.add(key)
+        return dupes
+
+    @classmethod
+    def columns_collide_ignoring_case(cls, columns) -> bool:
+        return bool(cls.case_insensitive_duplicates(columns))
+
+    def namespace_external_columns(self, df: pd.DataFrame, mapped_targets, canonical=()) -> pd.DataFrame:
+        """Prefix un-mapped vendor columns with the dataset source.
+
+        Exempt: deliberate mapping targets, the columns this class writes itself,
+        and the join key. Everything else becomes ``<source>_<slug>`` so it cannot
+        collide with a canonical column under SQLite's case-insensitive
+        identifier rules.
+
+        Idempotent: a column that already carries the prefix is left alone, so
+        re-merging an already-merged matrix does not stack prefixes.
+        """
+        prefix = self.slugify_column(self.dataset_source or "external")
+        # An external column spelled EXACTLY like a canonical one is not a
+        # collision - it is the same field, and renaming it would silently move
+        # the vendor's data out of the column the pipeline reads. Only differing
+        # spellings (including case-only differences) get namespaced.
+        protected = set(mapped_targets) | set(self.PIPELINE_OWNED_COLUMNS) | {self.key} | set(canonical)
+
+        renames, taken = {}, {str(c).casefold() for c in protected}
+        for col in df.columns:
+            if col in protected:
+                continue
+            slug = self.slugify_column(col)
+            new = slug if slug.startswith(f"{prefix}_") else f"{prefix}_{slug}"
+            candidate, n = new, 2
+            while candidate.casefold() in taken:
+                candidate, n = f"{new}_{n}", n + 1
+            taken.add(candidate.casefold())
+            if candidate != col:
+                renames[col] = candidate
+
+        if renames:
+            shown = {k: v for k, v in list(renames.items())[:8]}
+            self.log(
+                f"[INFO] Namespaced {len(renames)} un-mapped '{self.dataset_source}' "
+                f"column(s) to avoid collision with canonical names, e.g. {shown}"
+            )
+            df = df.rename(columns=renames)
+        return df
+
     def collapse_duplicate_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Pandas `reindex(columns=...)` fails when the source frame has duplicate
@@ -110,13 +192,26 @@ class NormalizeAndMerge:
 
         Strategy: keep one column per label and coalesce values left-to-right,
         filling empty/NaN entries with later duplicates.
+
+        Matching is case-INSENSITIVE, because the destination is SQLite and its
+        column identifiers are. Detecting a `segment`/`Segment` pair and then
+        handing it to an exact-match collapse would log "Collapsing duplicates"
+        and change nothing, leaving the original `duplicate column name` crash
+        one step further downstream. The first spelling seen wins the name.
         """
-        if not df.columns.duplicated().any():
+        keys = [str(c).casefold() for c in df.columns]
+        if len(keys) == len(set(keys)):
             return df
 
         collapsed = pd.DataFrame(index=df.index)
-        for col in pd.unique(df.columns):
-            same_cols = df.loc[:, df.columns == col]
+        seen_keys = []
+        for key in keys:
+            if key not in seen_keys:
+                seen_keys.append(key)
+        for key in seen_keys:
+            mask = [k == key for k in keys]
+            same_cols = df.loc[:, mask]
+            col = df.columns[mask.index(True)]
             if same_cols.shape[1] == 1:
                 collapsed[col] = same_cols.iloc[:, 0]
                 continue
@@ -178,8 +273,18 @@ class NormalizeAndMerge:
         if mapping:
             norm_df = norm_df.rename(columns=mapping)
 
-        if norm_df.columns.duplicated().any():
-            dup_cols = norm_df.columns[norm_df.columns.duplicated()].unique().tolist()
+        # Namespace every column that arrived raw from the external source and was
+        # not deliberately mapped onto a canonical name. Without this, a vendor
+        # field that merely differs in case from a canonical one - GISAID ships
+        # `Segment` against our `segment` - reaches SQLite, which treats column
+        # identifiers case-insensitively and aborts the build with
+        # "duplicate column name: Segment". Prefixing makes that unrepresentable
+        # and, as a side effect, guarantees every identifier is legal SQL.
+        norm_df = self.namespace_external_columns(
+            norm_df, set(mapping.values()), canonical=set(base_df.columns))
+
+        if self.columns_collide_ignoring_case(norm_df.columns):
+            dup_cols = self.case_insensitive_duplicates(norm_df.columns)
             self.log(f"[WARN] Duplicate column labels after mapping: {dup_cols}. Collapsing duplicates.")
             norm_df = self.collapse_duplicate_columns(norm_df)
 

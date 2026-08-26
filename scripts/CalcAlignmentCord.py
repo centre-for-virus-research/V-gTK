@@ -9,6 +9,7 @@ from argparse import ArgumentParser
 from GffToDictionary import GffDictionary
 from CalcGenomeCords import CalculateGenomeCoordinates 
 from ExportRefListFromUpdateDb import load_master_accessions_from_file, load_reference_file_table
+import segment_utils
 
 class CalculateAlignmentCoordinates:
 
@@ -26,15 +27,17 @@ class CalculateAlignmentCoordinates:
 
 	@staticmethod
 	def _normalize_segment_value(value):
-		if value is None:
+		"""Delegates to :mod:`segment_utils` - the single normalisation authority.
+
+		This used to scrape every digit out of the string, which turned ``4.0`` into
+		segment 40 and, worse, inverted the polymerase segments: ``PB2`` (segment 1)
+		became ``2`` and ``PB1`` (segment 2) became ``1``. Missing still maps to
+		``""`` here, because callers of this particular helper depend on it.
+		"""
+		normalised = segment_utils.normalise_segment(value)
+		if normalised is None or normalised.casefold() in segment_utils.PANDAS_NULL_TOKENS:
 			return ""
-		text = str(value).strip()
-		if not text or text.lower() == "nan":
-			return ""
-		digits = ''.join(ch for ch in text if ch.isdigit())
-		if digits:
-			return str(int(digits))
-		return text
+		return normalised
 
 	@staticmethod
 	def _infer_segment_from_alignment_name(fasta_file):

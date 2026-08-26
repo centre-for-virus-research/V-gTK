@@ -100,7 +100,7 @@ def scriptDefinedParams = [
     "mmseqs_min_seq_id", "mmseqs_trim_cds_file","mutation_catalog", "mutation_virus",
     "gisaid_dir", "previous_db", "conda_path", "test_max_cluster_seqs", "max_threads", "iqtree_mem", "ref_set_aligned",
     "min_seq_length_ratio", "max_aln_gap_proportion", "tree_free", "base_tree_only",
-    "pivot_isolate_key", "pivot_required_segments",
+    "pivot_isolate_key", "pivot_required_segments", "segment_names",
     "mmseqs_two_step", "mmseqs_min_completeness", "iqtree_model"
     // Add all parameter names defined above
 ]
@@ -1196,11 +1196,17 @@ process VALIDATE_SEGMENT{
         path "gB_matrix_validated_segment.tsv", emit: validated_matrix
     shell:
     '''
+    SEGMENT_NAME_ARG=""
+    if [ "!{params.segment_names}" != "null" ] && [ -n "!{params.segment_names}" ]; then
+        SEGMENT_NAME_ARG="--segment_names !{params.segment_names}"
+    fi
+
     python !{scripts_dir}/ValidateSegment.py \
         -g !{gb_matrix} \
         -s !{blast_hits} \
         -r !{ref_list} \
-        -o gB_matrix_validated_segment.tsv
+        -o gB_matrix_validated_segment.tsv \
+        ${SEGMENT_NAME_ARG}
     '''
 }
 

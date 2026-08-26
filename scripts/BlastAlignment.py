@@ -13,6 +13,7 @@ from os.path import join
 from argparse import ArgumentParser
 import read_file
 from ExportRefListFromUpdateDb import load_master_accessions_from_file, load_reference_file_table, load_reference_rows
+import segment_utils
 
 class BlastAlignment:
 	def __init__(self, query_fasta, db_fasta, base_dir, output_dir, output_file, is_segmented_virus, master_acc, is_update, keep_blast_tmp_dir, gb_matrix, segment_file=None, update_db=None, threads=1):
@@ -57,13 +58,17 @@ class BlastAlignment:
 
 	@staticmethod
 	def _normalize_segment(value):
-		if value is None:
+		"""Delegates to :mod:`segment_utils` - the single normalisation authority.
+
+		This used to scrape every digit out of the string, which turned ``4.0`` into
+		segment 40 and, worse, inverted the polymerase segments: ``PB2`` (segment 1)
+		became ``2`` and ``PB1`` (segment 2) became ``1``. Missing still maps to
+		``"0"`` here, because callers of this particular helper depend on it.
+		"""
+		normalised = segment_utils.normalise_segment(value)
+		if normalised is None or normalised.casefold() in segment_utils.PANDAS_NULL_TOKENS:
 			return "0"
-		segment = str(value).strip()
-		if not segment or segment.lower() == "nan":
-			return "0"
-		digits = ''.join(ch for ch in segment if ch.isdigit())
-		return digits if digits else segment
+		return normalised
 
 	def hydrate_update_reference_assets(self):
 		if not self.update_db:

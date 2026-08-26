@@ -3,6 +3,7 @@ import os
 import sqlite3
 import pandas as pd
 from argparse import ArgumentParser
+import segment_utils
 
 
 def _pick_col(df, candidates):
@@ -13,13 +14,16 @@ def _pick_col(df, candidates):
 
 
 def _segment_norm(value):
-	if value is None:
+	"""Delegates to :mod:`segment_utils` - the single normalisation authority.
+
+	This used to scrape every digit out of the string: ``4.0`` became segment 40,
+	and the polymerase names inverted - ``PB2`` (segment 1) became ``2`` and ``PB1``
+	(segment 2) became ``1``. Missing still maps to ``"0"`` for this call site.
+	"""
+	normalised = segment_utils.normalise_segment(value)
+	if normalised is None or normalised.casefold() in segment_utils.PANDAS_NULL_TOKENS:
 		return "0"
-	s = str(value).strip()
-	if not s:
-		return "0"
-	digits = ''.join([x for x in s if x.isdigit()])
-	return digits if digits else s
+	return normalised
 
 
 def main(args):

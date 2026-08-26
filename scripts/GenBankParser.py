@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 from argparse import ArgumentParser
 from date_utils import split_date_components
 from ExportRefListFromUpdateDb import load_reference_dict, load_reference_file_dict
+import segment_utils
 
 # add source example NCBI or GISAID, or user define, add temp sequences 
 # temp sequences which should available for temp purpose 
@@ -46,10 +47,20 @@ class GenBankParser:
 		self._existing_accessions = set()
 
 	def _normalize_segment_value(self, raw_segment):
-		segment = (raw_segment or '').strip()
-		if self.is_segmented_virus == 'Y':
-			return segment
-		return '1'
+		"""Canonicalise the GenBank ``/segment=`` qualifier.
+
+		This used to return the qualifier verbatim for segmented viruses, i.e. no
+		normalisation at all, which is how ``'segment 7'``, ``'RNA 4'``, ``'MA'``
+		and ``'M'`` reached the definitive ``segment`` column of a real influenza
+		build - 62 rows of it. Submitters write that column freehand, so it has to
+		be normalised at the point of entry like any other free text.
+		"""
+		if self.is_segmented_virus != 'Y':
+			return '1'
+		normalised = segment_utils.normalise_segment(raw_segment)
+		if normalised is None or normalised.casefold() in segment_utils.PANDAS_NULL_TOKENS:
+			return ''
+		return normalised
 
 	def count_ATGCN(self, sequence):
 		nucl_dict = {'A': 0, 'T': 0, 'G': 0, 'C': 0, 'N': 0}

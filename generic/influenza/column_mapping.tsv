@@ -5,3 +5,4 @@ Host	host
 Subtype	serotype
 Authors	authors
 Isolate_Name	strain
+Segment	segment_declared

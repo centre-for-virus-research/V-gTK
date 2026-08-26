@@ -23,7 +23,7 @@ jobs:
         profile:
           - test
           - update_test
-          #- segmented_test
+          - segmented_test
 
     steps:
       - name: Checkout

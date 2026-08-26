@@ -11,6 +11,7 @@ from argparse import ArgumentParser
 from TextFileHandler import TextFileLoader
 from FastaHandler import RemoveRedundantSequence
 from ExportRefListFromUpdateDb import load_master_accessions, load_master_accessions_from_file
+import segment_utils
 
 class NextalignAlignment:
 	def __init__(self, gb_matrix, query_dir, ref_dir, ref_fa_file, master_seq_dir, tmp_dir, master_ref, nextalign_dir, reference_alignment, update_db=None, max_threads=10):
@@ -42,15 +43,17 @@ class NextalignAlignment:
 
 	@staticmethod
 	def _normalize_segment(segment_value):
-		if segment_value is None:
+		"""Delegates to :mod:`segment_utils` - the single normalisation authority.
+
+		This used to scrape every digit out of the string, which turned ``4.0`` into
+		segment 40 and, worse, inverted the polymerase segments: ``PB2`` (segment 1)
+		became ``2`` and ``PB1`` (segment 2) became ``1``. Missing still maps to
+		``""`` here, because callers of this particular helper depend on it.
+		"""
+		normalised = segment_utils.normalise_segment(segment_value)
+		if normalised is None or normalised.casefold() in segment_utils.PANDAS_NULL_TOKENS:
 			return ""
-		text = str(segment_value).strip()
-		if not text or text.lower() == "nan":
-			return ""
-		digits = ''.join(ch for ch in text if ch.isdigit())
-		if digits:
-			return str(int(digits))
-		return text
+		return normalised
 
 	def get_master_list(self):
 		if self.update_db:

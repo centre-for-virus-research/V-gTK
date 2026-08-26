@@ -23,6 +23,7 @@ from argparse import ArgumentParser
 from collections import OrderedDict
 from os import makedirs
 from os.path import dirname, exists
+import segment_utils
 
 # The influenza A/B genome. Retained as the fallback when no reference list is
 # supplied, which is what keeps the legacy CLI byte-compatible.
@@ -56,7 +57,9 @@ EXTENDED_COLUMNS = (
     'Duplicate_segments',
 )
 
-_NUMERIC_SEGMENT_RE = re.compile(r'^-?\d+(\.0+)?$')
+# Length-bounded: without it, int(float(text)) on a long digit string raises
+# OverflowError, breaking this module's documented "never raises" contract.
+_NUMERIC_SEGMENT_RE = re.compile(r'^-?\d{1,9}(\.0+)?$')
 
 
 def normalise_segment_label(value):
@@ -66,15 +69,25 @@ def normalise_segment_label(value):
     so the influenza matrix keeps pivoting as it always has. Non-numeric labels
     (L, M, S, HA, ...) survive verbatim. Never raises - the old
     ``str(int(float(v)))`` killed the process on the first letter segment.
+
+    Normalisation itself is delegated to :mod:`segment_utils` so that this and
+    the five other former copies cannot drift apart again. What stays local is
+    the *availability* judgement: this function is the only one that treats
+    'na', 'unknown', 'not found' and friends as "no segment", which is right for
+    a completeness table keyed on numeric segments but would silently discard
+    every neuraminidase row of a virus keyed on segment names.
     """
     if value is None:
         return None
     text = str(value).strip()
     if text.casefold() in UNAVAILABLE_SEGMENT_VALUES:
         return None
+    # This local numeric branch is kept because it accepts forms the shared
+    # normaliser deliberately rejects as labels - notably a bare '-1', and digit
+    # strings longer than the shared normaliser's length bound. Both then agree.
     if _NUMERIC_SEGMENT_RE.match(text):
         return str(int(float(text)))
-    return text
+    return segment_utils.normalise_segment(text)
 
 
 def natural_segment_sort(labels):

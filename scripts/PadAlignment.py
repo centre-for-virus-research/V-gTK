@@ -8,6 +8,7 @@ from os.path import join
 from Bio import SeqIO
 from Bio.Seq import Seq
 from ExportRefListFromUpdateDb import load_master_accessions, load_master_accessions_from_file, load_reference_file_table, load_reference_rows
+import segment_utils
 
 class PadAlignment:
 	def __init__(self, reference_alignment, input_dir, base_dir, output_dir, keep_intermediate_files, new_outputfile=False, segment_manifest_out=None, strict_segment_backbone=False, update_db=None, skip_ids=None):
@@ -95,15 +96,17 @@ class PadAlignment:
 
 	@staticmethod
 	def _normalize_segment(segment_value):
-		if segment_value is None:
+		"""Delegates to :mod:`segment_utils` - the single normalisation authority.
+
+		This used to scrape every digit out of the string, which turned ``4.0`` into
+		segment 40 and, worse, inverted the polymerase segments: ``PB2`` (segment 1)
+		became ``2`` and ``PB1`` (segment 2) became ``1``. Missing still maps to
+		``None`` here, because callers of this particular helper depend on it.
+		"""
+		normalised = segment_utils.normalise_segment(segment_value)
+		if normalised is None or normalised.casefold() in segment_utils.PANDAS_NULL_TOKENS:
 			return None
-		text = str(segment_value).strip()
-		if not text or text.lower() == "nan":
-			return None
-		digits = ''.join(ch for ch in text if ch.isdigit())
-		if digits:
-			return str(int(digits))
-		return text
+		return normalised
 
 	def find_precomputed_reference_alignment(self, precomputed_ref_dir, segment_value):
 		"""

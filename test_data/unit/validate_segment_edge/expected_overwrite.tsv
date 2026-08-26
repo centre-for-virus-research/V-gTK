@@ -1,6 +1,6 @@
-primary_accession	exclusion	notes	segment_validated	closest_reference
-Q_KEEP		alpha	6	REF_LAST
-Q_FLOAT	non IAV genomic sequence	beta	2.5	REF_B
-Q_OKPAD		gamma	08	REF_C
-Q_MISS	not significant BLAST hit	delta	not found	not found
-Q_NONINT	non IAV genomic sequence	epsilon	X	REF_D
+primary_accession	exclusion	notes	segment	segment_validated	closest_reference	segment_name	segment_source
+Q_KEEP		alpha	6	6	REF_LAST		blast_inferred
+Q_FLOAT	non IAV genomic sequence	beta	2.5	2.5	REF_B	2.5	blast_inferred
+Q_OKPAD		gamma	8	08	REF_C		blast_inferred
+Q_MISS	not significant BLAST hit	delta		not found	not found		
+Q_NONINT	non IAV genomic sequence	epsilon	X	X	REF_D	X	blast_inferred

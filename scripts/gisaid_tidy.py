@@ -4,6 +4,7 @@ import csv
 import glob
 import shutil
 import sqlite3
+import numpy as np
 import pandas as pd
 from datetime import datetime
 from Bio import SeqIO
@@ -14,6 +15,22 @@ parse country and geo location from location column
 clean Subtype to match "serotype" pattern in genbank (now is done during the  serotype clean step downstream)
 """
 
+
+
+def _restore_blank_as_missing(df):
+    """Make blanks missing again after a lossless read.
+
+    Read with ``keep_default_na=False`` nothing is nulled, which is what lets
+    influenza's ``NA`` segment survive - pandas' default sentinel list contains
+    the literal string "NA", and neuraminidase is genuinely named NA. But the
+    rest of this module legitimately relies on blank meaning missing
+    (``dropna(how="all")``, ``pd.notnull(row["Segment_Id"])``), so the empty
+    string - and only the empty string - is converted back to NaN.
+
+    Net effect versus the old behaviour: '' still nulls; 'NA', 'NULL', 'None'
+    and 'nan' no longer do.
+    """
+    return df.replace('', np.nan)
 
 
 SEGS = ["PB1", "PB2", "PA", "HA", "NA", "NP", "NS", "MP"]
@@ -149,12 +166,12 @@ class GISAIDTidy:
         for file in metadata_files:
             if file.endswith('.tsv') and self.filetype == "tsv":
                 if self.test_mode:
-                    df = pd.read_csv(file, sep='\t', dtype=str, nrows=100)
+                    df = _restore_blank_as_missing(pd.read_csv(file, sep='\t', dtype=str, nrows=100, keep_default_na=False))
                     self.log(f"Test mode active: loaded first 100 rows from {file}")
                 else:
-                    df = pd.read_csv(file, sep='\t', dtype=str)
+                    df = _restore_blank_as_missing(pd.read_csv(file, sep='\t', dtype=str, keep_default_na=False))
             elif (file.endswith('.xls') or file.endswith('.xlsx')) and self.filetype == "xls":
-                df = pd.read_excel(file, dtype=str)
+                df = _restore_blank_as_missing(pd.read_excel(file, dtype=str, keep_default_na=False))
                 if self.test_mode:
                     df = df.head(100)
                     self.log(f"Test mode active: keeping first 100 rows from {file}")
@@ -224,7 +241,7 @@ class GISAIDTidy:
             removed_dups_path = os.path.join(self.output_dir, "metadata_removed_duplicates.tsv")
 
             if os.path.exists(out_path):
-                old_df = pd.read_csv(out_path, sep='\t', dtype=str)
+                old_df = _restore_blank_as_missing(pd.read_csv(out_path, sep='\t', dtype=str, keep_default_na=False))
                 
                 for col in old_df.columns:
                     if old_df[col].dtype == "object":
@@ -266,7 +283,7 @@ class GISAIDTidy:
             self.log("Metadata file not found. Cannot parse FASTA headers robustly.")
             return
 
-        meta_df = pd.read_csv(metadata_path, sep='\t', dtype=str)
+        meta_df = _restore_blank_as_missing(pd.read_csv(metadata_path, sep='\t', dtype=str, keep_default_na=False))
         epi_ids_set = set(meta_df['Segment_Id'].dropna()) if 'Segment_Id' in meta_df.columns else set()
         epi_dict = {(row["Isolate_Id"], row["Segment"]): row["Segment_Id"]
                     for _, row in meta_df.iterrows()
@@ -331,7 +348,7 @@ class GISAIDTidy:
 
     def validate(self, metadata_file, fasta_file):
         """Cross-validate Segment_Ids between metadata and fasta, report missing in either direction and save lists to txt."""
-        meta_df = pd.read_csv(metadata_file, sep='\t', dtype=str)
+        meta_df = _restore_blank_as_missing(pd.read_csv(metadata_file, sep='\t', dtype=str, keep_default_na=False))
         meta_epis = set(meta_df['Segment_Id'].dropna())
         fasta_epis = set()
         for record in SeqIO.parse(fasta_file, "fasta"):

@@ -218,8 +218,11 @@ def test_process_appends_normalized_rows(tmp_path: Path):
     # Unmapped input columns are retained after the base columns by default.
     header = list(pd.read_csv(out, sep="\t", dtype=str, nrows=0).columns)
     assert header[: len(BASE_COLUMNS)] == BASE_COLUMNS
-    assert "Extra_Junk" in header
-    assert first["Extra_Junk"] == "junk1"
+    # Un-mapped vendor columns are namespaced with the dataset source so they can
+    # never collide with a canonical column under SQLite's case-insensitive rules.
+    assert "Extra_Junk" not in header
+    assert "gisaid_extra_junk" in header
+    assert first["gisaid_extra_junk"] == "junk1"
 
 
 def test_process_reports_duplicates_and_missing_keys(tmp_path: Path):
@@ -236,7 +239,7 @@ def test_process_reports_duplicates_and_missing_keys(tmp_path: Path):
 
     rows = read_tsv_as_dicts(out)
     assert [r["primary_accession"] for r in rows] == ["NC_001542", "EPI001"]
-    assert rows[1]["Extra_Junk"] == "first"
+    assert rows[1]["gisaid_extra_junk"] == "first"
 
     dup_rows = read_tsv_as_dicts(out.parent / "merge_matrix_duplicates.tsv")
     assert [(r["reason"], r["row_key"], r["Extra_Junk"]) for r in dup_rows] == [
@@ -297,18 +300,22 @@ def test_process_collapses_columns_colliding_with_mapping_targets(tmp_path: Path
     assert "Duplicate column labels after mapping" in log_file.read_text(encoding="utf-8")
 
 
-def test_process_without_mapping_keeps_source_column_names(tmp_path: Path):
+def test_process_without_mapping_namespaces_source_column_names(tmp_path: Path):
     empty_mapping = tmp_path / "empty_mapping.tsv"
     empty_mapping.write_text("", encoding="utf-8")
     out = tmp_path / "out" / "gB_matrix_merged.tsv"
     make_job(tmp_path, mapping_file=str(empty_mapping), output=str(out)).process()
 
     header = list(pd.read_csv(out, sep="\t", dtype=str, nrows=0).columns)
-    assert "Location" in header and "Host_Species" in header
+    # With no mapping at all, every source column is un-mapped and therefore
+    # namespaced - the source vocabulary survives, but under a prefix that
+    # cannot shadow a canonical name.
+    assert "gisaid_location" in header and "gisaid_host_species" in header
+    assert "Location" not in header and "Host_Species" not in header
     assert "collection_date" not in header
 
     rows = read_tsv_as_dicts(out)
-    assert rows[1]["Location"] == "Kenya"
+    assert rows[1]["gisaid_location"] == "Kenya"
     # The unmapped base column stays empty for the appended rows.
     assert rows[1]["country"] == ""
 

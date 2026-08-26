@@ -14,7 +14,10 @@ from PadAlignment import PadAlignment
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO_ROOT / "test_data" / "unit" / "pad_alignment"
-REAL_UPDATE_DB = REPO_ROOT / "test_data" / "RABV_test" / "rabv-jul0425.db"
+# The DB this pointed at (rabv-jul0425.db) has never existed in the repo, so seven
+# tests - four of them update-mode - skipped silently in CI and locally. This one
+# is tracked and its features schema matches the fixtures below.
+REAL_UPDATE_DB = REPO_ROOT / "test_data" / "RABV_test" / "rabv-11Jun26.db"
 
 
 def _pick_master_and_segment_from_real_db():

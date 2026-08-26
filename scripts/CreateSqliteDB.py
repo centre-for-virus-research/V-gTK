@@ -12,6 +12,7 @@ from datetime import datetime
 from argparse import ArgumentParser
 from ExportRefListFromUpdateDb import load_reference_file_table
 from clade_from_tree import assign_labels_from_tree
+import segment_utils
 
 
 class CreateSqliteDB:
@@ -79,15 +80,16 @@ class CreateSqliteDB:
 
 	@staticmethod
 	def _normalize_segment_value(value):
-		if value is None:
+		"""Delegates to :mod:`segment_utils` - the single normalisation authority.
+
+		This used to scrape every digit out of the string: ``4.0`` became segment 40,
+		and the polymerase names inverted - ``PB2`` (segment 1) became ``2`` and ``PB1``
+		(segment 2) became ``1``. Missing still maps to ``""`` for this call site.
+		"""
+		normalised = segment_utils.normalise_segment(value)
+		if normalised is None or normalised.casefold() in segment_utils.PANDAS_NULL_TOKENS:
 			return ""
-		text = str(value).strip()
-		if not text or text.lower() == "nan":
-			return ""
-		digits = ''.join(ch for ch in text if ch.isdigit())
-		if digits:
-			return str(int(digits))
-		return text
+		return normalised
 
 	@staticmethod
 	def _read_tree_file(tree_path):
@@ -155,8 +157,17 @@ class CreateSqliteDB:
 			raise FileNotFoundError(f"{label} file not found: {path}")
 
 	@staticmethod
-	def _read_tsv_required(path, required_columns, label, dtype=None):
-		df = pd.read_csv(path, sep="\t", dtype=dtype)
+	def _read_tsv_required(path, required_columns, label, dtype=None, keep_na_strings=False):
+		"""Read a TSV, optionally keeping NA-like strings as literal text.
+
+		`keep_na_strings` is opt-in per call site rather than global on purpose.
+		Some columns use 'NA' as a deliberate "not applicable" encoding - a real
+		HCV matrix carries 274k host_validated='NA' cells that are meant to reach
+		SQL as NULL - while others use it as a real name. Influenza's neuraminidase
+		gene and segment are both literally called "NA", so for those inputs the
+		default sentinel handling erases the value.
+		"""
+		df = pd.read_csv(path, sep="\t", dtype=dtype, keep_default_na=not keep_na_strings)
 		missing = [c for c in required_columns if c not in df.columns]
 		if missing:
 			raise ValueError(f"{label} is missing required columns: {', '.join(missing)}")
@@ -579,19 +590,115 @@ class CreateSqliteDB:
 				df[cluster_col] = "NA- see tree"
 			missing_cols = [c for c in existing_cols if c not in df.columns]
 		if missing_cols:
+			# External columns are now namespaced at the merge step, so a DB built
+			# before that change holds their old raw spellings. Without this hint the
+			# operator reads the bare list as "the export lost columns" rather than
+			# "the merge renamed them", and retries against a DB that _ensure_update_columns
+			# has already half-altered.
+			from merge_into_gB_matrix import NormalizeAndMerge
+
+			incoming_slugs = {NormalizeAndMerge.slugify_column(c): c for c in df.columns}
+			renamed = {
+				old_name: incoming_slugs[NormalizeAndMerge.slugify_column(old_name)]
+				for old_name in missing_cols
+				if NormalizeAndMerge.slugify_column(old_name) in incoming_slugs
+				or any(NormalizeAndMerge.slugify_column(old_name) == s.split('_', 1)[-1]
+					   for s in incoming_slugs)
+			}
+			hint = ""
+			if renamed or any('_' in c for c in df.columns):
+				hint = (
+					" These look like external columns that are now namespaced at the merge "
+					"step (e.g. 'Lineage' is produced as '<source>_lineage'). A database built "
+					"before that change cannot be updated in place - rebuild it, or rename the "
+					"columns in the existing DB to match."
+				)
 			raise ValueError(
-				f"Incoming '{table}' dataframe is missing columns required by existing DB schema: {missing_cols}"
+				f"Incoming '{table}' dataframe is missing columns required by existing DB schema: {missing_cols}.{hint}"
 			)
 
 		return df[existing_cols]
 
+	@staticmethod
+	def _quote_identifier(name):
+		"""Quote a SQL identifier. Never interpolate a bare column name.
+
+		`ALTER TABLE t ADD COLUMN HA INSDC_Upload TEXT` does not fail - SQLite
+		parses `HA` as the name and `INSDC_Upload TEXT` as the type, silently
+		creating the wrong column. GISAID ships ten such headers.
+		"""
+		return '"' + str(name).replace('"', '""') + '"'
+
+	@staticmethod
+	def assert_no_case_insensitive_duplicates(columns, label):
+		"""Fail loudly, and by name, before SQLite fails cryptically.
+
+		SQLite column identifiers are case-insensitive while pandas labels are
+		case-sensitive, so a frame carrying both `segment` and `Segment` is legal
+		in pandas and illegal in SQLite. Left to sqlite the build dies with
+		`duplicate column name: Segment` and no indication of which two columns
+		or which input produced them.
+		"""
+		seen, collisions = {}, []
+		for position, col in enumerate(columns, start=1):
+			key = str(col).casefold()
+			if key in seen:
+				collisions.append(f"{seen[key][0]!r} (col {seen[key][1]}) vs {col!r} (col {position})")
+			else:
+				seen[key] = (col, position)
+		if collisions:
+			raise ValueError(
+				f"'{label}' has columns that differ only by case, which SQLite cannot "
+				f"represent: {'; '.join(collisions)}. Map or rename one of each pair - "
+				f"external columns should be namespaced at the merge step."
+			)
+
+	#: meta_data columns whose value may legitimately BE the string "NA".
+	#: Influenza segment 6 is neuraminidase, so `segment_name` is literally 'NA'
+	#: and `segment`/`segment_declared` can be too. Everywhere else in meta_data
+	#: 'NA' is a deliberate "not applicable" encoding that must reach SQL as NULL
+	#: - a real HCV matrix carries 274k such host_validated cells - which is why
+	#: this is a per-column exemption rather than a file-wide keep_default_na.
+	NA_IS_A_VALUE_COLUMNS = frozenset({
+		"segment", "segment_name", "segment_declared", "segment_validated",
+	})
+
+	def _read_meta_data_tsv(self):
+		"""Read meta_data losslessly, then restore null semantics per column.
+
+		Reading with pandas' defaults would erase every neuraminidase row's
+		`segment_name` - the exact bug this change set exists to fix, reintroduced
+		by the columns it adds.
+		"""
+		frame = self._read_tsv_required(
+			self.meta_data, ["primary_accession"], "meta_data",
+			dtype=str, keep_na_strings=True,
+		)
+		sentinels = {
+			"", "#N/A", "#N/A N/A", "#NA", "-1.#IND", "-1.#QNAN", "-NaN", "-nan",
+			"1.#IND", "1.#QNAN", "<NA>", "N/A", "NA", "NULL", "NaN", "None",
+			"n/a", "nan", "null",
+		}
+		for column in frame.columns:
+			if column in self.NA_IS_A_VALUE_COLUMNS:
+				# Blank still means missing even here; only the NA-like words stay.
+				frame[column] = frame[column].replace("", float("nan"))
+			else:
+				frame[column] = frame[column].replace(list(sentinels), float("nan"))
+		return frame
+
 	def _ensure_update_columns(self, conn, table, df):
 		if not self.update or not self._table_exists(conn, table):
 			return
-		existing_cols = self._table_columns(conn, table)
+		self.assert_no_case_insensitive_duplicates(df.columns, f"incoming {table}")
+		# Track additions as we go: reading the schema once and never updating it
+		# meant a repeated label issued the same ALTER twice, and the second raised.
+		existing = {str(c).casefold() for c in self._table_columns(conn, table)}
 		for col in df.columns:
-			if col not in existing_cols:
-				conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+			if str(col).casefold() in existing:
+				continue
+			conn.execute(f"ALTER TABLE {table} ADD COLUMN {self._quote_identifier(col)} TEXT")
+			existing.add(str(col).casefold())
 
 	def _resolve_key_cols_for_existing_schema(self, conn, table, key_cols, incoming_cols):
 		existing_cols = set(self._table_columns(conn, table))
@@ -724,6 +831,10 @@ class CreateSqliteDB:
 		if dropped_internal:
 			print(f"[CreateSqliteDB] Dropped {dropped_internal} duplicate incoming rows in '{table}' by key {key_cols}")
 
+		# Both write paths below go through SQLite's case-insensitive identifiers,
+		# so check once here rather than letting either fail opaquely.
+		self.assert_no_case_insensitive_duplicates(df.columns, f"incoming {table}")
+
 		if not self.update:
 			df.to_sql(table, conn, if_exists="replace", index=False)
 			return len(df)
@@ -738,7 +849,7 @@ class CreateSqliteDB:
 		if table in upsert_tables:
 			columns = list(df.columns)
 			placeholders = ", ".join(["?"] * len(columns))
-			sql_cols = ", ".join(columns)
+			sql_cols = ", ".join(self._quote_identifier(c) for c in columns)
 			upsert_sql = f"INSERT OR REPLACE INTO {table} ({sql_cols}) VALUES ({placeholders})"
 			
 			payload = [tuple(x) for x in df.values]
@@ -823,7 +934,7 @@ class CreateSqliteDB:
 		filtered_ids = self._load_filtered_ids()
 		filtered_details = self._load_filtered_details()
 
-		df_meta_data = self._read_tsv_required(self.meta_data, ["primary_accession"], "meta_data", dtype=str)
+		df_meta_data = self._read_meta_data_tsv()
 		if "segment" not in df_meta_data.columns:
 			df_meta_data["segment"] = ""
 
@@ -985,7 +1096,10 @@ class CreateSqliteDB:
 			df_aln = df_aln[[t in valid_pairs for t in zip(df_aln["primary_accession"], df_aln["segment"])]]
 
 		if self.gene_info is not None:
-			df_gene = self._read_tsv_required(self.gene_info, [], "gene_info")
+			# keep_na_strings: influenza's neuraminidase gene is named "NA". Without
+			# this the shipped IAV database stores it as ('Neuraminidase', None, '',
+			# 'whole_genome') - a gene with no name.
+			df_gene = self._read_tsv_required(self.gene_info, [], "gene_info", keep_na_strings=True)
 		else:
 			unique_products = []
 			if "product" in df_features.columns:

@@ -10,6 +10,7 @@ from io import StringIO
 
 import pandas as pd
 from Bio import Phylo, SeqIO
+import segment_utils
 
 
 class UsherPlacement:
@@ -46,13 +47,16 @@ class UsherPlacement:
 
 	@staticmethod
 	def _normalize_segment(value):
-		if value is None:
+		"""Delegates to :mod:`segment_utils` - the single normalisation authority.
+
+		This used to scrape every digit out of the string: ``4.0`` became segment 40,
+		and the polymerase names inverted - ``PB2`` (segment 1) became ``2`` and ``PB1``
+		(segment 2) became ``1``. Missing still maps to ``"0"`` for this call site.
+		"""
+		normalised = segment_utils.normalise_segment(value)
+		if normalised is None or normalised.casefold() in segment_utils.PANDAS_NULL_TOKENS:
 			return "0"
-		s = str(value).strip()
-		if not s:
-			return "0"
-		digits = ''.join(ch for ch in s if ch.isdigit())
-		return digits if digits else s
+		return normalised
 
 	@staticmethod
 	def _find_first(path_root, pattern_suffix=None, exact_name=None):

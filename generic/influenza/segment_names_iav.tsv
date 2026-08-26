@@ -1,0 +1,9 @@
+segment	segment_name	aliases
+1	PB2	PB2,polymerase basic 2,polymerase basic protein 2
+2	PB1	PB1,PB1-F2,polymerase basic 1,polymerase basic protein 1
+3	PA	PA,PA-X,polymerase acidic,polymerase acidic protein
+4	HA	HA,haemagglutinin,hemagglutinin
+5	NP	NP,nucleoprotein
+6	NA	NA,neuraminidase
+7	MP	MP,M,MA,M1,M2,matrix,matrix protein
+8	NS	NS,NS1,NS2,NEP,non-structural,nonstructural
