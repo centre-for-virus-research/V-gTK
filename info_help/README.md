@@ -17,6 +17,7 @@ measured against.
 | [`hcv_mutation_annotation.md`](hcv_mutation_annotation.md) | How HCV resistance calls are made: the genotype scope rule, the wild-type suppression rule, why the reference used to be annotated against itself, and what the change measures out to. **Start here.** |
 | [`mutation_catalog_columns.md`](mutation_catalog_columns.md) | The mutation catalogue column contract. What is required, what is optional, and what a non-HCV virus needs to supply (answer: nothing new). |
 | [`genotype_provenance.md`](genotype_provenance.md) | Where a stored genotype or subtype came from — the `genotype_origin` vocabulary, its precedence, and why curation outranks inference. |
+| [`guide_alignment_and_insertions.md`](guide_alignment_and_insertions.md) | What happens to a region present in a sub-reference but absent from the master, why insertions are lost without a guide alignment, and how to supply one for a segmented or non-segmented virus. |
 | [`cli_reference.md`](cli_reference.md) | Every command-line option on the scripts in this path, what each does, and how to turn each behaviour off. |
 
 ---

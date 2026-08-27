@@ -322,7 +322,10 @@ def run_mmseqs_clustering(input_fasta, output_dir, min_seq_id, threads=8, strip_
         cluster_cmd += ["--max-seqs", str(max_seqs)]
 
     try:
-        createdb_cmd = ["mmseqs", "createdb", cluster_source, db_path, "--threads", str(threads)]
+        # No --threads: createdb is IO-bound and mmseqs <= v14 rejects the flag
+        # outright ("Unrecognized parameter"), so passing it breaks the run on any
+        # host where an older mmseqs is first on PATH.
+        createdb_cmd = ["mmseqs", "createdb", cluster_source, db_path]
         if (strip_gaps or two_step) and sort_by_quality:
             # createdb shuffles by default (--shuffle 1), which would discard the
             # informative-length ordering established above.
