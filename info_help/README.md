@@ -18,6 +18,8 @@ measured against.
 | [`mutation_catalog_columns.md`](mutation_catalog_columns.md) | The mutation catalogue column contract. What is required, what is optional, and what a non-HCV virus needs to supply (answer: nothing new). |
 | [`genotype_provenance.md`](genotype_provenance.md) | Where a stored genotype or subtype came from — the `genotype_origin` vocabulary, its precedence, and why curation outranks inference. |
 | [`guide_alignment_and_insertions.md`](guide_alignment_and_insertions.md) | What happens to a region present in a sub-reference but absent from the master, why insertions are lost without a guide alignment, and how to supply one for a segmented or non-segmented virus. |
+| [`hcv_tree_validation_ictv.md`](hcv_tree_validation_ictv.md) | Validation of the pipeline's HCV trees against the ICTV reference set: genotype and subtype monophyly, backbone agreement and where support runs out, and two metadata subtype errors the tree catches. |
+| [`reference_recombination_screening.md`](reference_recombination_screening.md) | Screening the curated reference set for recombination with UShER/RIPPLES: why only the reference set is tractable, the 16-thread ceiling, chunking, and what gets stored. |
 | [`cli_reference.md`](cli_reference.md) | Every command-line option on the scripts in this path, what each does, and how to turn each behaviour off. |
 
 ---
