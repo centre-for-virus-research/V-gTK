@@ -323,10 +323,16 @@ process TEST_INPUT_DB_VALIDATION {
         EXTRA_ARGS="--expect-segment-trees"
     fi
 
+    # Only claim test mode when it really is a test run. --test-mode relaxes
+    # several checks (segment tree coverage, strict consistency failures), so
+    # passing it unconditionally made production validation weaker than test.
+    if [ "!{params.test}" = "1" ]; then
+        EXTRA_ARGS="${EXTRA_ARGS} --test-mode"
+    fi
+
     python !{scripts_dir}/ValidateDbTree.py \
         --db !{sqlite_db} \
         --outdir . \
-        --test-mode \
         ${EXTRA_ARGS}
 
     mv db_tree_validation.txt input_db_tree_validation.txt
@@ -638,9 +644,25 @@ process DEDUP_ALIGNMENT{
 }
 
 process TEST_SUBSAMPLE_CLUSTER_INPUT {
+    // Test-mode only: keep the clustering input small so CI is fast.
+    //
+    // params.test_max_cluster_seqs is a cap on QUERIES, not on the total. Every
+    // reference (and the master) is kept unconditionally, because references are
+    // the backbone of everything downstream: MMseqs clusters, the IQ-TREE
+    // topology, UShER placement and the genotype calls that hang off them. So
+    // the cluster input is (all references) + (up to N queries), and on most
+    // profiles the reference set is larger than N - that is expected, not a
+    // problem to warn about.
+    //
+    // A plain `seqkit sample` over the whole file does not know any of this: on
+    // the HCV test profile it dropped 153 of 237 references, which then
+    // legitimately failed DB validation. Losing a reference is a hard error
+    // here, checked as a post-condition, because a Nextflow warning would never
+    // be seen by anyone.
     publishDir "${params.publish_dir}" , mode: 'copy'
     input:
         path dedup_msa
+        path ref_list
     output:
         path "${dedup_msa.baseName}_cluster_input.fasta", emit: dedup_for_cluster
     shell:
@@ -649,17 +671,50 @@ process TEST_SUBSAMPLE_CLUSTER_INPUT {
         OUT_FILE="!{dedup_msa.baseName}_cluster_input.fasta"
         TOTAL_SEQS=$(seqkit seq -n "!{dedup_msa}" | wc -l)
 
-        if [ -n "$MAX_SEQS" ] && [ "$MAX_SEQS" != "null" ] && [ "$MAX_SEQS" -gt 0 ] 2>/dev/null; then
-            if [ "$TOTAL_SEQS" -le "$MAX_SEQS" ]; then
-                echo "[test-mode] Input has ${TOTAL_SEQS} sequences (<= ${MAX_SEQS}); keeping all sequences for clustering"
-                cp "!{dedup_msa}" "$OUT_FILE"
-            else
-                echo "[test-mode] Subsampling !{dedup_msa} from ${TOTAL_SEQS} to ${MAX_SEQS} sequences using deterministic random sampling (seed=42)"
-                seqkit sample -n "$MAX_SEQS" -s 42 "!{dedup_msa}" -o "$OUT_FILE"
-            fi
-        else
+        if [ -z "$MAX_SEQS" ] || [ "$MAX_SEQS" = "null" ] || ! [ "$MAX_SEQS" -gt 0 ] 2>/dev/null; then
+            echo "[test-mode] No test_max_cluster_seqs set; keeping all ${TOTAL_SEQS} sequences"
             cp "!{dedup_msa}" "$OUT_FILE"
+            exit 0
         fi
+
+        # Column 1 of the ref list is the accession. Keep only ids that are
+        # actually present in this alignment (segmented runs split by segment).
+        cut -f1 "!{ref_list}" | sed '/^$/d' | sort -u > ref_ids_all.txt
+        seqkit seq -n -i "!{dedup_msa}" | sort -u > msa_ids.txt
+        comm -12 ref_ids_all.txt msa_ids.txt > ref_ids.txt
+        comm -23 msa_ids.txt ref_ids.txt > query_ids.txt
+        N_REF=$(wc -l < ref_ids.txt)
+        N_QUERY=$(wc -l < query_ids.txt)
+
+        echo "[test-mode] ${N_REF} references (always kept) + ${N_QUERY} queries; query cap ${MAX_SEQS}"
+
+        if [ "$N_QUERY" -le "$MAX_SEQS" ]; then
+            echo "[test-mode] ${N_QUERY} queries (<= ${MAX_SEQS}); keeping all ${TOTAL_SEQS} sequences"
+            cp "!{dedup_msa}" "$OUT_FILE"
+        else
+            echo "[test-mode] Keeping all ${N_REF} references; subsampling ${N_QUERY} queries to ${MAX_SEQS} (seed=42)"
+            seqkit grep -n -f query_ids.txt "!{dedup_msa}" -o queries_all.fasta
+            seqkit sample -n "$MAX_SEQS" -s 42 queries_all.fasta -o queries_kept.fasta
+            seqkit grep -n -f ref_ids.txt "!{dedup_msa}" -o refs_kept.fasta
+            cat refs_kept.fasta queries_kept.fasta > "$OUT_FILE"
+        fi
+
+        KEPT=$(seqkit seq -n "$OUT_FILE" | wc -l)
+
+        # Post-condition, enforced rather than warned about: every reference that
+        # was in the alignment must be in the cluster input. A dropped reference
+        # silently corrupts clustering, tree topology and every genotype call
+        # downstream, and a Nextflow warning would never be seen. Fail instead.
+        seqkit seq -n -i "$OUT_FILE" | sort -u > kept_ids.txt
+        LOST=$(comm -23 ref_ids.txt kept_ids.txt | head -20)
+        if [ -n "$LOST" ]; then
+            N_LOST=$(comm -23 ref_ids.txt kept_ids.txt | wc -l)
+            echo "ERROR: test-mode subsampling dropped ${N_LOST} reference(s) from the cluster input." >&2
+            echo "First few: ${LOST}" >&2
+            exit 1
+        fi
+
+        echo "[test-mode] cluster input: ${KEPT} sequences (all ${N_REF} references retained)"
     '''
 }
 
@@ -1194,11 +1249,16 @@ process TEST_DB_VALIDATION {
         EXTRA_ARGS="${EXTRA_ARGS} --segment-tree-source iqtree"
     fi
 
+    # Only claim test mode when it really is a test run - see the note on the
+    # other ValidateDbTree call site.
+    if [ "!{params.test}" = "1" ]; then
+        EXTRA_ARGS="${EXTRA_ARGS} --test-mode"
+    fi
+
     # Merged DB validation: table consistency + tree/update integrity checks
     python !{scripts_dir}/ValidateDbTree.py \
         --db !{sqlite_db} \
         --outdir . \
-        --test-mode \
         ${EXTRA_ARGS}
     '''
 }
@@ -1484,7 +1544,7 @@ workflow {
 
     // Keep clustered input small in test mode to speed up CI and avoid long MMseqs runs
     if( params.test == "1" ){
-        TEST_SUBSAMPLE_CLUSTER_INPUT(DEDUP_ALIGNMENT.out.dedup_msa)
+        TEST_SUBSAMPLE_CLUSTER_INPUT(DEDUP_ALIGNMENT.out.dedup_msa, file(params.ref_list))
         cluster_input_ch = TEST_SUBSAMPLE_CLUSTER_INPUT.out.dedup_for_cluster
     } else {
         cluster_input_ch = DEDUP_ALIGNMENT.out.dedup_msa

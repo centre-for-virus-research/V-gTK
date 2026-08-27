@@ -1952,11 +1952,54 @@ def main(argv=None):
         missing_in_sequences = sorted(expected_meta_set - seq_set)
         missing_in_meta = sorted(tree_terminals - meta_set) if tree_available else []
 
-        cluster_col = find_cluster_column(meta_columns)
-        centroid_set = set()
-        centroid_set_by_segment = {}
+        # Collected before anything else that needs it: the reference/master set
+        # is required whether or not the database has a cluster column.
         reference_master_set = set()
         reference_master_set_by_segment = {}
+        if "accession_type" in meta_columns:
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT {args.accession_column}, segment, accession_type FROM meta_data")
+            for acc, seg, accession_type in cursor.fetchall():
+                if not acc:
+                    continue
+                accession_text = str(acc).strip()
+                if not accession_text:
+                    continue
+                accession_type_text = str(accession_type).strip().lower() if accession_type is not None else ""
+                if accession_type_text not in {"reference", "master"}:
+                    continue
+                reference_master_set.add(accession_text)
+                seg_str = str(seg).strip() if seg is not None and str(seg).strip() else None
+                if seg_str:
+                    reference_master_set_by_segment.setdefault(seg_str, set()).add(accession_text)
+
+        # Every reference and the master must appear in a tree. They are the
+        # backbone - cluster seeds, tree topology, and the anchors genotype calls
+        # are made against - so one going missing is a defect, never a sampling
+        # artefact. Checked against the union of ALL trees regardless of source,
+        # since a reference may sit in one segment's tree and not another's.
+        #
+        # This is the check that catches a test-mode subsample dropping
+        # references. Measured across the reference databases: HCV_full 238/238,
+        # rabv_update 28/28, IAV 396/396 all satisfy it.
+        references_missing_from_tree = []
+        if tree_available and reference_master_set:
+            all_source_terminals = set()
+            for tr in fetch_trees(conn):
+                try:
+                    parsed = Phylo.read(StringIO(tr["newick"]), "newick")
+                except Exception:
+                    continue
+                all_source_terminals.update(
+                    tip.name for tip in parsed.get_terminals() if tip.name
+                )
+            references_missing_from_tree = sorted(reference_master_set - all_source_terminals)
+
+        cluster_col = find_cluster_column(meta_columns)
+        cluster_rows = []
+        unclustered_accessions = set()
+        centroid_set = set()
+        centroid_set_by_segment = {}
         missing_centroids_in_tree = []
         extra_in_tree = []
         if cluster_col:
@@ -1968,21 +2011,6 @@ def main(argv=None):
                 for _, cluster_val in cluster_rows
                 if not is_cluster_placeholder(cluster_val)
             }
-            if "accession_type" in meta_columns:
-                cursor.execute(f"SELECT {args.accession_column}, segment, accession_type FROM meta_data")
-                for acc, seg, accession_type in cursor.fetchall():
-                    if not acc:
-                        continue
-                    accession_text = str(acc).strip()
-                    if not accession_text:
-                        continue
-                    accession_type_text = str(accession_type).strip().lower() if accession_type is not None else ""
-                    if accession_type_text not in {"reference", "master"}:
-                        continue
-                    reference_master_set.add(accession_text)
-                    seg_str = str(seg).strip() if seg is not None and str(seg).strip() else None
-                    if seg_str:
-                        reference_master_set_by_segment.setdefault(seg_str, set()).add(accession_text)
             if args.segment_tree_source == "iqtree" and "segment" in meta_columns:
                 cursor.execute(f"SELECT {args.accession_column}, segment, {cluster_col} FROM meta_data")
                 for acc, seg, cluster_val in cursor.fetchall():
@@ -1996,7 +2024,30 @@ def main(argv=None):
                 missing_centroids_in_tree = sorted(centroid_set - tree_terminals)
                 extra_in_tree = sorted(t for t in (tree_terminals - centroid_set) if t not in reference_master_set)
 
-        missing_in_tree = sorted(expected_meta_set - tree_terminals) if tree_available else []
+        if cluster_col:
+            # An accession with no cluster assignment was never offered to the
+            # clustering step, so it cannot appear in a tree built from cluster
+            # output. Requiring it there is not a weaker check - it is the only
+            # correct one.
+            #
+            # This is not hypothetical. In test mode TEST_SUBSAMPLE_CLUSTER_INPUT
+            # caps the clustering input at params.test_max_cluster_seqs (120 for
+            # the HCV_OM_test profile); everything past the cap is never
+            # clustered, never placed, and can never reach the tree. Measured on
+            # both a test DB and a 274,606-sequence production DB, every single
+            # accession absent from the UShER tree was unclustered, and no
+            # clustered accession was ever missing from it.
+            unclustered_accessions = {
+                str(acc).strip()
+                for acc, cluster_val in cluster_rows
+                if acc and str(acc).strip() and is_cluster_placeholder(cluster_val)
+            }
+
+        missing_in_tree = (
+            sorted(expected_meta_set - tree_terminals - unclustered_accessions)
+            if tree_available
+            else []
+        )
 
         consistency_results = {
             "sequence_alignment vs meta_data": validate_sequence_alignment_vs_meta(
@@ -2195,7 +2246,20 @@ def main(argv=None):
                 for line in iqtree_segment_report_lines:
                     report.write(line + "\n")
             else:
-                report.write(f"Missing in tree (meta_data -> tree): {len(missing_in_tree)}\n")
+                report.write(
+                    f"References/master missing from every tree: "
+                    f"{len(references_missing_from_tree)}\n"
+                )
+                if references_missing_from_tree:
+                    report.write("\nReferences missing from every tree (first 50):\n")
+                    report.write("\n".join(references_missing_from_tree[:50]) + "\n")
+                report.write(
+                    f"Unclustered accessions (never offered to clustering, so not "
+                    f"eligible for the tree): {len(unclustered_accessions)}\n"
+                )
+                report.write(
+                    f"Missing in tree (clustered meta_data -> tree): {len(missing_in_tree)}\n"
+                )
                 report.write(f"Missing in sequences (meta_data -> sequences): {len(missing_in_sequences)}\n")
                 report.write(f"Missing in meta_data (tree -> meta_data): {len(missing_in_meta)}\n")
 
@@ -2417,7 +2481,15 @@ def main(argv=None):
                 print(f"[info] Cluster column: {cluster_col}, Centroid count: {len(centroid_set)}")
                 print(f"[info] Missing centroids in tree: {len(missing_centroids_in_tree)}")
                 print(f"[info] {extra_tree_label}: {len(extra_in_tree)}")
-                print(f"[info] Missing in tree: {len(missing_in_tree)}")
+                print(f"[info] References/master missing from every tree: "
+                      f"{len(references_missing_from_tree)}")
+                if references_missing_from_tree:
+                    print(f"[info] References missing (first 10): "
+                          f"{', '.join(references_missing_from_tree[:10])}")
+                print(f"[info] Unclustered accessions (not eligible for the tree): "
+                      f"{len(unclustered_accessions)}")
+                print(f"[info] Missing in tree: {len(missing_in_tree)} "
+                      f"(clustered accessions only; unclustered ones are excluded by construction)")
                 print(f"[info] Missing in sequences: {len(missing_in_sequences)}")
                 print(f"[info] Missing in meta_data: {len(missing_in_meta)}")
                 if missing_in_tree:
@@ -2515,6 +2587,17 @@ def main(argv=None):
 
         if not tree_available:
             return
+
+        if references_missing_from_tree:
+            # References are the backbone - cluster seeds, tree topology, and the
+            # anchors genotype calls are made against. A missing one is never
+            # acceptable, in test mode or otherwise. Checked on every path, not
+            # just the segment-tree branch.
+            validation_fail(
+                f"Validation failed: {len(references_missing_from_tree)} reference/master "
+                f"accessions are absent from every tree "
+                f"(first 10: {', '.join(references_missing_from_tree[:10])})"
+            )
 
         if tree_source == args.segment_tree_source:
             if segmented_validation_ok:
