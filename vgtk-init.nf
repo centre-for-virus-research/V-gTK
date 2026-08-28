@@ -103,7 +103,8 @@ def scriptDefinedParams = [
     "gisaid_dir", "previous_db", "conda_path", "test_max_cluster_seqs", "max_threads", "iqtree_mem", "ref_set_aligned",
     "min_seq_length_ratio", "max_aln_gap_proportion", "tree_free", "base_tree_only",
     "pivot_isolate_key", "pivot_required_segments", "segment_names", "root_outgroup",
-    "mmseqs_two_step", "mmseqs_min_completeness", "iqtree_model"
+    "mmseqs_two_step", "mmseqs_min_completeness", "iqtree_model",
+    "fetch_batch_size"
     // Add all parameter names defined above
 ]
 
@@ -360,7 +361,7 @@ process FETCH_GENBANK{
         extra="${extra} --update !{params.update_db}"
     fi
 
-    python !{scripts_dir}/GenBankFetcher.py --taxid !{TAX_ID} -b 50 \
+    python !{scripts_dir}/GenBankFetcher.py --taxid !{TAX_ID} -b !{params.fetch_batch_size} \
              ${extra} -e !{params.email} -o . 
     #--update tmp/GenBank-matrix/gB_matrix_raw.tsv is gonna be problematic for this!
     #what's update doing with a tmp dir?
