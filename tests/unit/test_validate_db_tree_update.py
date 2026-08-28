@@ -775,7 +775,9 @@ def test_validate_db_tree_update_integrity_ignores_placeholder_cluster_assignmen
     report = (outdir / "db_tree_validation.txt").read_text(encoding="utf-8")
     assert "Missing centroids in tree: 0" in report
     assert "Non-centroid UShER leaves: 1" in report
-    assert "Missing in tree (meta_data -> tree): 0" in report
+    # Wording changed when the check was narrowed to clustered accessions:
+    # an unclustered accession can never appear in a cluster-derived tree.
+    assert "Missing in tree (clustered meta_data -> tree): 0" in report
 
 
 def test_validate_db_tree_update_integrity_fails_when_latest_batch_is_noop(tmp_path: Path, basic_update_db: Path):

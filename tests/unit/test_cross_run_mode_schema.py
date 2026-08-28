@@ -16,6 +16,7 @@ reference databases are absent (CI does not build them), so they are a guard for
 local work rather than a CI gate.
 """
 
+import re
 import sqlite3
 from pathlib import Path
 
@@ -34,9 +35,14 @@ RUN_MODE_DBS = {
 
 #: Columns every run mode must produce. Measured across all four reference DBs.
 #: A column dropping out of this set means some run mode stopped writing it.
+#:
+#: The MMseqs cluster column is deliberately NOT listed: its name encodes the
+#: profile's clustering identity (mmseqs_min_seq_id 0.95 -> cluster_95pct,
+#: 0.98 -> cluster_98pct), so it is not a fixed name. That every run mode has
+#: exactly one such column is asserted separately, by pattern.
 UNIVERSAL_META_COLUMNS = frozenset({
     "a", "c", "g", "n", "t",  # ATGCN composition counts
-    "accession_type", "accession_version", "authors", "cds_info", "cluster_98pct",
+    "accession_type", "accession_version", "authors", "cds_info",
     "collection_date", "collection_date_validated", "collection_day",
     "collection_mon", "collection_year", "comment", "country", "country_validated",
     "create_date", "data_source", "db_xref", "definition", "division",
@@ -49,12 +55,28 @@ UNIVERSAL_META_COLUMNS = frozenset({
     "taxonomy", "title", "topology", "update_date",
 })
 
+#: Columns produced by newer code that the older reference builds predate.
+#: They are permitted anywhere but required nowhere, so a stale reference DB
+#: does not fail the contract while a fresh one still declares them. Once every
+#: reference DB has been rebuilt these belong in UNIVERSAL_META_COLUMNS.
+#: Measured: present and fully populated (338/338) in the HCV build; absent from
+#: the rabv and IAV builds, which predate the genotype-provenance work.
+RECENTLY_ADDED_META_COLUMNS = frozenset({
+    "genotype_origin", "subtype_origin",
+})
+
 #: Columns only a segmented (influenza) build produces, because the processes
 #: that write them - VALIDATE_SEGMENT and VALIDATE_STRAIN - are gated on
 #: is_segmented / is_flu in vgtk-init.nf.
 SEGMENTED_ONLY_META_COLUMNS = frozenset({
     "Parsed_strain", "closest_reference", "exclusion", "segment_validated",
     "serotype_validated",
+    # The segment_utils namespacing: `segment` is the numeric segment, while
+    # `segment_name` is the gene label ('NA' for neuraminidase - a real value,
+    # not a null) and `segment_source` records which stream supplied it. Only a
+    # segmented build writes them; measured 498/518 populated in the IAV build
+    # and absent from rabv and HCV.
+    "segment_name", "segment_source",
 })
 
 #: Tables only a mutation_catalog run produces (HCV).
@@ -123,6 +145,17 @@ class TestEveryRunModeHonoursTheContract:
         conn.close()
         assert not missing, f"{mode} lost universal meta_data columns: {sorted(missing)}"
 
+    def test_exactly_one_mmseqs_cluster_column(self, mode):
+        """The name varies with the profile's clustering identity, but every run
+        mode must produce exactly one - two would mean a stale column survived a
+        threshold change, and none would mean clustering did not run."""
+        conn = _connect(_require(RUN_MODE_DBS[mode]))
+        cluster_cols = sorted(
+            c for c in _columns(conn, "meta_data") if re.fullmatch(r"cluster_\d+pct", c))
+        conn.close()
+        assert len(cluster_cols) == 1, (
+            f"{mode} has cluster columns {cluster_cols}; expected exactly one")
+
     def test_no_unexpected_extra_meta_columns(self, mode):
         """New columns are fine, but they must be declared here deliberately.
 
@@ -133,7 +166,12 @@ class TestEveryRunModeHonoursTheContract:
         cols = _columns(conn, "meta_data")
         conn.close()
         known = UNIVERSAL_META_COLUMNS | SEGMENTED_ONLY_META_COLUMNS
-        unexpected = {c for c in cols - known if not c.startswith("gisaid_")}
+        # cluster_<N>pct is named from the profile's clustering identity, so it
+        # is matched by pattern rather than declared by name.
+        unexpected = {
+            c for c in cols - known - RECENTLY_ADDED_META_COLUMNS
+            if not c.startswith("gisaid_") and not re.fullmatch(r"cluster_\d+pct", c)
+        }
         assert not unexpected, (
             f"{mode} has undeclared meta_data columns {sorted(unexpected)}. "
             f"If deliberate, add them to the contract in this module."
@@ -263,6 +301,10 @@ class TestNoColumnIsWhollyEmpty:
         "host_taxa_id", "host_scientific_name", "host_validated",
         "country_validated", "isolate", "strain", "journal", "title",
         "pubmed_id", "authors", "reference_number", "position",
+        # Only populated when something was actually excluded: 0/338 in the HCV
+        # build and 0/78 in rabv_tree_free, 1/228 in rabv_update, 22/518 in IAV.
+        # An empty column here means "nothing was excluded", not a broken write.
+        "exclusion_criteria",
     })
 
     @pytest.mark.parametrize("mode", sorted(RUN_MODE_DBS))

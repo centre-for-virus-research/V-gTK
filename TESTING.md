@@ -60,6 +60,44 @@ The pipeline includes automated validation tests that run when `--test 1` is set
 
 **Output**: `test_non_segmented_results.txt` in the publish directory
 
+## What test mode changes
+
+`--test 1` does not just run extra checks. It substitutes the cheapest available
+version of several steps, so **a test run's outputs are not comparable to a
+production build**. Every substitution is gated on `params.test` and is off by
+default.
+
+| step | production | test mode | measured effect |
+|---|---|---|---|
+| clustering input | everything | all references + up to `test_max_cluster_seqs` queries | see below |
+| MMseqs clustering | `mmseqs cluster` (sensitive) | `mmseqs linclust` (linear time, less sensitive) | 29.3s → 3.4s on the HCV input; identical 276 representatives there, but that is not guaranteed |
+| IQ-TREE | full ML search | `--fast` ("search to resemble FastTree") | ~13 min → 14s on 277 HCV representatives, at a slightly worse likelihood |
+| DB validation | strict | `--test-mode` relaxations | segment-tree coverage and strict consistency failures are downgraded |
+
+**`test_max_cluster_seqs` caps QUERIES, not the total.** Every reference and the
+master is kept unconditionally, because references seed the clusters, define the
+tree topology, anchor UShER placement, and are what genotype calls are made
+against. A plain `seqkit sample` over the whole alignment does not know that: it
+used to drop 153 of 237 references on the HCV profile, producing a database whose
+UShER tree held 85 of 238 references. `TEST_SUBSAMPLE_CLUSTER_INPUT` now fails
+outright if any reference is missing from its own output rather than warning,
+because nobody reads Nextflow warnings.
+
+Consequences worth knowing:
+
+- On most profiles the reference set is **larger** than the cap
+  (`segmented_test` 418 vs 40, `HCV_test` 238 vs 120). That is expected, not a
+  problem - the cap only ever bounded the query half.
+- Keeping all references made the HCV test cluster into 277 representatives
+  instead of 106, because HCV references span genotypes 1-8 at roughly 30%
+  divergence so nearly every one is its own cluster. `--fast` and `linclust`
+  are what keep the run quick despite that.
+- `--test-mode` is passed to `ValidateDbTree` **only** when `params.test` is 1.
+  It used to be hardcoded at both call sites, which made production validation
+  weaker than test validation.
+
+Never read a topology, a clustering, or a likelihood off a test run.
+
 ## Running Tests
 
 ## Integration fixture test: H10N8 (taxid 286285)

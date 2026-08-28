@@ -679,7 +679,14 @@ process TEST_SUBSAMPLE_CLUSTER_INPUT {
 
         # Column 1 of the ref list is the accession. Keep only ids that are
         # actually present in this alignment (segmented runs split by segment).
-        cut -f1 "!{ref_list}" | sed '/^$/d' | sort -u > ref_ids_all.txt
+        # Strip carriage returns: several ref lists are CRLF
+        # (generic/rabv/ref_list_clades.txt, test_data/rabv_test_ref_list.txt).
+        # A trailing CR on the accession matches nothing, so every reference
+        # would look like a query and be subsampled away. NOTE the doubled
+        # backslash: this shell block is a Groovy triple-quoted string, so a
+        # single backslash is consumed as an escape and a real CR would end up
+        # in the generated script. (Do not write a triple quote in here either.)
+        cut -f1 "!{ref_list}" | tr -d '\\r' | sed '/^$/d' | sort -u > ref_ids_all.txt
         seqkit seq -n -i "!{dedup_msa}" | sort -u > msa_ids.txt
         comm -12 ref_ids_all.txt msa_ids.txt > ref_ids.txt
         comm -23 msa_ids.txt ref_ids.txt > query_ids.txt
@@ -693,9 +700,13 @@ process TEST_SUBSAMPLE_CLUSTER_INPUT {
             cp "!{dedup_msa}" "$OUT_FILE"
         else
             echo "[test-mode] Keeping all ${N_REF} references; subsampling ${N_QUERY} queries to ${MAX_SEQS} (seed=42)"
-            seqkit grep -n -f query_ids.txt "!{dedup_msa}" -o queries_all.fasta
+            # `seqkit grep` WITHOUT -n matches by sequence ID, which is what
+            # `seqkit seq -n -i` produced above. With -n it matches the FULL
+            # header, so any record carrying a description would not match its
+            # own id and would be dropped - references included.
+            seqkit grep -f query_ids.txt "!{dedup_msa}" -o queries_all.fasta
             seqkit sample -n "$MAX_SEQS" -s 42 queries_all.fasta -o queries_kept.fasta
-            seqkit grep -n -f ref_ids.txt "!{dedup_msa}" -o refs_kept.fasta
+            seqkit grep -f ref_ids.txt "!{dedup_msa}" -o refs_kept.fasta
             cat refs_kept.fasta queries_kept.fasta > "$OUT_FILE"
         fi
 
@@ -746,7 +757,7 @@ process MMSEQS_CLUSTERING{
             -i mmseqs_input \
             -o MMseqClusters_!{padded_aln.baseName} \
             --min-seq-id !{params.mmseqs_min_seq_id} \
-            --threads !{task.cpus} ${TWO_STEP_ARGS}
+            --threads !{task.cpus} --test_mode !{params.test} ${TWO_STEP_ARGS}
     '''
 }
 
@@ -834,7 +845,17 @@ process IQ_TREE{
         fi
 
         mkdir -p IQTree_!{mmseq_cluster_dir.baseName}
-        "$IQTREE_BIN" -s "$CLUSTER_REP" -t "$GUIDE_TREE" -T !{task.cpus} -m !{params.iqtree_model} -pre IQTree_!{mmseq_cluster_dir.baseName}/iqtree -mem !{params.iqtree_mem}
+        # Test runs use IQ-TREE's --fast, which the manual describes as a "fast
+        # search to resemble FastTree". It skips most of the ML tree search, so
+        # the topology is rougher - fine for a smoke test that only needs a tree
+        # to exist and be self-consistent, never acceptable for a real build.
+        IQTREE_SPEED_ARGS=""
+        if [ "!{params.test}" = "1" ]; then
+            IQTREE_SPEED_ARGS="--fast"
+            echo "[test-mode] IQ-TREE: adding --fast (rough topology, much quicker)"
+        fi
+
+        "$IQTREE_BIN" -s "$CLUSTER_REP" -t "$GUIDE_TREE" -T !{task.cpus} -m !{params.iqtree_model} -pre IQTree_!{mmseq_cluster_dir.baseName}/iqtree -mem !{params.iqtree_mem} ${IQTREE_SPEED_ARGS}
     '''
 }
 

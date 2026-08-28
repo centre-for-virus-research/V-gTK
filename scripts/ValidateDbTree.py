@@ -1957,9 +1957,19 @@ def main(argv=None):
         reference_master_set = set()
         reference_master_set_by_segment = {}
         if "accession_type" in meta_columns:
+            # `segment` is optional: non-segmented databases have no such column,
+            # and selecting it unconditionally raises OperationalError. This ran
+            # inside the cluster-column branch before, which happened to hide the
+            # problem because those databases were never reached.
+            has_segment = "segment" in meta_columns
             cursor = conn.cursor()
-            cursor.execute(f"SELECT {args.accession_column}, segment, accession_type FROM meta_data")
-            for acc, seg, accession_type in cursor.fetchall():
+            select_cols = f"{args.accession_column}, accession_type"
+            if has_segment:
+                select_cols += ", segment"
+            cursor.execute(f"SELECT {select_cols} FROM meta_data")
+            for row in cursor.fetchall():
+                acc, accession_type = row[0], row[1]
+                seg = row[2] if has_segment else None
                 if not acc:
                     continue
                 accession_text = str(acc).strip()
@@ -1982,18 +1992,34 @@ def main(argv=None):
         # This is the check that catches a test-mode subsample dropping
         # references. Measured across the reference databases: HCV_full 238/238,
         # rabv_update 28/28, IAV 396/396 all satisfy it.
+        # Only the UShER tree is expected to hold every reference. UShER places
+        # every eligible sequence, so a reference absent from it was dropped
+        # upstream. IQ-TREE is built from MMseqs cluster representatives, so a
+        # non-centroid reference is legitimately absent from it - measured,
+        # rabv_update's IQ-TREE holds 13 of 28 references and HCV_full's holds
+        # 219 of 238, while their UShER trees hold 28/28 and 238/238. Applying
+        # this check to IQ-TREE would fail correct base_tree_only runs.
         references_missing_from_tree = []
+        usher_tree_present = False
         if tree_available and reference_master_set:
-            all_source_terminals = set()
-            for tr in fetch_trees(conn):
+            usher_terminals = set()
+            for tr in fetch_trees(conn, source="usher"):
                 try:
                     parsed = Phylo.read(StringIO(tr["newick"]), "newick")
                 except Exception:
                     continue
-                all_source_terminals.update(
+                usher_tree_present = True
+                usher_terminals.update(
                     tip.name for tip in parsed.get_terminals() if tip.name
                 )
-            references_missing_from_tree = sorted(reference_master_set - all_source_terminals)
+            if usher_tree_present:
+                # Excluded rows are context only - an update run carries
+                # reference/master rows marked exclusion_status=1 that are
+                # deliberately not placed. Requiring them in the tree would fail
+                # a correct update.
+                references_missing_from_tree = sorted(
+                    reference_master_set - usher_terminals - excluded_accessions
+                )
 
         cluster_col = find_cluster_column(meta_columns)
         cluster_rows = []
@@ -2247,11 +2273,11 @@ def main(argv=None):
                     report.write(line + "\n")
             else:
                 report.write(
-                    f"References/master missing from every tree: "
-                    f"{len(references_missing_from_tree)}\n"
+                    f"References/master missing from the UShER tree: "
+                    f"{len(references_missing_from_tree) if usher_tree_present else 'not checked (no UShER tree)'}\n"
                 )
                 if references_missing_from_tree:
-                    report.write("\nReferences missing from every tree (first 50):\n")
+                    report.write("\nReferences missing from the UShER tree (first 50):\n")
                     report.write("\n".join(references_missing_from_tree[:50]) + "\n")
                 report.write(
                     f"Unclustered accessions (never offered to clustering, so not "
@@ -2481,8 +2507,12 @@ def main(argv=None):
                 print(f"[info] Cluster column: {cluster_col}, Centroid count: {len(centroid_set)}")
                 print(f"[info] Missing centroids in tree: {len(missing_centroids_in_tree)}")
                 print(f"[info] {extra_tree_label}: {len(extra_in_tree)}")
-                print(f"[info] References/master missing from every tree: "
-                      f"{len(references_missing_from_tree)}")
+                if usher_tree_present:
+                    print(f"[info] References/master missing from the UShER tree: "
+                          f"{len(references_missing_from_tree)}")
+                else:
+                    print("[info] References/master vs tree: not checked "
+                          "(no UShER tree; IQ-TREE holds centroids, not every reference)")
                 if references_missing_from_tree:
                     print(f"[info] References missing (first 10): "
                           f"{', '.join(references_missing_from_tree[:10])}")
@@ -2595,7 +2625,7 @@ def main(argv=None):
             # just the segment-tree branch.
             validation_fail(
                 f"Validation failed: {len(references_missing_from_tree)} reference/master "
-                f"accessions are absent from every tree "
+                f"accessions are absent from the UShER tree "
                 f"(first 10: {', '.join(references_missing_from_tree[:10])})"
             )
 

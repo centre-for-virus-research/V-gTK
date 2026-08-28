@@ -74,6 +74,41 @@ class TestSubsampleProcess:
                              subsample_process), \
             "sampling the whole alignment is what dropped 153 references"
 
+    def test_reference_selection_matches_by_id_not_full_header(self, subsample_process):
+        """`seqkit grep -n` would match the full header and miss any record with
+        a description. The id list is produced by `seqkit seq -n -i`, so the
+        grep must match by id."""
+        for pattern in ("seqkit grep -f ref_ids.txt", "seqkit grep -f query_ids.txt"):
+            assert pattern in subsample_process, f"missing: {pattern}"
+        assert "seqkit grep -n -f ref_ids.txt" not in subsample_process
+        assert "seqkit grep -n -f query_ids.txt" not in subsample_process
+
+    def test_carriage_returns_are_stripped_from_the_reference_list(self, subsample_process):
+        """The backslash must be DOUBLED in the .nf source.
+
+        The shell block is a Groovy triple-quoted string, which processes
+        escape sequences: a single backslash-r there becomes a real carriage
+        return in the generated .command.sh, which breaks the line and fails
+        the process with exit 127. Asserting the doubled form is the only way
+        to catch that from a unit test."""
+        assert r"tr -d '\\r'" in subsample_process, (
+            "CRLF ref lists exist in the repo, so the CR must be stripped - "
+            "and the backslash must be doubled to survive Groovy escaping")
+
+    def test_the_shell_block_contains_no_stray_triple_quote(self, subsample_process):
+        """A triple quote inside the block ends the Groovy string early and
+        the whole pipeline fails to compile. Easy to introduce in a comment
+        that quotes shell syntax."""
+        marker = chr(39) * 3
+        body = subsample_process[subsample_process.index('shell:'):]
+        start = body.index(marker) + 3
+        rest = body[start:]
+        assert marker in rest, 'shell block should be terminated'
+        inner = rest[:rest.index(marker)]
+        assert marker not in inner, (
+            'a triple quote inside the shell block would end the Groovy '
+            'string early and break compilation')
+
     def test_a_dropped_reference_is_a_hard_failure_not_a_warning(self, subsample_process):
         """Nextflow warnings are invisible in practice, so this must exit 1."""
         assert "exit 1" in subsample_process
@@ -116,13 +151,13 @@ class TestTestModeIsToldTruthfully:
 
 @requires_seqkit
 class TestSubsamplingKeepsReferences:
-    def _run(self, tmp_path, n_refs, n_queries, cap):
+    def _run(self, tmp_path, n_refs, n_queries, cap, description=""):
         msa = tmp_path / "msa.fasta"
         refs = [f"REF{i}" for i in range(n_refs)]
         queries = [f"Q{i}" for i in range(n_queries)]
         with open(msa, "w") as fh:
             for name in refs + queries:
-                fh.write(f">{name}\nACGTACGTAC\n")
+                fh.write(f">{name}{description}\nACGTACGTAC\n")
         ref_list = tmp_path / "ref_list.txt"
         ref_list.write_text("".join(f"{r}\treference\t1\t1\tNA\n" for r in refs))
 
@@ -138,9 +173,9 @@ N_QUERY=$(wc -l < query_ids.txt)
 if [ "$N_QUERY" -le "$MAX_SEQS" ]; then
     cp msa.fasta out.fasta
 else
-    seqkit grep -n -f query_ids.txt msa.fasta -o queries_all.fasta
+    seqkit grep -f query_ids.txt msa.fasta -o queries_all.fasta
     seqkit sample -n "$MAX_SEQS" -s 42 queries_all.fasta -o queries_kept.fasta
-    seqkit grep -n -f ref_ids.txt msa.fasta -o refs_kept.fasta
+    seqkit grep -f ref_ids.txt msa.fasta -o refs_kept.fasta
     cat refs_kept.fasta queries_kept.fasta > out.fasta
 fi
 seqkit seq -n -i out.fasta | sort -u > kept_ids.txt
@@ -172,6 +207,40 @@ comm -23 ref_ids.txt kept_ids.txt > lost.txt
         refs, kept, lost = self._run(tmp_path, n_refs=10, n_queries=20, cap=120)
         assert lost == []
         assert len(kept) == 30
+
+    def test_descriptive_headers_do_not_lose_references(self, tmp_path):
+        """`seqkit grep -n` matches the FULL header, not the id. Since the id
+        list comes from `seqkit seq -n -i` (ids only), using -n would fail to
+        match any record carrying a description and drop it - references
+        included. Influenza headers routinely carry descriptions; HCV's do not,
+        which is why this was invisible on the HCV test."""
+        refs, kept, lost = self._run(
+            tmp_path, n_refs=20, n_queries=200, cap=50,
+            description=" Influenza A virus segment 4 (HA)")
+        assert lost == [], f"references lost with descriptive headers: {lost[:10]}"
+        assert len(refs & kept) == 20
+
+    def test_crlf_reference_list_does_not_lose_references(self, tmp_path):
+        """generic/rabv/ref_list_clades.txt and test_data/rabv_test_ref_list.txt
+        are CRLF. A trailing CR on the accession matches nothing, so every
+        reference would look like a query."""
+        msa = tmp_path / "msa.fasta"
+        refs = [f"REF{i}" for i in range(5)]
+        with open(msa, "w") as fh:
+            for name in refs + [f"Q{i}" for i in range(5)]:
+                fh.write(f">{name}\nACGTACGTAC\n")
+        (tmp_path / "ref_list.txt").write_text(
+            "".join(f"{r}\treference\r\n" for r in refs))
+        script = f'''
+set -e
+cd {tmp_path}
+cut -f1 ref_list.txt | tr -d '\r' | sed '/^$/d' | sort -u > ref_ids_all.txt
+seqkit seq -n -i msa.fasta | sort -u > msa_ids.txt
+comm -12 ref_ids_all.txt msa_ids.txt > ref_ids.txt
+'''
+        subprocess.run(["bash", "-c", script], check=True, capture_output=True)
+        matched = {l.strip() for l in (tmp_path / "ref_ids.txt").read_text().splitlines() if l.strip()}
+        assert matched == set(refs), f"CRLF broke reference matching: {matched}"
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +294,16 @@ class TestValidatorCatchesMissingReferences:
         text = VALIDATOR.read_text()
         assert "references_missing_from_tree" in text
         assert "reference/master" in text
-        assert "absent from every tree" in text
+        assert "absent from the UShER tree" in text
+
+    def test_the_check_applies_only_to_the_usher_tree(self):
+        """IQ-TREE is built from cluster representatives, so a non-centroid
+        reference is legitimately absent from it - measured, rabv_update's
+        IQ-TREE holds 13 of 28 references while its UShER tree holds 28/28.
+        Applying the check to IQ-TREE would fail correct base_tree_only runs."""
+        text = VALIDATOR.read_text()
+        assert 'fetch_trees(conn, source="usher")' in text
+        assert "usher_tree_present" in text
 
     def test_the_check_runs_before_the_branching(self):
         """It must apply on every path, not only the segment-tree branch."""

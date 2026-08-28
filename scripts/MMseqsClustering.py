@@ -258,7 +258,8 @@ def write_aligned_representatives(alignment_fasta, cluster_tsv, output_fasta):
 
 
 def run_mmseqs_clustering(input_fasta, output_dir, min_seq_id, threads=8, strip_gaps=True, max_seqs=None,
-                          sort_by_quality=True, two_step=False, min_completeness=0.9):
+                          sort_by_quality=True, two_step=False, min_completeness=0.9,
+                          fast=False):
     base_name = os.path.splitext(os.path.basename(input_fasta))[0]
     mmseqs_dir = os.path.join(output_dir, base_name)
     segments_db_dir = os.path.join(mmseqs_dir, "segments_DB")
@@ -309,17 +310,32 @@ def run_mmseqs_clustering(input_fasta, output_dir, min_seq_id, threads=8, strip_
         print(f"[info] Ordered {count} sequences by descending informative length so the "
               f"greedy clustering prefers complete sequences as representatives")
 
+    # `linclust` is MMseqs2's linear-time clustering: "Fast, less sensitive"
+    # against `cluster`'s "Slower, sensitive". It keeps every option this
+    # pipeline depends on (--cluster-mode, --cov-mode, --min-seq-id, --threads)
+    # and drops only the prefilter knobs (--max-seqs, -s), which a linear-time
+    # algorithm has no use for.
+    #
+    # It is used ONLY in test mode. Being less sensitive means it can leave a
+    # sequence in its own cluster where `cluster` would have merged it, so a
+    # test run may have more representatives than production would. That is
+    # acceptable for a smoke test and not acceptable for a real build.
+    subcommand = "linclust" if fast else "cluster"
     cluster_cmd = [
-        "mmseqs", "cluster",
+        "mmseqs", subcommand,
         "--min-seq-id", str(min_seq_id),
         db_path, cluster_path, tmp_dir,
         "--threads", str(threads), '--cov-mode', '2', '--cluster-mode', '2'
     ]
-    if max_seqs is not None:
+    if max_seqs is not None and not fast:
         # Prefilter candidates kept per query. The default can strand a sequence
         # as its own cluster when a large near-identical mass crowds its true
-        # neighbours out of the candidate list.
+        # neighbours out of the candidate list. linclust has no prefilter, so
+        # the flag is rejected there.
         cluster_cmd += ["--max-seqs", str(max_seqs)]
+    if fast:
+        print(f"[test-mode] using 'mmseqs linclust' (linear time, less sensitive) "
+              f"instead of 'mmseqs cluster'")
 
     try:
         # No --threads: createdb is IO-bound and mmseqs <= v14 rejects the flag
@@ -416,6 +432,9 @@ if __name__ == "__main__":
                              "By default the input is sorted longest-informative-first and createdb "
                              "--shuffle is disabled, so --cluster-mode 2 picks the most complete "
                              "sequence of each cluster as its representative rather than an N-padded one.")
+    parser.add_argument("--test_mode", default="0",
+                        help="'1' selects the fast, less sensitive path (mmseqs linclust). "
+                             "Test runs only - never use for a real build.")
     parser.add_argument("--max-seqs", type=int, default=None,
                         help="Prefilter candidates kept per query (MMseqs default). Raise it if a large "
                              "near-identical group appears to be crowding true neighbours out of the candidate list.")
@@ -436,7 +455,8 @@ if __name__ == "__main__":
                 run_mmseqs_clustering(trimmed_fasta, args.output_dir, args.min_seq_id, args.threads,
                                       strip_gaps=not args.keep_gaps, max_seqs=args.max_seqs,
                                       sort_by_quality=not args.no_quality_sort,
-                                      two_step=args.two_step, min_completeness=args.min_completeness)
+                                      two_step=args.two_step, min_completeness=args.min_completeness,
+                                      fast=str(args.test_mode).strip() == "1")
             print("All processing completed.")
             exit(0)
 
@@ -455,7 +475,8 @@ if __name__ == "__main__":
             run_mmseqs_clustering(input_fasta_path, args.output_dir, args.min_seq_id, args.threads,
                                   strip_gaps=not args.keep_gaps, max_seqs=args.max_seqs,
                                       sort_by_quality=not args.no_quality_sort,
-                                      two_step=args.two_step, min_completeness=args.min_completeness)
+                                      two_step=args.two_step, min_completeness=args.min_completeness,
+                                      fast=str(args.test_mode).strip() == "1")
 
     print("All processing completed.")
 
