@@ -10,6 +10,16 @@ import sys
 import argparse
 from pathlib import Path
 
+# Sibling import. This script is always invoked as `python scripts/CollectFilteredSequences.py`
+# (vgtk-init.nf:626) so scripts/ is sys.path[0], and tests/conftest.py puts it on
+# sys.path too. The explicit insert covers a caller that imports this module from
+# elsewhere without doing either.
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+import projectability
+
 
 def _normalize_accession(acc: str) -> str:
     if not acc:
@@ -24,11 +34,30 @@ def _validate_nextalign_dir(nextalign_dir: str) -> Path:
     return path
 
 
-def collect_unprojectable_queries(nextalign_dir: str) -> dict:
+def collect_unprojectable_queries(nextalign_dir: str, projectable_ids=None) -> dict:
     """
-    Collect queries aligned to references that are not present in any reference_aln
-    master-projected alignment. These queries are dropped by PadAlignment and must
-    be excluded downstream.
+    Collect queries whose BLAST reference cannot be projected into the merged
+    segment alignment. These queries would be dropped by PadAlignment and must be
+    excluded downstream.
+
+    ``projectable_ids`` is the authoritative set of reference accessions that
+    PadAlignment will actually project, obtained from :mod:`projectability` by
+    resolving the same per-segment backbones PadAlignment opens. Pass it whenever
+    the caller knows the backbone layout - i.e. whenever ``--precomputed_ref_dir``
+    or ``--ref_list`` is available.
+
+    When it is ``None`` the historical behaviour is kept exactly: the set is the
+    union of ``reference_aln/*/*.aligned.fasta`` headers. That is correct for the
+    single-master, non-segmented builds (RABV, HCV), which supply no per-segment
+    backbones and whose references are close enough to their master for nextalign
+    to align them all.
+
+    It was *not* correct for segmented influenza, and this is the defect this
+    argument exists to close: influenza segment 4's master is AB573800 (H1N1), so
+    nextalign could not align 87 of the 117 HA references to it and every query in
+    those 87 groups - 366,623 sequences, including 242,686 of 242,732 H3 - was
+    marked unprojectable and deleted, even though refset_4_aln.fasta contains all
+    117 references and projects each one correctly. See MISSING_H3_report.md.
 
     Returns dict:
         {seq_name: {"reference": ref_id, "error": reason, "warnings": ""}}
@@ -36,15 +65,18 @@ def collect_unprojectable_queries(nextalign_dir: str) -> dict:
     filtered = {}
     nextalign_path = Path(nextalign_dir)
 
-    aligned_reference_ids = set()
-    for ref_aln in nextalign_path.glob("reference_aln/*/*.aligned.fasta"):
-        try:
-            with open(ref_aln, "r", encoding="utf-8") as handle:
-                for line in handle:
-                    if line.startswith(">"):
-                        aligned_reference_ids.add(_normalize_accession(line[1:]))
-        except Exception as e:
-            print(f"Warning: Could not parse {ref_aln}: {e}")
+    if projectable_ids is None:
+        aligned_reference_ids = set()
+        for ref_aln in nextalign_path.glob("reference_aln/*/*.aligned.fasta"):
+            try:
+                with open(ref_aln, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        if line.startswith(">"):
+                            aligned_reference_ids.add(_normalize_accession(line[1:]))
+            except Exception as e:
+                print(f"Warning: Could not parse {ref_aln}: {e}")
+    else:
+        aligned_reference_ids = set(projectable_ids)
 
     for query_ref_dir in nextalign_path.glob("query_aln/*"):
         if not query_ref_dir.is_dir():
@@ -142,10 +174,76 @@ def collect_high_gap_sequences(nextalign_dir: str, max_gap_proportion: float = 0
     return filtered
 
 
-def collect_filtered_sequences(nextalign_dir: str, output_file: str, max_gap_proportion: float = 0.5) -> dict:
+def count_query_sequences(nextalign_dir: str) -> int:
+    """Total query sequences presented to PadAlignment, for the G1 ratio.
+
+    Counts headers in every ``query_aln/<ref>/<ref>.aligned.fasta`` excluding the
+    reference's own row, which PadAlignment re-inserts from the backbone rather
+    than carrying through. Header-only pass, so it is IO-bound and cheap relative
+    to the gap filter, which already streams the same files in full.
+    """
+    total = 0
+    for query_ref_dir in Path(nextalign_dir).glob("query_aln/*"):
+        if not query_ref_dir.is_dir():
+            continue
+        ref_id = _normalize_accession(query_ref_dir.name)
+        aln_file = query_ref_dir / f"{query_ref_dir.name}.aligned.fasta"
+        if not aln_file.exists():
+            continue
+        try:
+            with open(aln_file, "r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    if line.startswith(">") and _normalize_accession(line[1:]) != ref_id:
+                        total += 1
+        except OSError as exc:
+            print(f"Warning: Could not count {aln_file}: {exc}")
+    return total
+
+
+def resolve_projectable_ids(nextalign_dir: str, precomputed_ref_dir=None, ref_list=None):
+    """Return the reference accessions PadAlignment can project, or ``None``.
+
+    ``None`` means "caller supplied nothing to resolve backbones with", and the
+    unprojectable filter then falls back to its historical ``reference_aln``
+    behaviour. That keeps RABV/HCV and every direct caller byte-identical.
+
+    A resolved-but-empty set is a hard error, not a quiet zero: an empty
+    projectable set marks *every* query unprojectable, which is precisely the
+    failure that deleted 16% of the influenza database.
+    """
+    precomputed_ref_dir = projectability.normalise_optional_path(precomputed_ref_dir)
+    ref_list = projectability.normalise_optional_path(ref_list)
+    if not precomputed_ref_dir and not ref_list:
+        return None
+
+    master_segment_map = projectability.load_master_segment_map(ref_list)
+    ids, source = projectability.projectable_reference_ids(
+        nextalign_dir=nextalign_dir,
+        precomputed_ref_dir=precomputed_ref_dir,
+        master_segment_map=master_segment_map,
+    )
+    if not ids:
+        raise ValueError(
+            "Resolved zero projectable reference accessions from "
+            f"precomputed_ref_dir={precomputed_ref_dir!r} ref_list={ref_list!r}. "
+            "Refusing to mark every query unprojectable."
+        )
+    print(
+        f"[projectability] {len(ids)} projectable reference(s) resolved from {source} "
+        f"({len(master_segment_map)} master->segment mapping(s))"
+    )
+    return ids
+
+
+def collect_filtered_sequences(nextalign_dir: str, output_file: str, max_gap_proportion: float = 0.5,
+                               precomputed_ref_dir=None, ref_list=None) -> dict:
     """
     Scan nextalign directory for .errors.csv files and collect filtered sequence IDs.
-    
+
+    ``precomputed_ref_dir`` / ``ref_list`` are optional and, when given, make the
+    unprojectable filter ask PadAlignment's own question instead of the
+    ``reference_aln`` proxy. See :func:`collect_unprojectable_queries`.
+
     Returns dict with structure:
         {seq_name: {"reference": ref_id, "error": error_message, "warnings": warnings}}
     """
@@ -184,9 +282,12 @@ def collect_filtered_sequences(nextalign_dir: str, output_file: str, max_gap_pro
                 raise
             print(f"Warning: Could not read {errors_file}: {e}")
     
-    # Add sequences that are silently dropped later during PadAlignment because
-    # their query reference was not alignable in reference_aln.
-    unprojectable = collect_unprojectable_queries(nextalign_dir)
+    # Add sequences that would be silently dropped later during PadAlignment
+    # because their query reference is absent from every backbone that run opens.
+    projectable_ids = resolve_projectable_ids(
+        nextalign_dir, precomputed_ref_dir=precomputed_ref_dir, ref_list=ref_list
+    )
+    unprojectable = collect_unprojectable_queries(nextalign_dir, projectable_ids=projectable_ids)
     for seq_name, info in unprojectable.items():
         if seq_name in filtered:
             continue
@@ -283,20 +384,71 @@ def main():
         default=0.5,
         help="Maximum allowed gap proportion in query_aln aligned FASTA; sequences exceeding this are filtered (default: 0.5)"
     )
-    
+    parser.add_argument(
+        "--precomputed_ref_dir",
+        default=None,
+        help=(
+            "Directory of per-segment backbone alignments (refset_<segment>_aln.fasta), the same "
+            "value PadAlignment receives. When given, projectability is decided against these "
+            "backbones instead of Nextalign/reference_aln/, which is the only correct question "
+            "for segmented viruses. Omit for non-segmented builds."
+        )
+    )
+    parser.add_argument(
+        "--ref_list",
+        default=None,
+        help=(
+            "Ref list TSV (accession, type, segment), the same value PadAlignment receives as -m. "
+            "Used only to learn which masters exist and which segment each covers, so the right "
+            "backbone file is opened per master. Never used as the reference set itself."
+        )
+    )
+    parser.add_argument(
+        "--max_filtered_fraction",
+        type=float,
+        default=1.0,
+        help=(
+            "Abort if the filtered fraction of all query sequences exceeds this. The pipeline "
+            "passes 0.02; the script default of 1.0 keeps direct/legacy callers unguarded. "
+            "Set to 0 to disable the check entirely."
+        )
+    )
+
     args = parser.parse_args()
-    
+
     output_path = os.path.join(args.base_dir, args.output)
-    
+
     try:
         print(f"Scanning {args.nextalign_dir} for filtered sequences...")
-        filtered = collect_filtered_sequences(args.nextalign_dir, output_path, max_gap_proportion=args.max_gap_proportion)
+        filtered = collect_filtered_sequences(
+            args.nextalign_dir,
+            output_path,
+            max_gap_proportion=args.max_gap_proportion,
+            precomputed_ref_dir=args.precomputed_ref_dir,
+            ref_list=args.ref_list,
+        )
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
-    
+
     print(f"Found {len(filtered)} filtered sequences")
-    
+
+    # Guard G1. Losing a sixth of the database used to be a stderr line and exit 0.
+    total_queries = count_query_sequences(args.nextalign_dir)
+    if args.max_filtered_fraction and 0 < args.max_filtered_fraction < 1.0 and total_queries:
+        fraction = len(filtered) / total_queries
+        print(f"[guard] filtered {len(filtered)}/{total_queries} query sequences ({fraction:.4f})")
+        if fraction > args.max_filtered_fraction:
+            print(
+                f"ERROR: filtered fraction {fraction:.4f} exceeds --max_filtered_fraction "
+                f"{args.max_filtered_fraction}. {len(filtered)} of {total_queries} query "
+                f"sequences would be dropped. Refusing to continue; inspect "
+                f"{output_path.replace('.tsv', '_summary.txt')}.",
+                file=sys.stderr,
+            )
+            sys.exit(3)
+
+
     if filtered:
         write_filtered_list(filtered, output_path)
         ids_file = write_filtered_ids_only(filtered, output_path)

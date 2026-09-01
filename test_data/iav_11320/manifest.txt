@@ -1,0 +1,6 @@
+taxid: 11320 (Influenza A virus)
+ref_list: generic/influenza/ref_list_refmast.txt
+captured: 2026-08-28T14:17:39Z
+xml_files: 52
+records: 518
+refresh: scripts/fetch_segmented_fixture.sh --email YOUR_EMAIL --clean

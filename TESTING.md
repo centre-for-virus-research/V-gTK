@@ -98,6 +98,57 @@ Consequences worth knowing:
 
 Never read a topology, a clustering, or a likelihood off a test run.
 
+### Avoiding the NCBI fetch: `segmented_xml_test`
+
+`segmented_xml_test` is a drop-in replacement for `segmented_test` that reads a
+frozen GenBank XML snapshot instead of calling NCBI. Same taxid, same reference
+list, same `publish_dir`, so a CI assertion on `test_out/IAV_DB/...` needs only
+the profile name changed.
+
+```bash
+nextflow run vgtk-init.nf -profile conda,segmented_xml_test
+```
+
+Measured on a clean run (no `-resume`), total task time:
+
+| | with fetch | with fixture |
+|---|---|---|
+| `FETCH_GENBANK` | 129.0s (37.8%) | **not run** |
+| everything else | 212s | 212s |
+| wall clock | 3m54s | **1m48s** |
+
+Two reasons to prefer it in CI, and the second matters more:
+
+1. The fetch is the single largest cost of the run.
+2. Its output depends on what NCBI returns that day. A difference there has
+   already produced a CI failure that could not be reproduced locally - a fresh
+   local run produced a database identical to CI's on every statistic (518
+   meta_data rows, 9 UShER trees, 406 centroids, 22 `exclusion_list` entries)
+   yet differed in whether those 22 carried `exclusion_status=1`.
+
+**A fixture hides that class of bug rather than fixing it.** `_classify_accession`
+in `FilterAndExtractSequences.py` falls back to a reference-list lookup keyed on
+`row['gi_number']`; if a fetch ever returns versioned accessions (`NC_002204.1`)
+where the reference list holds bare ones, the lookup misses, the type defaults to
+`query`, the exclusion flag is never set, and influenza B references are then
+required to have alignments against influenza A data. That is the leading theory
+for the CI failure and it is still unconfirmed. Freezing the input stops the test
+flapping; it does not make the lookup robust.
+
+### Refreshing the snapshot
+
+```bash
+scripts/fetch_segmented_fixture.sh --email you@example.com --clean
+```
+
+Writes `test_data/iav_11320/` (5.8 MB, 52 XML files, 518 records) with a
+`manifest.txt` and `checksums.sha256`. Refresh deliberately - the point of a
+fixture is that it does not move under you. `segmented_test` still exists and
+still exercises the live fetch; run it when you want to know NCBI has not
+changed under the pipeline.
+
+The same pattern already exists for H10N8 - see the fixture section below.
+
 ## Running Tests
 
 ## Integration fixture test: H10N8 (taxid 286285)

@@ -20,6 +20,7 @@ measured against.
 | [`guide_alignment_and_insertions.md`](guide_alignment_and_insertions.md) | What happens to a region present in a sub-reference but absent from the master, why insertions are lost without a guide alignment, and how to supply one for a segmented or non-segmented virus. |
 | [`hcv_tree_validation_ictv.md`](hcv_tree_validation_ictv.md) | Validation of the pipeline's HCV trees against the ICTV reference set: genotype and subtype monophyly, backbone agreement and where support runs out, and two metadata subtype errors the tree catches. |
 | [`reference_recombination_screening.md`](reference_recombination_screening.md) | Screening the curated reference set for recombination with UShER/RIPPLES: why only the reference set is tractable, the 16-thread ceiling, chunking, and what gets stored. |
+| [`tree_rooting.md`](tree_rooting.md) | How trees are rooted: midpoint everywhere, why HCV genotype 8 was evaluated as an outgroup and rejected, why single-tip and MMseqs-cluster outgroups do not work, and what happens to UShER node labels. |
 | [`cli_reference.md`](cli_reference.md) | Every command-line option on the scripts in this path, what each does, and how to turn each behaviour off. |
 
 ---

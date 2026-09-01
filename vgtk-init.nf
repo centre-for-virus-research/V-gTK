@@ -101,7 +101,7 @@ def scriptDefinedParams = [
     "mutation_publications", "mutation_clinical_trials",
     "gisaid_dir", "previous_db", "conda_path", "test_max_cluster_seqs", "max_threads", "iqtree_mem", "ref_set_aligned",
     "min_seq_length_ratio", "max_aln_gap_proportion", "tree_free", "base_tree_only",
-    "pivot_isolate_key", "pivot_required_segments", "segment_names",
+    "pivot_isolate_key", "pivot_required_segments", "segment_names", "root_outgroup",
     "mmseqs_two_step", "mmseqs_min_completeness", "iqtree_model"
     // Add all parameter names defined above
 ]
