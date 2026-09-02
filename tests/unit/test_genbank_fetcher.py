@@ -7,6 +7,12 @@ import pytest
 import GenBankFetcher as gb_module
 from GenBankFetcher import GenBankFetcher
 
+#: The real RABV update DB the pipeline ships with. It is the shape that
+#: matters here: meta_data carries both spellings, primary_accession bare and
+#: accession_version versioned, and it has no excluded_accessions table - so
+#: the meta_data exclusion branch is the live one.
+SHIPPED_RABV_DB = Path(__file__).resolve().parents[2] / "test_data" / "RABV_test" / "rabv-7Jul26.db"
+
 
 class _FakeResponse:
     def __init__(self, json_data=None, text_data="", status_code=200):
@@ -23,7 +29,21 @@ class _FakeResponse:
 
 
 def _write_db(path: Path, meta_col: str, meta_values, excluded_values=None):
+    """Build a one-column stand-in for the update DB's meta_data table.
+
+    Both the kept and the excluded rows land in ``meta_col``, so when that
+    column is ``accession_version`` every value written must carry its version.
+    This fixture used to write a bare ``X1`` into the versioned column - a shape
+    no real database has - and that is precisely what hid the exclusion bug:
+    a bare excluded value happens to match the bare key the missing-id scan
+    tests against, and it also makes the record look unversioned, so the scan
+    bailed out at the ``local_ver is None`` branch before the version-bump path
+    could re-download it.
+    """
     excluded_values = excluded_values or []
+    if meta_col == "accession_version":
+        unversioned = [v for v in list(meta_values) + list(excluded_values) if "." not in str(v)]
+        assert not unversioned, f"accession_version rows must be versioned, got {unversioned}"
     conn = sqlite3.connect(str(path))
     try:
         cur = conn.cursor()
@@ -169,7 +189,7 @@ def test_update_from_db_fetches_only_updated_and_new_accessions(tmp_path: Path, 
         db_path,
         meta_col="accession_version",
         meta_values=["A.1", "B.2", "REF1.1"],
-        excluded_values=["X1"],
+        excluded_values=["XCL12345.1"],
     )
 
     fetcher = GenBankFetcher(
@@ -183,7 +203,9 @@ def test_update_from_db_fetches_only_updated_and_new_accessions(tmp_path: Path, 
         update_file=None,
     )
 
-    monkeypatch.setattr(fetcher, "fetch_accs", lambda: ["A.1", "A.2", "B.2", "C.1", "X1.2"])
+    # XCL12345 is excluded by the curator and NCBI has just revised it: the
+    # exclusion must survive the version bump.
+    monkeypatch.setattr(fetcher, "fetch_accs", lambda: ["A.1", "A.2", "B.2", "C.1", "XCL12345.2"])
 
     captured = {}
 
@@ -302,6 +324,171 @@ def test_compute_missing_ids_skips_excluded_and_unversioned_existing(tmp_path: P
     assert missing_ids == ["NEW.1"]
     assert updated_versions == []
     assert new_accessions == ["NEW.1"]
+
+
+def test_compute_missing_ids_skips_exclusion_spelled_with_a_version(tmp_path: Path):
+    """The exclusion set arrives spelled however meta_data spells it.
+
+    ``_load_db_accession_context`` reads the exclusion set out of whichever
+    column ``_detect_meta_data_acc_col`` resolved to, and the default - the
+    column every shipped DB has - is ``accession_version``, so the set held
+    ``EXC12345.1``. The scan tests the bare ``EXC12345`` against it, so before
+    both sides were normalised the guard could never fire and the curator's
+    exclusion was overridden by the version bump.
+    """
+    fetcher = GenBankFetcher(
+        taxid="11292",
+        base_url="https://example/",
+        email="x@y.com",
+        output_dir=str(tmp_path),
+        batch_size=100,
+        sleep_time=0,
+        base_dir="GenBank-XML",
+        update_file=None,
+    )
+
+    missing_ids, updated_versions, new_accessions = fetcher._compute_missing_ids(
+        ["EXC12345.2"],
+        ["EXC12345.1"],
+        {"EXC12345.1"},
+    )
+
+    assert missing_ids == []
+    assert updated_versions == []
+    assert new_accessions == []
+
+
+def test_compute_missing_ids_still_detects_revision_of_a_kept_record(tmp_path: Path):
+    """Normalising the exclusion test must not blunt revision detection.
+
+    ``local_versions`` keeps the versioned spelling on purpose - that is the one
+    job the versioned column exists for - so a kept record whose version NCBI
+    has bumped is still re-fetched.
+    """
+    fetcher = GenBankFetcher(
+        taxid="11292",
+        base_url="https://example/",
+        email="x@y.com",
+        output_dir=str(tmp_path),
+        batch_size=100,
+        sleep_time=0,
+        base_dir="GenBank-XML",
+        update_file=None,
+    )
+
+    missing_ids, updated_versions, _ = fetcher._compute_missing_ids(
+        ["KEP12345.2"],
+        ["KEP12345.1"],
+        {"EXC12345.1"},
+    )
+
+    assert missing_ids == ["KEP12345.2"]
+    assert updated_versions == [("KEP12345.1", "KEP12345.2")]
+
+
+def test_load_db_accession_context_returns_bare_exclusion_keys(tmp_path: Path):
+    """The returned set is the identity key, not the versioned metadata."""
+    db_path = tmp_path / "excluded_versioned.db"
+    _write_db(
+        db_path,
+        meta_col="accession_version",
+        meta_values=["A.1"],
+        excluded_values=["XCL12345.1"],
+    )
+
+    fetcher = GenBankFetcher(
+        taxid="11292",
+        base_url="https://example/",
+        email="x@y.com",
+        output_dir=str(tmp_path),
+        batch_size=100,
+        sleep_time=0,
+        base_dir="GenBank-XML",
+        update_file=None,
+    )
+
+    meta_accessions, excluded_primary = fetcher._load_db_accession_context(str(db_path))
+
+    assert excluded_primary == {"XCL12345"}
+    # The versioned spelling survives in meta_accessions, which is what feeds
+    # revision detection.
+    assert "XCL12345.1" in meta_accessions
+
+
+def test_update_does_not_refetch_an_excluded_record_whose_version_was_bumped(tmp_path: Path, monkeypatch):
+    """The end-to-end shape of the bug: a curator exclusion beaten by a revision."""
+    db_path = tmp_path / "prev_excluded.db"
+    _write_db(
+        db_path,
+        meta_col="accession_version",
+        meta_values=["A.1"],
+        excluded_values=["XCL12345.1"],
+    )
+
+    fetcher = GenBankFetcher(
+        taxid="11292",
+        base_url="https://example/",
+        email="x@y.com",
+        output_dir=str(tmp_path),
+        batch_size=100,
+        sleep_time=0,
+        base_dir="GenBank-XML",
+        update_file=None,
+    )
+
+    monkeypatch.setattr(fetcher, "fetch_accs", lambda: ["A.1", "XCL12345.2"])
+
+    captured = {}
+    monkeypatch.setattr(fetcher, "fetch_genbank_data", lambda ids: captured.setdefault("ids", ids))
+
+    fetcher.update(str(db_path))
+
+    assert "ids" not in captured
+
+    rows = list(csv.DictReader((tmp_path / "update_accessions.tsv").open("r", encoding="utf-8"), delimiter="\t"))
+    assert rows == []
+
+
+def test_shipped_rabv_db_honours_its_exclusion_across_a_version_bump(tmp_path: Path):
+    """Proof against the real fixture, not a hand-built one.
+
+    ``test_data/RABV_test/rabv-7Jul26.db`` has one excluded row (PV547728,
+    stored as PV547728.1 in accession_version) and no ``excluded_accessions``
+    table, so it exercises the meta_data branch that ships to users.
+    """
+    assert SHIPPED_RABV_DB.exists(), f"missing shipped fixture: {SHIPPED_RABV_DB}"
+
+    fetcher = GenBankFetcher(
+        taxid="11292",
+        base_url="https://example/",
+        email="x@y.com",
+        output_dir=str(tmp_path),
+        batch_size=100,
+        sleep_time=0,
+        base_dir="GenBank-XML",
+        update_file=None,
+    )
+
+    meta_accessions, excluded_primary = fetcher._load_db_accession_context(str(SHIPPED_RABV_DB))
+
+    assert excluded_primary == {"PV547728"}
+    assert "PV547728.1" in meta_accessions
+
+    missing_ids, updated_versions, new_accessions = fetcher._compute_missing_ids(
+        ["PV547728.2"],
+        meta_accessions,
+        excluded_primary,
+    )
+    assert (missing_ids, updated_versions, new_accessions) == ([], [], [])
+
+    # A record that was not excluded is still re-fetched when its version moves.
+    missing_ids, updated_versions, _ = fetcher._compute_missing_ids(
+        ["PV547761.2"],
+        meta_accessions,
+        excluded_primary,
+    )
+    assert missing_ids == ["PV547761.2"]
+    assert updated_versions == [("PV547761.1", "PV547761.2")]
 
 
 def test_save_data_uses_incrementing_suffix_when_file_exists(tmp_path: Path):

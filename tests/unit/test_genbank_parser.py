@@ -428,3 +428,249 @@ def test_process_update_mode_require_refs_uses_db_for_missing_reference(tmp_path
 
     df = pd.read_csv(tmp_path / "GenBank-matrix" / "gB_matrix_raw.tsv", sep="\t")
     assert df["primary_accession"].tolist() == ["NEW1"]
+
+
+def _write_versioned_update_db(path: Path, rows):
+    """An update DB whose meta_data carries accession_version.
+
+    ``_write_update_db`` deliberately does not: it mirrors older builds (and the
+    shared conftest fixture) where the version is simply not recorded. These two
+    schemas are the two halves of the revision test - one can tell a revised
+    record from an unchanged one, the other cannot and must keep skipping both.
+
+    ``rows`` are ``(primary_accession, accession_version, exclusion_status)``.
+    """
+    conn = sqlite3.connect(str(path))
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE meta_data (primary_accession TEXT, accession_version TEXT, exclusion_status TEXT, exclusion_criteria TEXT)"
+        )
+        cur.executemany(
+            "INSERT INTO meta_data(primary_accession, accession_version, exclusion_status, exclusion_criteria) VALUES (?, ?, ?, '')",
+            list(rows),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _run_update_parse(tmp_path: Path, update_db: Path, gbseq_blocks):
+    xml_dir = tmp_path / "GenBank-XML"
+    xml_dir.mkdir(parents=True, exist_ok=True)
+    _write_xml(xml_dir / "batch-1.xml", gbseq_blocks)
+
+    ref_file = tmp_path / "refs.tsv"
+    ref_file.write_text("NC_001542\tmaster\n", encoding="utf-8")
+
+    parser = GenBankParser(
+        input_dir=None,
+        base_dir=str(tmp_path),
+        output_dir="GenBank-matrix",
+        ref_list=str(ref_file),
+        exclusion_list=None,
+        is_segmented_virus="N",
+        update=str(update_db),
+    )
+    parser.process()
+    return pd.read_csv(tmp_path / "GenBank-matrix" / "gB_matrix_raw.tsv", sep="\t")
+
+
+def test_load_existing_accessions_from_db_records_stored_versions(tmp_path: Path):
+    update_db = tmp_path / "previous.db"
+    _write_versioned_update_db(
+        update_db,
+        [
+            ("PV547761", "PV547761.1", "0"),
+            ("KX148218", "KX148218.3", "0"),
+            ("AF123456", "", "0"),
+        ],
+    )
+
+    parser = GenBankParser(
+        input_dir=str(tmp_path),
+        base_dir=str(tmp_path),
+        output_dir="out",
+        ref_list=None,
+        exclusion_list=None,
+        is_segmented_virus="N",
+        update=str(update_db),
+    )
+    existing = parser.load_existing_accessions_from_db(str(update_db))
+
+    assert existing == {"PV547761", "KX148218", "AF123456"}
+    # Only accessions with a parseable stored version get a version; a blank one
+    # is unknowable, not version zero.
+    assert parser._existing_versions == {"PV547761": 1, "KX148218": 3}
+
+
+def test_load_existing_accessions_from_db_keeps_highest_version_per_accession(tmp_path: Path):
+    update_db = tmp_path / "previous.db"
+    _write_versioned_update_db(
+        update_db,
+        [
+            ("PV547761", "PV547761.1", "0"),
+            ("PV547761", "PV547761.4", "0"),
+            ("PV547761", "PV547761.2", "0"),
+        ],
+    )
+
+    parser = GenBankParser(
+        input_dir=str(tmp_path),
+        base_dir=str(tmp_path),
+        output_dir="out",
+        ref_list=None,
+        exclusion_list=None,
+        is_segmented_virus="N",
+        update=str(update_db),
+    )
+    parser.load_existing_accessions_from_db(str(update_db))
+
+    assert parser._existing_versions == {"PV547761": 4}
+
+
+def test_load_existing_accessions_from_db_without_version_column(tmp_path: Path):
+    update_db = tmp_path / "previous.db"
+    _write_update_db(update_db, existing_accessions=["PV547761"], excluded_accessions=[])
+
+    parser = GenBankParser(
+        input_dir=str(tmp_path),
+        base_dir=str(tmp_path),
+        output_dir="out",
+        ref_list=None,
+        exclusion_list=None,
+        is_segmented_virus="N",
+        update=str(update_db),
+    )
+    existing = parser.load_existing_accessions_from_db(str(update_db))
+
+    assert existing == {"PV547761"}
+    assert parser._existing_versions == {}
+
+
+def test_load_existing_accessions_from_db_ignores_versions_of_excluded(tmp_path: Path):
+    update_db = tmp_path / "previous.db"
+    _write_versioned_update_db(
+        update_db,
+        [
+            ("PV547761", "PV547761.1", "0"),
+            ("KX148218", "KX148218.1", "1"),
+        ],
+    )
+
+    parser = GenBankParser(
+        input_dir=str(tmp_path),
+        base_dir=str(tmp_path),
+        output_dir="out",
+        ref_list=None,
+        exclusion_list=None,
+        is_segmented_virus="N",
+        update=str(update_db),
+    )
+    parser.load_existing_accessions_from_db(str(update_db))
+
+    assert parser._existing_versions == {"PV547761": 1}
+
+
+def test_process_update_mode_still_skips_unchanged_record(tmp_path: Path):
+    update_db = tmp_path / "previous.db"
+    _write_versioned_update_db(update_db, [("PV547761", "PV547761.1", "0")])
+
+    df = _run_update_parse(
+        tmp_path,
+        update_db,
+        [
+            _gbseq_xml("PV547761", "ATGC", accession_version="PV547761.1"),
+            _gbseq_xml("KX148218", "ATAT"),
+        ],
+    )
+
+    assert df["primary_accession"].tolist() == ["KX148218"]
+
+
+def test_process_update_mode_parses_revised_record(tmp_path: Path):
+    update_db = tmp_path / "previous.db"
+    _write_versioned_update_db(update_db, [("PV547761", "PV547761.1", "0")])
+
+    df = _run_update_parse(
+        tmp_path,
+        update_db,
+        [
+            _gbseq_xml("PV547761", "ATGCGG", accession_version="PV547761.2"),
+            _gbseq_xml("KX148218", "ATAT"),
+        ],
+    )
+
+    assert sorted(df["primary_accession"].tolist()) == ["KX148218", "PV547761"]
+    revised = df[df["primary_accession"] == "PV547761"].iloc[0]
+    assert revised["accession_version"] == "PV547761.2"
+    assert revised["real_length"] == 6
+
+
+def test_process_update_mode_ignores_older_or_equal_version(tmp_path: Path):
+    update_db = tmp_path / "previous.db"
+    _write_versioned_update_db(update_db, [("PV547761", "PV547761.3", "0")])
+
+    df = _run_update_parse(
+        tmp_path,
+        update_db,
+        [
+            _gbseq_xml("PV547761", "ATGC", accession_version="PV547761.2"),
+            _gbseq_xml("KX148218", "ATAT"),
+        ],
+    )
+
+    assert df["primary_accession"].tolist() == ["KX148218"]
+
+
+def test_process_update_mode_without_version_column_skips_even_a_revision(tmp_path: Path):
+    update_db = tmp_path / "previous.db"
+    _write_update_db(update_db, existing_accessions=["PV547761"], excluded_accessions=[])
+
+    df = _run_update_parse(
+        tmp_path,
+        update_db,
+        [
+            _gbseq_xml("PV547761", "ATGCGG", accession_version="PV547761.2"),
+            _gbseq_xml("KX148218", "ATAT"),
+        ],
+    )
+
+    assert df["primary_accession"].tolist() == ["KX148218"]
+
+
+def test_process_update_mode_does_not_resurrect_excluded_record_on_revision(tmp_path: Path):
+    update_db = tmp_path / "previous.db"
+    _write_versioned_update_db(update_db, [("PV547761", "PV547761.1", "1")])
+
+    df = _run_update_parse(
+        tmp_path,
+        update_db,
+        [
+            _gbseq_xml("PV547761", "ATGCGG", accession_version="PV547761.2"),
+            _gbseq_xml("KX148218", "ATAT"),
+        ],
+    )
+
+    assert df["primary_accession"].tolist() == ["KX148218"]
+
+
+def test_is_revision_of_existing_ignores_dotted_labels(tmp_path: Path):
+    parser = GenBankParser(
+        input_dir=str(tmp_path),
+        base_dir=str(tmp_path),
+        output_dir="out",
+        ref_list=None,
+        exclusion_list=None,
+        is_segmented_virus="N",
+        update="dummy.db",
+    )
+    parser._existing_versions = {"PV547761": 1}
+
+    assert parser._is_revision_of_existing("PV547761", "PV547761.2") is True
+    assert parser._is_revision_of_existing("PV547761", "PV547761.1") is False
+    assert parser._is_revision_of_existing("PV547761", "PV547761") is False
+    assert parser._is_revision_of_existing("PV547761", "") is False
+    # A label that merely contains a dot is not a version bump.
+    assert parser._is_revision_of_existing("A/swine/Iowa/4.1/1976", "A/swine/Iowa/4.9/1976") is False
+    assert parser._is_revision_of_existing("KX148218", "KX148218.9") is False

@@ -23,7 +23,13 @@ jobs:
         profile:
           - test
           - update_test
-          - segmented_test
+          # Reads the frozen GenBank XML snapshot in test_data/iav_11320 rather
+          # than calling NCBI: same taxid, ref list and publish_dir as
+          # segmented_test, ~2x faster, and deterministic. The live fetch path
+          # is still covered here by `test` and `update_test`, which both run
+          # FETCH_GENBANK, so nothing stops noticing if NCBI changes.
+          # Run segmented_test by hand to exercise the fetch on this profile.
+          - segmented_xml_test
 
     steps:
       - name: Checkout
@@ -63,7 +69,7 @@ jobs:
             update_test)
               test -f test_out/update_test/tests/test_non_segmented_results.txt
               ;;
-            segmented_test)
+            segmented_xml_test)
               test -f test_out/IAV_DB/tests/test_segmented_results.txt
               ;;
             *)

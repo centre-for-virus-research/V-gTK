@@ -656,3 +656,213 @@ def test_process_all_masters_uses_only_backbone_file_when_segment_unknown_and_si
 
     assert chosen["ref"] == "sole_backbone.fasta"
     assert chosen["segment"] is None
+
+
+def _guide_processor(tmp_path: Path, guide, skip_ids=None):
+    """A processor wired to a caller-written guide alignment under ``tmp_path``."""
+    return PadAlignment(
+        reference_alignment=str(guide),
+        input_dir=str(tmp_path / "in"),
+        base_dir=str(tmp_path),
+        output_dir=str(tmp_path / "out"),
+        keep_intermediate_files=True,
+        skip_ids=skip_ids,
+    )
+
+
+def _merged_records(tmp_path: Path, guide: Path):
+    merged = tmp_path / "out" / guide.name.replace(".fasta", "_merged_MSA.fasta")
+    assert merged.exists(), f"no merged MSA written at {merged}"
+    return list(SeqIO.parse(str(merged), "fasta"))
+
+
+class TestAccessionIdentityIsCanonical:
+    """One genome, one spelling of its name.
+
+    Everything this script joins on is the bare accession: the ``query_aln/<ref>/``
+    directory NextalignAlignment created, the padded filename, the skip list, the
+    merged headers, the segment manifest. The versioned spelling is legitimate only
+    in ``meta_data.accession_version``, where GenBankFetcher uses it to notice a
+    revised record.
+
+    Each test below pins a place where one side of a comparison was normalised and
+    the other was not - a comparison that cannot match, and fails silently rather
+    than loudly. Every input the repo ships is bare already, so none of this changes
+    a shipped run; it changes what happens the first time a versioned value arrives,
+    which an NCBI FASTA download or a hand-built ``--precomputed_ref_dir`` refset
+    does by default.
+    """
+
+    def test_skip_ids_are_loaded_bare_and_labels_survive(self, tmp_path: Path):
+        """``filtered_sequences_ids.txt`` was read verbatim and matched against
+        version-stripped record ids, so a versioned line excluded nothing."""
+        ids_file = tmp_path / "filtered_sequences_ids.txt"
+        ids_file.write_text(
+            "NC_001542.1\nKX148218\ncluster.1\nA/swine/Iowa/4.1/1976\n\n",
+            encoding="utf-8",
+        )
+
+        assert PadAlignment._load_skip_ids(str(ids_file)) == {
+            "NC_001542",
+            "KX148218",
+            "cluster.1",
+            "A/swine/Iowa/4.1/1976",
+        }
+
+    def test_a_versioned_skip_id_excludes_the_sequence_it_names(self, tmp_path: Path):
+        """The failure was *open*: a sequence CollectFilteredSequences excluded was
+        padded in anyway and reached the tree and the DB as though it had aligned."""
+        guide = tmp_path / "refset_1_aln.fasta"
+        _write_fasta(guide, [("NC_001542", "ACGTACGT")])
+        _write_fasta(
+            tmp_path / "in" / "NC_001542" / "NC_001542.aligned.fasta",
+            [("NC_001542", "ACGTACGT"), ("KX148218", "ACGTACGA"), ("MK123456", "ACGTACGC")],
+        )
+        ids_file = tmp_path / "filtered_sequences_ids.txt"
+        ids_file.write_text("KX148218.1\n", encoding="utf-8")
+
+        processor = _guide_processor(tmp_path, guide, skip_ids=str(ids_file))
+        processor.process_master_alignment(
+            str(guide), str(tmp_path / "in"), str(tmp_path), str(tmp_path / "out"), True
+        )
+
+        merged_ids = [record.id for record in _merged_records(tmp_path, guide)]
+        assert "KX148218" not in merged_ids
+        assert "MK123456" in merged_ids
+
+    def test_a_versioned_backbone_header_is_emitted_bare(self, tmp_path: Path):
+        """The backbone row used to keep its original header while every key derived
+        from it was canonical, putting both spellings of one genome into the merged
+        MSA - one as the backbone row, one as the nextalign reference row."""
+        guide = tmp_path / "refset_1_aln.fasta"
+        guide.write_text(
+            ">NC_001542.1 Rabies lyssavirus, complete genome\nACGTACGT\n", encoding="utf-8"
+        )
+        _write_fasta(
+            tmp_path / "in" / "NC_001542" / "NC_001542.aligned.fasta",
+            [("NC_001542", "ACGTACGT"), ("KX148218", "ACGTACGA")],
+        )
+
+        processor = _guide_processor(tmp_path, guide)
+        processor.process_master_alignment(
+            str(guide), str(tmp_path / "in"), str(tmp_path), str(tmp_path / "out"), True
+        )
+
+        records = _merged_records(tmp_path, guide)
+        assert records[0].id == "NC_001542"
+        # Free text after the accession is annotation, not identity - it stays.
+        assert records[0].description == "NC_001542 Rabies lyssavirus, complete genome"
+        merged_text = (
+            tmp_path / "out" / "refset_1_aln_merged_MSA.fasta"
+        ).read_text(encoding="utf-8")
+        assert "NC_001542.1" not in merged_text
+
+    def test_get_master_list_returns_bare_accessions(self, tmp_path: Path):
+        """The other side of this lookup is a directory NextalignAlignment named
+        with ``accession_from_filename``, which is always bare."""
+        processor = _guide_processor(tmp_path, tmp_path / "unused.fasta")
+
+        assert processor.get_master_list("NC_001542.1,KX148218") == ["NC_001542", "KX148218"]
+
+    def test_a_versioned_master_still_finds_its_reference_aln_directory(self, tmp_path: Path):
+        """Missing the directory is not a soft failure: in strict update mode it
+        aborts the run, and otherwise the master's whole segment leaves the MSA."""
+        nextalign_dir = tmp_path / "Nextalign"
+        ref_aln = nextalign_dir / "reference_aln" / "NC_001542"
+        ref_aln.mkdir(parents=True)
+        _write_fasta(ref_aln / "NC_001542.aligned.fasta", [("NC_001542", "ACGT")])
+
+        processor = _guide_processor(tmp_path, tmp_path / "unused.fasta")
+        used = []
+
+        def _capture_process(self, reference_alignment_file, input_dir, base_dir, output_dir, keep_intermediate_files=False, segment_value=None):
+            used.append(Path(reference_alignment_file).name)
+
+        processor.process_master_alignment = types.MethodType(_capture_process, processor)
+        processor.process_all_masters(
+            master_list=processor.get_master_list("NC_001542.1"),
+            nextalign_dir=str(nextalign_dir),
+            master_segment_map={},
+            precomputed_ref_dir=None,
+        )
+
+        assert used == ["NC_001542.aligned.fasta"]
+
+    def test_update_db_master_list_and_segment_map_share_one_key(self, tmp_path: Path):
+        """``process_all_masters`` looks the segment up with an entry from the master
+        list, so the two have to be keyed the same way or the segment reads None."""
+        update_db = tmp_path / "update.db"
+        _write_update_alignment_db(
+            update_db,
+            meta_rows=[("NC_001542.1", "master", "1")],
+            alignment_rows=[("NC_001542.1", "NC_001542.1", "ACGT", "1")],
+        )
+
+        processor = PadAlignment(
+            reference_alignment=None,
+            input_dir=str(tmp_path / "in"),
+            base_dir=str(tmp_path),
+            output_dir=str(tmp_path / "out"),
+            keep_intermediate_files=True,
+            update_db=str(update_db),
+        )
+
+        assert processor.get_master_list("ignored.tsv") == ["NC_001542"]
+        assert processor.get_master_segment_map("ignored.tsv") == {"NC_001542": "1"}
+
+    def test_read_fasta_headers_drop_versions_without_truncating_labels(self, tmp_path: Path):
+        """``split('.')[0]`` truncated a strain name mid-name, so the orphan warning
+        named an accession that does not exist."""
+        fasta = tmp_path / "headers.fasta"
+        _write_fasta(
+            fasta,
+            [("NC_001542.1", "ACGT"), ("A/swine/Iowa/4.1/1976", "ACGT"), ("EPI_ISL_402124", "ACGT")],
+        )
+
+        assert PadAlignment._read_fasta_headers(str(fasta)) == [
+            "NC_001542",
+            "A/swine/Iowa/4.1/1976",
+            "EPI_ISL_402124",
+        ]
+
+    def test_orphan_queries_are_reported_under_their_real_names(self, tmp_path: Path):
+        guide = tmp_path / "refset_1_aln.fasta"
+        _write_fasta(guide, [("NC_001542", "ACGT")])
+        _write_fasta(
+            tmp_path / "in" / "REF_ORPHAN" / "REF_ORPHAN.aligned.fasta",
+            [("REF_ORPHAN", "ACGT"), ("A/swine/Iowa/4.1/1976", "ACGT"), ("KX148218.1", "ACGT")],
+        )
+
+        processor = _guide_processor(tmp_path, guide)
+        orphans = processor.find_orphan_query_references(str(guide), str(tmp_path / "in"))
+
+        assert orphans == {"REF_ORPHAN": ["A/swine/Iowa/4.1/1976", "KX148218"]}
+
+    def test_a_versioned_query_directory_is_not_reported_as_an_orphan(self, tmp_path: Path):
+        """The directory name and the backbone id name the same genome; comparing the
+        two spellings raised a warning telling the operator to investigate sequences
+        that were in fact projected normally."""
+        guide = tmp_path / "refset_1_aln.fasta"
+        _write_fasta(guide, [("NC_001542", "ACGT")])
+        _write_fasta(
+            tmp_path / "in" / "NC_001542.1" / "NC_001542.1.aligned.fasta",
+            [("NC_001542.1", "ACGT"), ("KX148218", "ACGT")],
+        )
+
+        processor = _guide_processor(tmp_path, guide)
+
+        assert processor.find_orphan_query_references(str(guide), str(tmp_path / "in")) == {}
+
+    def test_insert_gaps_matches_a_reference_whose_name_contains_a_dot(self, tmp_path: Path):
+        """Truncating the label meant no nextalign reference row was found and the
+        projection fell through to index matching, which assumes the query and the
+        master share coordinates - here they do not, and the bases slide."""
+        processor = _guide_processor(tmp_path, tmp_path / "unused.fasta")
+
+        subalignment = [
+            SeqRecord(Seq("AA-CGTACGT"), id="A/swine/Iowa/4.1/1976"),
+            SeqRecord(Seq("---CGTAC--"), id="Q1"),
+        ]
+        updated = processor.insert_gaps("ACGT--ACGT", subalignment, "A/swine/Iowa/4.1/1976")
+
+        assert str(updated[1].seq) == "-CGT--AC--"

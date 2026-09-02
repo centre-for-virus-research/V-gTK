@@ -156,3 +156,134 @@ def test_collect_filtered_sequences_raises_on_malformed_errors_csv(tmp_path: Pat
 
     with pytest.raises(ValueError, match="Malformed nextalign errors file"):
         collect_filtered_sequences(str(nextalign_dir), str(tmp_path / "out.tsv"))
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the HA/NA subtype-loss defect (MISSING_H3_report.md).
+#
+# collect_unprojectable_queries used to decide projectability from
+# Nextalign/reference_aln/, i.e. "could nextalign align this reference to a
+# master?". For segmented influenza that is the wrong question: segment 4's
+# master AB573800 is H1N1, so 87 of the 117 HA references failed to align to it
+# and every query in those groups - 366,623 sequences, 99.98% of all H3 - was
+# marked unprojectable and deleted by PadAlignment --skip_ids. The right question
+# is "is this reference a row of the backbone PadAlignment will open?", and
+# refset_4_aln.fasta contains all 117.
+# ---------------------------------------------------------------------------
+
+
+def _divergent_subtype_fixture(tmp_path: Path):
+    """Segment 4 in miniature: a master plus two references too divergent for
+    nextalign to align against it, all three present in the segment backbone."""
+    nextalign_dir = tmp_path / "Nextalign"
+
+    # nextalign managed only the master itself against the master
+    ref_aln = nextalign_dir / "reference_aln" / "MASTER_H1"
+    ref_aln.mkdir(parents=True, exist_ok=True)
+    (ref_aln / "MASTER_H1.aligned.fasta").write_text(">MASTER_H1\nACGTACGT\n", encoding="utf-8")
+
+    # queries exist for the master and for both divergent references
+    for ref, queries in (("MASTER_H1", ["Q_H1"]), ("REF_H3", ["Q_H3_1", "Q_H3_2"]), ("REF_H7", ["Q_H7"])):
+        d = nextalign_dir / "query_aln" / ref
+        d.mkdir(parents=True, exist_ok=True)
+        body = f">{ref}\nACGTACGT\n" + "".join(f">{q}\nACGTACGT\n" for q in queries)
+        (d / f"{ref}.aligned.fasta").write_text(body, encoding="utf-8")
+
+    # the per-segment backbone holds all three references
+    ref_dir = tmp_path / "ref_set_aligned"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    (ref_dir / "refset_4_aln.fasta").write_text(
+        ">MASTER_H1\nACGTACGT\n>REF_H3\nACGTACGT\n>REF_H7\nACGTACGT\n", encoding="utf-8")
+
+    ref_list = tmp_path / "ref_list_refmast.txt"
+    ref_list.write_text(
+        "MASTER_H1\tmaster\t4\nREF_H3\treference\t4\nREF_H7\treference\t4\n", encoding="utf-8")
+
+    return nextalign_dir, ref_dir, ref_list
+
+
+def test_precomputed_ref_dir_overrides_reference_aln(tmp_path: Path):
+    """The fix: divergent-subtype queries survive because the backbone holds their
+    reference, even though reference_aln does not. Fails before the fix."""
+    nextalign_dir, ref_dir, ref_list = _divergent_subtype_fixture(tmp_path)
+
+    filtered = collect_filtered_sequences(
+        str(nextalign_dir), str(tmp_path / "out.tsv"),
+        precomputed_ref_dir=str(ref_dir), ref_list=str(ref_list),
+    )
+
+    assert filtered == {}, f"nothing should be filtered, got {sorted(filtered)}"
+
+
+def test_reference_aln_alone_would_have_deleted_them(tmp_path: Path):
+    """Documents the old behaviour, which is still correct for non-segmented
+    builds: without a backbone directory, reference_aln is the only authority."""
+    nextalign_dir, _ref_dir, _ref_list = _divergent_subtype_fixture(tmp_path)
+
+    filtered = collect_filtered_sequences(str(nextalign_dir), str(tmp_path / "out.tsv"))
+
+    assert set(filtered) == {"Q_H3_1", "Q_H3_2", "Q_H7"}
+    assert all("cannot be projected" in v["error"] for v in filtered.values())
+    assert "Q_H1" not in filtered
+
+
+def test_ref_list_alone_is_enough_when_backbones_are_absent(tmp_path: Path):
+    """--ref_list without --precomputed_ref_dir still routes through the shared
+    predicate, which falls back to reference_aln per master."""
+    nextalign_dir, _ref_dir, ref_list = _divergent_subtype_fixture(tmp_path)
+
+    filtered = collect_filtered_sequences(
+        str(nextalign_dir), str(tmp_path / "out.tsv"), ref_list=str(ref_list))
+
+    assert set(filtered) == {"Q_H3_1", "Q_H3_2", "Q_H7"}
+
+
+def test_empty_projectable_set_raises_rather_than_deleting_everything(tmp_path: Path):
+    """An empty projectable set marks every query unprojectable. That is the
+    shape of the original incident, so it must be a hard error."""
+    nextalign_dir, _ref_dir, _ref_list = _divergent_subtype_fixture(tmp_path)
+    empty_dir = tmp_path / "empty_backbones"
+    empty_dir.mkdir()
+    (empty_dir / "refset_4_aln.fasta").write_text("", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="zero projectable reference accessions"):
+        collect_filtered_sequences(
+            str(nextalign_dir), str(tmp_path / "out.tsv"),
+            precomputed_ref_dir=str(empty_dir), ref_list=str(_ref_list))
+
+
+def test_count_query_sequences_excludes_reference_rows(tmp_path: Path):
+    """The G1 denominator counts queries, not the reference row PadAlignment
+    re-inserts from the backbone."""
+    from CollectFilteredSequences import count_query_sequences
+
+    nextalign_dir, _, _ = _divergent_subtype_fixture(tmp_path)
+    assert count_query_sequences(str(nextalign_dir)) == 4  # Q_H1, Q_H3_1, Q_H3_2, Q_H7
+
+
+def test_guard_g1_aborts_when_too_much_is_filtered(tmp_path: Path):
+    """CLI-level: filtering 3 of 4 queries must exit non-zero, not warn."""
+    nextalign_dir, _ref_dir, _ref_list = _divergent_subtype_fixture(tmp_path)
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT_PATH),
+         "-n", str(nextalign_dir), "-o", "filtered.tsv", "-b", str(tmp_path),
+         "--max_filtered_fraction", "0.02"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "exceeds --max_filtered_fraction" in result.stderr
+
+
+def test_guard_g1_passes_when_the_backbone_is_supplied(tmp_path: Path):
+    """Same inputs, same threshold, but asking the right question - exit 0."""
+    nextalign_dir, ref_dir, ref_list = _divergent_subtype_fixture(tmp_path)
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT_PATH),
+         "-n", str(nextalign_dir), "-o", "filtered.tsv", "-b", str(tmp_path),
+         "--precomputed_ref_dir", str(ref_dir), "--ref_list", str(ref_list),
+         "--max_filtered_fraction", "0.02"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

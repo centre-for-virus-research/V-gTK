@@ -547,7 +547,11 @@ def _annotate_real_sequences(accessions):
             "SELECT primary_accession, accession_type, nearest_reference_genotype, "
             "nearest_reference_subtype FROM meta_data", conn,
         )
-        alias_lookup = AM.load_gene_alias_lookup(conn)
+        # The HCV profile has to be named now: canonicalize_product() only
+        # applies a virus's protein-name patterns when it has been told which
+        # virus, so that 'core' and 'E1' in a rabies or influenza product
+        # description are not rewritten into HCV's mature peptides.
+        alias_lookup = AM.load_gene_alias_lookup(conn, profile=AM.virus_profile('HCV'))
         db_gff_maps = AM.load_db_gff_feature_maps(conn, alias_lookup)
     finally:
         conn.close()
