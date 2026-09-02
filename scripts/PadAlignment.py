@@ -8,7 +8,9 @@ from os.path import join
 from Bio import SeqIO
 from Bio.Seq import Seq
 from ExportRefListFromUpdateDb import load_master_accessions, load_master_accessions_from_file, load_reference_file_table, load_reference_rows
+import accession_utils
 import segment_utils
+import projectability
 
 class PadAlignment:
 	def __init__(self, reference_alignment, input_dir, base_dir, output_dir, keep_intermediate_files, new_outputfile=False, segment_manifest_out=None, strict_segment_backbone=False, update_db=None, skip_ids=None):
@@ -23,10 +25,25 @@ class PadAlignment:
 		self.update_db = self._normalize_optional_path(update_db)
 		self.segment_manifest_rows = []
 		self.skip_ids: set = self._load_skip_ids(skip_ids)
+		# Union of every backbone's accessions across all masters, filled in by
+		# process_all_masters. Used only to scope the orphan warning run-wide
+		# instead of per-segment; None means 'driven with -r, single backbone'.
+		self.run_projectable_refs = None
 
 	@staticmethod
 	def _load_skip_ids(skip_ids_arg) -> set:
-		"""Load a set of accession IDs to skip from a file path or return empty set."""
+		"""Accessions to exclude from the subalignments, in canonical (bare) form.
+
+		The ids come from ``CollectFilteredSequences``' ``filtered_sequences_ids.txt``
+		and used to be kept exactly as written, while the record ids they are matched
+		against in :meth:`process_master_alignment` had their version scraped off. A
+		versioned line - ``NC_001542.1`` - could therefore never match anything and the
+		sequence was padded in rather than skipped. That failure is *open*: a sequence
+		excluded upstream reached the tree and the DB looking as though it had aligned
+		cleanly. Both sides run through :mod:`accession_utils` now, so the comparison is
+		between two canonical keys. A non-accession label - a cluster or group name that
+		happens to contain a dot - survives verbatim and still matches itself.
+		"""
 		if not skip_ids_arg:
 			return set()
 		path_str = str(skip_ids_arg).strip()
@@ -38,7 +55,8 @@ class PadAlignment:
 		ids = set()
 		with open(path_str, 'r', encoding='utf-8') as fh:
 			for line in fh:
-				acc = line.strip().split()[0] if line.strip() else ''
+				raw = line.strip().split()[0] if line.strip() else ''
+				acc = accession_utils.normalise_accession(raw)
 				if acc:
 					ids.add(acc)
 		print(f"[skip_ids] Loaded {len(ids)} accessions to skip from {path_str}")
@@ -54,6 +72,23 @@ class PadAlignment:
 		return path_str
 
 	def get_master_list(self, master_acc):
+		"""Master accessions in canonical (bare) form.
+
+		The other side of this lookup is the ``reference_aln/<master>/`` tree, which
+		NextalignAlignment names with :func:`accession_utils.accession_from_filename`
+		and is therefore always bare. A reference list or update DB carrying
+		``NC_001542.1`` used to be joined against a directory called ``NC_001542``,
+		miss, and report "Reference alignment for ... not found" - which in strict
+		update mode aborts the run and otherwise drops that master's whole segment
+		out of the merged MSA. Both sides are canonical now.
+		"""
+		return [
+			accession_utils.normalise_accession(master)
+			for master in self._raw_master_list(master_acc)
+			if accession_utils.normalise_accession(master)
+		]
+
+	def _raw_master_list(self, master_acc):
 		if self.update_db:
 			return load_master_accessions(self.update_db)
 		if os.path.isfile(master_acc):
@@ -65,6 +100,14 @@ class PadAlignment:
 			return [x.strip() for x in master_acc.split(',') if x.strip()]
 
 	def get_master_segment_map(self, master_acc):
+		"""``{master accession: segment}``, keyed the way :meth:`get_master_list` reads.
+
+		The keys have to be canonical for the same reason the master list is: this map
+		is looked up in :meth:`process_all_masters` with an entry *from* that list, so
+		one side carrying ``NC_001542.1`` and the other ``NC_001542`` yields segment
+		``None`` - and a master with no segment picks the wrong backbone or, in strict
+		mode, none at all.
+		"""
 		if self.update_db:
 			master_segment = {}
 			refs = load_reference_rows(self.update_db)
@@ -72,7 +115,7 @@ class PadAlignment:
 			if masters.empty:
 				masters = refs
 			for _, row in masters.iterrows():
-				acc = str(row["primary_accession"]).strip()
+				acc = accession_utils.normalise_accession(row["primary_accession"])
 				segment = self._normalize_segment(row.get("segment")) or "0"
 				if acc:
 					master_segment[acc] = segment
@@ -91,7 +134,9 @@ class PadAlignment:
 
 		masters = df[df["accession_type"].astype(str).str.strip().str.lower() == 'master']
 		for _, row in masters.iterrows():
-			master_segment[row["primary_accession"]] = self._normalize_segment(row["segment"])
+			acc = accession_utils.normalise_accession(row["primary_accession"])
+			if acc:
+				master_segment[acc] = self._normalize_segment(row["segment"])
 		return master_segment
 
 	@staticmethod
@@ -113,49 +158,14 @@ class PadAlignment:
 		Find a precomputed segment alignment file in precomputed_ref_dir.
 		Expected canonical naming is refset_<segment>_aln.fasta, with a
 		numeric-segment fallback for custom naming.
+
+		Delegates to :func:`projectability.find_precomputed_reference_alignment`.
+		CollectFilteredSequences has to resolve the *same* file to decide whether a
+		query is projectable; when the two carried separate copies of this logic they
+		drifted, and the stricter copy silently deleted 633,988 sequences. One
+		implementation, two callers.
 		"""
-		if not precomputed_ref_dir or not os.path.isdir(precomputed_ref_dir):
-			return None
-
-		segment = self._normalize_segment(segment_value)
-		if not segment:
-			fasta_files = sorted(
-				[
-					os.path.join(precomputed_ref_dir, fname)
-					for fname in os.listdir(precomputed_ref_dir)
-					if fname.lower().endswith((".fasta", ".fa"))
-				]
-			)
-			if len(fasta_files) == 1:
-				print(
-					f"[warn] No segment value supplied; using sole precomputed alignment {os.path.basename(fasta_files[0])}."
-				)
-				return fasta_files[0]
-			return None
-
-		preferred = os.path.join(precomputed_ref_dir, f"refset_{segment}_aln.fasta")
-		if os.path.exists(preferred):
-			return preferred
-
-		fallback_matches = []
-		for fname in os.listdir(precomputed_ref_dir):
-			if not fname.lower().endswith((".fasta", ".fa")):
-				continue
-			seg_match = re.search(r"(\d+)", fname)
-			if seg_match and seg_match.group(1) == segment:
-				fallback_matches.append(os.path.join(precomputed_ref_dir, fname))
-
-		if len(fallback_matches) == 1:
-			return fallback_matches[0]
-		if len(fallback_matches) > 1:
-			print(
-				f"[warn] Multiple precomputed alignment files matched segment {segment}: "
-				f"{', '.join(os.path.basename(x) for x in sorted(fallback_matches))}. "
-				f"Using {os.path.basename(sorted(fallback_matches)[0])}."
-			)
-			return sorted(fallback_matches)[0]
-
-		return None
+		return projectability.find_precomputed_reference_alignment(precomputed_ref_dir, segment_value)
 
 	def export_update_backbones(self, output_dir):
 		if not self.update_db:
@@ -251,6 +261,20 @@ class PadAlignment:
 		return resolved
 
 	def process_all_masters(self, master_list, nextalign_dir, master_segment_map=None, precomputed_ref_dir=None):
+		# Resolve the run-wide projectable set once, from the same backbones the
+		# loop below opens. Scoping the orphan report to a single segment made it
+		# fire on every pass with a number three orders of magnitude too large.
+		try:
+			run_refs, _source = projectability.projectable_reference_ids(
+				nextalign_dir=nextalign_dir,
+				precomputed_ref_dir=precomputed_ref_dir,
+				master_segment_map=master_segment_map,
+			)
+			self.run_projectable_refs = run_refs or None
+		except Exception as exc:
+			print(f"[warn] Could not resolve run-wide projectable references: {exc}")
+			self.run_projectable_refs = None
+
 		for master in master_list:
 			ref_aln_file = None
 			segment_val = (master_segment_map or {}).get(master)
@@ -281,13 +305,43 @@ class PadAlignment:
 				if self.strict_segment_backbone:
 					raise FileNotFoundError(f"Reference alignment missing for master {master} segment {segment_val}: {ref_aln_file}")
 
+	@staticmethod
+	def _relabel_record(record, canonical_id):
+		"""Re-label ``record`` with its canonical accession, annotation intact.
+
+		Setting ``record.id`` on its own is not enough. Biopython writes the
+		*description* as the FASTA title whenever the description's first token equals
+		the id, and for a header with no spaces the description *is* the whole header -
+		so a record read as ``NC_001542.1`` kept being written out versioned however
+		the id was changed. Only the leading accession token is rewritten; any free
+		text after it is annotation and is left exactly as it was.
+		"""
+		original = record.id
+		record.id = canonical_id
+		record.name = canonical_id
+		description = record.description or ""
+		if description == original:
+			record.description = canonical_id
+		elif description.startswith(original + " "):
+			record.description = canonical_id + description[len(original):]
+		return record
+
 	def insert_gaps(self, reference_aligned, subalignment_seqs, ref_id):
 		ref_aligned_str = str(reference_aligned)
+		# Both sides canonical. This compared a version-stripped record id against
+		# ``ref_id`` exactly as given, so the two only ever agreed when ``ref_id`` was
+		# already bare; a versioned one found no nextalign reference row and dropped
+		# into the index-matching fallback below, which assumes the query and the
+		# master share coordinates and quietly mis-projects when they do not. The
+		# stripping was also wrong in the other direction: a strain name containing a
+		# dot was truncated mid-name and could not match itself.
+		ref_key = accession_utils.normalise_accession(ref_id)
 		nextalign_ref_rec = None
-		for r in subalignment_seqs:
-			if r.id.split('.')[0] == ref_id:
-				nextalign_ref_rec = r
-				break
+		if ref_key is not None:
+			for r in subalignment_seqs:
+				if accession_utils.normalise_accession(r.id) == ref_key:
+					nextalign_ref_rec = r
+					break
 		if not nextalign_ref_rec:
 			# Fallback to sequential index matching if reference sequence is not in subalignment
 			ref_with_gaps_list = list(reference_aligned)
@@ -392,35 +446,62 @@ class PadAlignment:
 
 	@staticmethod
 	def _read_fasta_headers(fasta_path):
-		headers = []
+		"""Record ids of ``fasta_path``, canonicalised, in file order.
+
+		The result is compared against backbone ids and against the ``query_aln/<ref>/``
+		directory name, both of which are canonical, so the headers have to be too.
+		``split('.')[0]`` got that right only for the versioned case: it also truncated
+		every label with a dot in it, which turned one orphaned query into a different,
+		non-existent accession in the warning the operator has to act on.
+		"""
 		if not os.path.exists(fasta_path):
-			return headers
-		for record in SeqIO.parse(fasta_path, "fasta"):
-			headers.append(record.id.split('.')[0])
-		return headers
+			return []
+		return accession_utils.normalise_accession_series(
+			record.id for record in SeqIO.parse(fasta_path, "fasta")
+		)
 
 	def find_orphan_query_references(self, reference_alignment_file, input_dir):
 		"""
 		Find query_aln reference directories that cannot be projected because their
-		reference is absent from the master-projected reference alignment file.
+		reference is absent from *every* backbone this run opens.
+
+		The comparison is run-wide, not per-segment. It used to be per-segment, and
+		because this runs once per master that made it meaningless: on the segment-1
+		pass every segment-2..8 reference is trivially "absent", so the warning
+		reported 282-370 references and ~3.4M query sequences on all eight passes.
+		A reference is only a genuine orphan if no segment's backbone contains it.
+
+		``self.run_projectable_refs`` is populated by :meth:`process_all_masters`.
+		When this object is driven directly with ``-r`` (single backbone, no master
+		list) it stays None and the old single-file comparison is the right one.
 
 		Returns a dict:
 			{ref_id: [query_accession_1, query_accession_2, ...]}
 		"""
-		master_alignment = SeqIO.to_dict(SeqIO.parse(reference_alignment_file, "fasta"))
-		projectable_refs = {ref_id.split('.')[0] for ref_id in master_alignment.keys()}
+		projectable_refs = getattr(self, "run_projectable_refs", None)
+		if not projectable_refs:
+			master_alignment = SeqIO.to_dict(SeqIO.parse(reference_alignment_file, "fasta"))
+			projectable_refs = {
+				accession_utils.normalise_accession(ref_id)
+				for ref_id in master_alignment.keys()
+			}
 
 		orphans = {}
 		if not os.path.isdir(input_dir):
 			return orphans
 
-		for ref_id in os.listdir(input_dir):
-			ref_path = os.path.join(input_dir, ref_id)
+		for dir_name in os.listdir(input_dir):
+			ref_path = os.path.join(input_dir, dir_name)
 			if not os.path.isdir(ref_path):
 				continue
+			# The directory is named by NextalignAlignment from
+			# ``accession_from_filename``, so its canonical form is the key the backbone
+			# ids and the record headers are held under; the name on disk still builds
+			# the path.
+			ref_id = accession_utils.accession_from_filename(dir_name)
 			if ref_id in projectable_refs:
 				continue
-			aln_file = os.path.join(ref_path, f"{ref_id}.aligned.fasta")
+			aln_file = os.path.join(ref_path, f"{dir_name}.aligned.fasta")
 			query_ids = [q for q in self._read_fasta_headers(aln_file) if q != ref_id]
 			if query_ids:
 				orphans[ref_id] = query_ids
@@ -430,16 +511,27 @@ class PadAlignment:
 	def process_master_alignment(self, reference_alignment_file, input_dir, base_dir, output_dir, keep_intermediate_files=False, segment_value=None):
 		master_alignment = SeqIO.to_dict(SeqIO.parse(reference_alignment_file, "fasta"))
 		merged_sequences = []
-		for ref_id, ref_record in master_alignment.items():
+		for record_id, ref_record in master_alignment.items():
 			ref_aligned = ref_record.seq
-			ref_id = ref_id.split('.')[0]
+			ref_id = accession_utils.normalise_accession(record_id) or record_id
+			# The backbone row was re-emitted below with its *original* header while
+			# every key derived from it here - the subalignment directory, the padded
+			# filename, the skip comparison, the manifest - was canonical. A versioned
+			# refset header therefore put both spellings of one genome into the merged
+			# MSA, once as this backbone row and once as the nextalign reference row of
+			# its own subalignment, and nothing downstream can dedup two spellings by
+			# name. One genome, one id.
+			self._relabel_record(ref_record, ref_id)
 			subalignment_file = os.path.join(input_dir, f"{ref_id}/{ref_id}.aligned.fasta")
 			if os.path.exists(subalignment_file):
 				print(f"Processing subalignment for {ref_id} using {subalignment_file}")
 				subalignment_seqs = list(SeqIO.parse(subalignment_file, "fasta"))
 				if self.skip_ids:
 					before = len(subalignment_seqs)
-					subalignment_seqs = [r for r in subalignment_seqs if r.id.split('.')[0] not in self.skip_ids]
+					subalignment_seqs = [
+						r for r in subalignment_seqs
+						if accession_utils.normalise_accession(r.id) not in self.skip_ids
+					]
 					skipped = before - len(subalignment_seqs)
 					if skipped:
 						print(f"[skip_ids] Skipped {skipped} sequence(s) from {ref_id} subalignment")
@@ -493,8 +585,10 @@ class PadAlignment:
 			print(f"[warn] Skipped reference examples: {preview_refs}")
 
 		if not keep_intermediate_files:
-			for ref_id in master_alignment:
-				padded_file = os.path.join(output_dir, f"{ref_id.split('.')[0]}_aligned_padded.fasta")
+			for record_id in master_alignment:
+				# Canonical, because that is the name the file was written under above.
+				ref_id = accession_utils.normalise_accession(record_id) or record_id
+				padded_file = os.path.join(output_dir, f"{ref_id}_aligned_padded.fasta")
 				if os.path.exists(padded_file):
 					os.remove(padded_file)
 					print(f"Deleted intermediate file {padded_file}")

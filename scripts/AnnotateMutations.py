@@ -32,9 +32,141 @@ REQUIRED_MUTATION_CATALOG_COLUMNS = [
     'phenotype',
 ]
 
+#: ---------------------------------------------------------------------------
+#: Virus profiles.
+#:
+#: Everything in this module that is not true of every virus lives here, keyed
+#: by virus name.  ``--virus`` selects one.  It used to be declared, documented
+#: as "Virus context for specific logics (e.g. HCV)", and then never read: the
+#: HCV protein-name patterns below were applied to rabies and influenza alike,
+#: so a GenBank product description containing the word 'core' or an 'E1' token
+#: was rewritten into HCV's mature-peptide vocabulary.  Both sides of the
+#: protein join go through canonicalize_product(), so the two sides then
+#: disagreed and the rows dropped out silently.
+#:
+#: ``columns`` is the EXTRA catalogue columns written to the mutation_catalog
+#: table on top of REQUIRED_MUTATION_CATALOG_COLUMNS.  None means "every column
+#: the catalogue supplies", which is the default for a virus with no entry
+#: here: keeping what the curator wrote is the only choice that cannot lose
+#: data, and inventing empty HCV drug-resistance columns is not a prerequisite
+#: for annotating a virus that has no drugs.
+#:
+#: ``product_patterns`` are tried in order against a feature product name or a
+#: catalogue protein name; the first to match supplies the compact name.
+#: Anything not listed is left exactly as written.
+GENERIC_VIRUS = 'generic'
+
+VIRUS_PROFILES = {
+    GENERIC_VIRUS: {
+        'columns': None,
+        'product_patterns': [],
+    },
+    'hcv': {
+        'columns': [
+            'resistance_category', 'drug', 'drug_category', 'drug_producer', 'pubmed_id',
+            'DOI', 'any_in_vitro_evidence', 'in_vitro_max_ec50_midpoint',
+            'any_in_vivo_evidence', 'in_vivo_baseline', 'in_vivo_treatment_emergent',
+        ],
+        # The ten HCV mature peptides. 'core' and 'E1'/'E2' are the reason this
+        # list must not be applied to another virus: they are ordinary English
+        # in a great many non-HCV product descriptions.
+        'product_patterns': [
+            (r'\b(NS[2-5](?:A|B)?)\b', 'upper'),
+            (r'\b(E[12])\b', 'upper'),
+            (r'\b(p7)\b', 'p7'),
+            (r'\b(core)\b', 'Core'),
+        ],
+    },
+    # generic/rabv/ is the repository's own namesake build. It has no
+    # drug-resistance vocabulary and no compact-name inference to do: its
+    # proteins (N, P, M, G, L) are already the names GenBank uses. Registering
+    # it means `--virus rabies` resolves instead of warning, which is the whole
+    # difference between an onboarded virus and a tolerated one.
+    'rabv': {
+        'columns': None,
+        'product_patterns': [],
+    },
+    'other': {
+        'columns': None,
+        'product_patterns': [],
+    },
+    'influenza': {
+        'columns': ['serotypes_tested'],
+        # Canonical IAV protein names, as spelled by the `genes` table of a
+        # real influenza build.  PA-X is listed before PA so the longer name
+        # wins; regex alternation is left-biased.
+        'product_patterns': [
+            (r'\b(PB1-F2|PB2|PB1|PA-X|PA|HA|NP|NA|M1|M2|NS1|NS2|NEP)\b', 'upper'),
+        ],
+    },
+}
+
+#: Aliases so a caller may name the virus the way its assets and profiles do.
+VIRUS_ALIASES = {
+    'hepatitis_c_virus': 'hcv',
+    'hepatitis_c': 'hcv',
+    'hepc': 'hcv',
+    'flu': 'influenza',
+    'iav': 'influenza',
+    'influenza_a': 'influenza',
+    'influenza_a_virus': 'influenza',
+    'rabies': 'rabv',
+    'rabies_virus': 'rabv',
+    'all_columns': GENERIC_VIRUS,
+}
+
+
+def resolve_virus_name(*candidates):
+    """The first candidate naming a virus profile, else the generic profile.
+
+    Both pipeline call sites derive --catalog_column_profile FROM the virus
+    name, so the two arguments carry the same information and either may stand
+    in for the other.  An unrecognised name is not an error: it resolves to the
+    generic profile, which keeps every catalogue column and applies no
+    virus-specific protein-name inference.  Before this, a virus the argparse
+    `choices` list had never heard of - 'rabies', say - failed at argument
+    parsing, which is why the two shipped non-HCV paths were unreachable.
+    """
+    for candidate in candidates:
+        key = clean_cell(candidate).lower().replace('-', '_').replace(' ', '_')
+        if not key:
+            continue
+        key = VIRUS_ALIASES.get(key, key)
+        if key in VIRUS_PROFILES:
+            return key
+    return GENERIC_VIRUS
+
+
+def virus_profile(virus_name):
+    """The profile dict for a virus name, generic when it is not one we know."""
+    return VIRUS_PROFILES.get(resolve_virus_name(virus_name), VIRUS_PROFILES[GENERIC_VIRUS])
+
+
+class GeneAliasLookup(dict):
+    """The gene alias map, carrying the virus profile that goes with it.
+
+    A plain dict everywhere it is read, so every existing ``.get()`` call site
+    and every test that hands in ``{}`` keeps working.  Carrying the profile
+    on the object is what lets canonicalize_product() know which virus it is
+    canonicalising for without threading a parameter through the six functions
+    between main() and it.
+    """
+
+    def __init__(self, aliases=None, profile=None):
+        super().__init__(aliases or {})
+        self.virus_profile = profile or VIRUS_PROFILES[GENERIC_VIRUS]
+
+
+def profile_of_lookup(alias_lookup):
+    """The virus profile carried by an alias lookup, generic if it carries none."""
+    return getattr(alias_lookup, 'virus_profile', None) or VIRUS_PROFILES[GENERIC_VIRUS]
+
+
+#: Retained so ``--catalog_column_profile`` keeps naming the same column sets
+#: it always did; the values now come from the virus registry.
 CATALOG_COLUMN_PROFILES = {
-    'HCV': ['resistance_category', 'drug','drug_category','drug_producer','pubmed_id','DOI','any_in_vitro_evidence','in_vitro_max_ec50_midpoint','any_in_vivo_evidence','in_vivo_baseline','in_vivo_treatment_emergent'],
-    'influenza': ['serotypes_tested'],
+    'HCV': VIRUS_PROFILES['hcv']['columns'],
+    'influenza': VIRUS_PROFILES['influenza']['columns'],
     'all_columns': None,
 }
 
@@ -59,10 +191,22 @@ CODON_TABLE = {
 }
 
 def translate_codon(codon):
-    codon = codon.upper().replace('-', '')
-    if len(codon) < 3:
+    """Translate a bare codon, answering 'X' for anything that is not one.
+
+    The width is checked on the text as given, *before* the gaps come out.  A
+    codon spread over four alignment columns ('AT-G') is three bases the
+    aligner placed either side of an insertion; collapsing the gap and reading
+    ATG would invent a residue the sequence does not carry.  Only a codon
+    exactly three columns wide is translated.
+
+    An all-gap codon still answers 'X' here.  The deletion reading belongs to
+    residue_from_aligned_codon(), which can see the surrounding alignment and
+    can therefore tell a deleted codon from an unsequenced one.
+    """
+    text = str(codon or '').upper()
+    if len(text) != 3:
         return 'X'
-    return CODON_TABLE.get(codon, 'X')
+    return CODON_TABLE.get(text.replace('-', ''), 'X')
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +219,13 @@ def translate_codon(codon):
 # ---------------------------------------------------------------------------
 STOP_RESIDUE = '*'
 DELETION_RESIDUE = '-'
+
+#: What translate_codon() answers when it cannot name a residue.  It collapses
+#: three very different situations - an unsequenced codon ('NNN'), a genuine
+#: IUPAC ambiguity ('RGA') and a codon the alignment could not assemble - onto
+#: one token, so it can only ever mean "we do not know", never "the residue is
+#: X".  Nothing is allowed to satisfy a catalogue row with it.
+UNKNOWN_RESIDUE = 'X'
 
 def clean_cell(value):
     """Text of a possibly-missing dataframe cell, with NaN read as empty.
@@ -117,6 +268,29 @@ def normalize_residue(value):
     if text in (STOP_RESIDUE, DELETION_RESIDUE):
         return text
     return upper
+
+
+def coerce_coordinate(value):
+    """A 1-based nucleotide coordinate from an untyped cell, or None.
+
+    ``features.cds_start`` and ``gff_features.start`` are TEXT in the shipped
+    schema and are filled by upstream stages from GenBank records of every
+    quality, so a NULL, a blank, or a REAL written back as '1.0' all arrive
+    here verbatim.  int() raises on each of them and no caller has a per-row
+    handler, so one unusable cell would abort the run and take every
+    well-formed feature in the same table with it.  Answering None costs the
+    caller a single feature, which it counts and reports.
+    """
+    text = clean_cell(value)
+    if not text:
+        return None
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in (float('inf'), float('-inf')):
+        return None
+    return int(number)
 
 
 def alignment_covered_span(alignment):
@@ -217,10 +391,49 @@ SCOPE_TIER_RANK = {
 
 
 
+def normalize_genotype_code(value):
+    """Fold a genotype/subtype code onto one spelling before it is compared.
+
+    Residues are already case-folded by normalize_residue() on the reasoning
+    that "a curator typo cannot silently disable a catalog row"; the genotype
+    vocabulary had no such treatment and is compared in three separate places.
+    A meta_data row typed '1A' against a catalogue bucket '1a' therefore missed
+    the exact-subtype tier, and rule B fell back to the union of every subtype
+    of genotype 1 - or, for a vocabulary with no genotype tier at all, to no
+    wild type whatsoever, which emits the residue as a change.
+
+    Lower case is the canonical form because that is what every code in the
+    shipped HCV catalogue and database already uses, so folding moves nothing.
+    """
+    return clean_cell(value).lower()
+
+
 def genotype_of_code(value):
     """Leading digits of a genotype/subtype code: ``6xd`` -> ``6``, ``1a`` -> ``1``."""
     match = re.match(r'\d+', clean_cell(value))
     return match.group(0) if match else ''
+
+
+def parent_genotype_of_code(value):
+    """The genotype a subtype code belongs to, for any vocabulary.
+
+    HCV spells a subtype as its genotype's digits plus a suffix, so the parent
+    of '6xd' is '6' and matching at that level is not a nicety - the observed
+    subtypes 6n, 6xd, 6xc and 4v have no catalogue bucket of their own, and
+    exact matching would throw away nearly every call.
+
+    A code with no leading digits IS its own parent.  The leading-digit rule
+    was applied unconditionally even though both columns that use it are
+    documented as generic and virus-agnostic, so every vocabulary that is not
+    digit-led collapsed onto the empty string: influenza 'H1', rabies
+    'Africa-2', SARS-CoV-2 'BA.2'.  classify_genotype_scope() then found no
+    genotype tier and answered out_of_scope, suppressing every call for that
+    sequence build-wide, and build_wild_type_tables() filed every code under
+    one '' key that lookup_wild_type_residues() never asks for.  Falling back
+    to the code itself costs HCV nothing - every code in the shipped catalogue
+    and database is digit-led - and gives every other virus the tier back.
+    """
+    return genotype_of_code(value) or normalize_genotype_code(value)
 
 
 def build_subtype_code(genotype, subtype):
@@ -293,8 +506,15 @@ def build_wild_type_tables(catalog):
     protein_column = '_canonical_protein' if '_canonical_protein' in catalog.columns else 'protein_name'
     for _, row in catalog.iterrows():
         protein = clean_cell(row.get(protein_column, ''))
-        position = clean_cell(row.get('aa_position', ''))
-        if not protein or not position:
+        # Key on the PARSED position, exactly as the annotation loop will ask
+        # for it.  Keying on the raw text let a catalogue that respelled '2' as
+        # '2.0' - which prepare_catalog() absorbs for coordinates, so the call
+        # still fires - build a table the lookup could never hit.  Rule B then
+        # went quiet without a word and the genotype's own wild-type residue
+        # was emitted as a resistance call, labelled 'wt_unknown' and so
+        # indistinguishable from a genuinely uncurated position.
+        position = parse_aa_position(row.get('aa_position', ''))
+        if not protein or position is None:
             continue
         for code, fields in parse_genotype_entry_list(row.get(WILD_TYPE_RESIDUES_COLUMN, '')).items():
             if not fields:
@@ -302,8 +522,8 @@ def build_wild_type_tables(catalog):
             residue = normalize_residue(fields[0])
             if not residue:
                 continue
-            by_subtype[(code, protein, str(position))].add(residue)
-            by_genotype[(genotype_of_code(code), protein, str(position))].add(residue)
+            by_subtype[(normalize_genotype_code(code), protein, str(position))].add(residue)
+            by_genotype[(parent_genotype_of_code(code), protein, str(position))].add(residue)
     return dict(by_subtype), dict(by_genotype)
 
 
@@ -315,12 +535,13 @@ def lookup_wild_type_residues(wild_type_tables, subtype_code, genotype, protein,
     know', and the caller records it as such rather than suppressing.
     """
     by_subtype, by_genotype = wild_type_tables
-    if subtype_code:
-        residues = by_subtype.get((subtype_code, protein, str(position)))
+    subtype_key = normalize_genotype_code(subtype_code)
+    if subtype_key:
+        residues = by_subtype.get((subtype_key, protein, str(position)))
         if residues:
             return residues, SCOPE_TIER_SUBTYPE
     if genotype:
-        residues = by_genotype.get((genotype, protein, str(position)))
+        residues = by_genotype.get((parent_genotype_of_code(genotype), protein, str(position)))
         if residues:
             return residues, SCOPE_TIER_GENOTYPE
     return None, ''
@@ -362,7 +583,10 @@ def build_signature_genotype_scope(catalog):
         signature_id = clean_cell(row.get('signature_id', ''))
         if not signature_id:
             continue
-        scope[signature_id] |= parse_relevant_genotypes(row.get(RELEVANT_GENOTYPES_COLUMN, ''))
+        scope[signature_id] |= {
+            normalize_genotype_code(code)
+            for code in parse_relevant_genotypes(row.get(RELEVANT_GENOTYPES_COLUMN, ''))
+        }
     return {signature_id: frozenset(codes) for signature_id, codes in scope.items()}
 
 
@@ -376,16 +600,29 @@ def classify_genotype_scope(scope_codes, genotype, subtype_code):
     """
     if not scope_codes:
         return SCOPE_TIER_UNSCOPED
-    if subtype_code and subtype_code in scope_codes:
+    subtype_key = normalize_genotype_code(subtype_code)
+    if subtype_key and subtype_key in scope_codes:
         return SCOPE_TIER_SUBTYPE
-    if genotype and any(genotype_of_code(code) == genotype for code in scope_codes):
+    genotype_key = parent_genotype_of_code(genotype)
+    if genotype_key and any(parent_genotype_of_code(code) == genotype_key for code in scope_codes):
         return SCOPE_TIER_GENOTYPE
     return SCOPE_TIER_OUT_OF_SCOPE
 
 
-def build_sequence_genotype_map(meta_data):
-    """``{accession: (genotype, subtype_code)}`` from meta_data, tolerant of schema drift."""
+def build_sequence_genotype_map(meta_data, diagnostics=None):
+    """``{accession: (genotype, subtype_code)}`` from meta_data, tolerant of schema drift.
+
+    An accession that appears more than once with DIFFERENT typing keeps the
+    first reading and the disagreement is counted and warned about.  It used to
+    be resolved by row order alone: meta_data carries one row per accession per
+    segment in a segmented build, and a cross-run merge can leave a stale row
+    beside a current one, so whichever pandas yielded last drove both rule A
+    and rule B for that sequence.  The same database read in a different order
+    produced different resistance calls, with nothing recorded to say a
+    conflict had ever existed.
+    """
     genotype_map = {}
+    conflicts = []
     if meta_data is None or getattr(meta_data, 'empty', True):
         return genotype_map
     columns = set(meta_data.columns)
@@ -413,7 +650,25 @@ def build_sequence_genotype_map(meta_data):
         subtype_code = build_subtype_code(genotype, subtype)
         if not genotype:
             genotype = genotype_of_code(subtype_code)
-        genotype_map[accession] = (genotype, subtype_code)
+        resolved = (genotype, subtype_code)
+        existing = genotype_map.get(accession)
+        if existing is not None:
+            if existing != resolved:
+                conflicts.append((accession, existing, resolved))
+            continue
+        genotype_map[accession] = resolved
+
+    if conflicts:
+        if diagnostics is not None:
+            diagnostics['meta_data_genotype_conflicts'] += len(conflicts)
+        preview = ', '.join(
+            f'{accession} kept {kept} ignored {dropped}'
+            for accession, kept, dropped in conflicts[:5]
+        )
+        print(
+            f'[AnnotateMutations][warn] {len(conflicts)} meta_data row(s) disagree with an '
+            f'earlier row about the same accession; the first reading was kept: {preview}'
+        )
     return genotype_map
 
 
@@ -440,24 +695,26 @@ def normalize_segment(value):
     return text
 
 
-def infer_compact_product_name(product_name):
+def infer_compact_product_name(product_name, profile=None):
+    """The compact protein name a product description implies, or ''.
+
+    The patterns come from the virus profile, so a name is only rewritten into
+    a vocabulary the virus actually has.  The polyprotein / whole-genome
+    collapse below is applied for every virus because it is about the SHAPE of
+    the annotation - a feature covering the whole coding region - rather than
+    about any particular protein.
+    """
     text = str(product_name or '').strip()
     if not text:
         return ''
 
-    ns_match = re.search(r'\b(NS[2-5](?:A|B)?)\b', text, flags=re.IGNORECASE)
-    if ns_match:
-        return ns_match.group(1).upper()
+    if profile is None:
+        profile = VIRUS_PROFILES[GENERIC_VIRUS]
 
-    envelope_match = re.search(r'\b(E[12])\b', text, flags=re.IGNORECASE)
-    if envelope_match:
-        return envelope_match.group(1).upper()
-
-    if re.search(r'\bp7\b', text, flags=re.IGNORECASE):
-        return 'p7'
-
-    if re.search(r'\bcore\b', text, flags=re.IGNORECASE):
-        return 'Core'
+    for pattern, mode in profile.get('product_patterns', ()):
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).upper() if mode == 'upper' else mode
 
     normalized = normalize_lookup_key(text)
     if normalized in {'polyprotein', 'wholegenome'}:
@@ -466,20 +723,31 @@ def infer_compact_product_name(product_name):
     return ''
 
 
-def canonicalize_product(product_name, alias_lookup):
+def canonicalize_product(product_name, alias_lookup, profile=None):
+    """One spelling for a protein, from a product description or a catalog cell.
+
+    Applied to BOTH sides of the protein join - the catalogue's protein_name
+    and every feature's product - so the two only meet if they canonicalise the
+    same way.  `profile` selects the virus vocabulary; when it is not given the
+    lookup is asked for the one it carries, and a bare dict yields the generic
+    profile, which renames nothing.
+    """
     product_name = str(product_name or '').strip()
     if not product_name:
         return ''
 
+    if profile is None:
+        profile = profile_of_lookup(alias_lookup)
+
     canonical = alias_lookup.get(normalize_lookup_key(product_name), product_name)
-    inferred = infer_compact_product_name(canonical)
+    inferred = infer_compact_product_name(canonical, profile)
     if inferred:
         return inferred
     return canonical
 
 
-def load_gene_alias_lookup(conn):
-    alias_lookup = {}
+def load_gene_alias_lookup(conn, profile=None):
+    alias_lookup = GeneAliasLookup(profile=profile)
     try:
         genes = pd.read_sql_query('SELECT * FROM genes', conn)
     except Exception:
@@ -539,8 +807,8 @@ def choose_feature_entry(existing_entry, new_entry):
     if new_priority < existing_priority:
         return new_entry
     if new_priority == existing_priority:
-        existing_span = int(existing_entry['cds_end']) - int(existing_entry['cds_start'])
-        new_span = int(new_entry['cds_end']) - int(new_entry['cds_start'])
+        existing_span = existing_entry['cds_end'] - existing_entry['cds_start']
+        new_span = new_entry['cds_end'] - new_entry['cds_start']
         if new_span < existing_span:
             return new_entry
     return existing_entry
@@ -550,11 +818,15 @@ def make_feature_entry(product_name, start, end, reference_accession, feature_ty
     canonical_product = canonicalize_product(product_name, alias_lookup)
     if not canonical_product:
         return None
+    cds_start = coerce_coordinate(start)
+    cds_end = coerce_coordinate(end)
+    if cds_start is None or cds_end is None:
+        return None
     return {
         'product': canonical_product,
         'raw_product': raw_product or product_name,
-        'cds_start': int(start),
-        'cds_end': int(end),
+        'cds_start': cds_start,
+        'cds_end': cds_end,
         'reference_accession': reference_accession,
         'feature_type': feature_type,
         'source': source,
@@ -625,6 +897,13 @@ def load_master_accessions(conn):
 
 
 def merge_feature_entry(feature_maps, reference_accession, product_name, start, end, feature_type, alias_lookup, raw_product=None, source='unknown'):
+    """Fold one feature row into the map. Returns False if the row was unusable.
+
+    The return value exists so a caller can tally what it dropped: a feature
+    silently missing from the map resurfaces much later as a whole protein
+    'not found in master feature map', which is a far harder thing to trace
+    back to the one malformed row that caused it.
+    """
     entry = make_feature_entry(
         product_name,
         start,
@@ -636,9 +915,10 @@ def merge_feature_entry(feature_maps, reference_accession, product_name, start, 
         source=source,
     )
     if entry is None:
-        return
+        return False
     reference_map = feature_maps.setdefault(reference_accession, {})
     reference_map[entry['product']] = choose_feature_entry(reference_map.get(entry['product']), entry)
+    return True
 
 
 def feature_map_has_gene_information(feature_map):
@@ -652,6 +932,7 @@ def load_db_gff_feature_maps(conn, alias_lookup):
     table_names = pd.read_sql_query("SELECT name FROM sqlite_master WHERE type='table'", conn)['name'].tolist()
     candidate_tables = [name for name in ['gff_features', 'reference_gff_features', 'gff', 'reference_gff'] if name in table_names]
     feature_maps = {}
+    unusable_rows = Counter()
     master_accessions = load_master_accessions(conn)
 
     # Load all alignment names from sequence_alignment table to include genotype-specific references
@@ -676,7 +957,7 @@ def load_db_gff_feature_maps(conn, alias_lookup):
                 if allowed_accessions and reference_accession not in allowed_accessions:
                     continue
                 feature_type = str(row.get(feature_type_col, 'gene') or 'gene') if feature_type_col else 'gene'
-                merge_feature_entry(
+                if not merge_feature_entry(
                     feature_maps,
                     reference_accession,
                     row.get(product_col),
@@ -686,7 +967,8 @@ def load_db_gff_feature_maps(conn, alias_lookup):
                     alias_lookup,
                     raw_product=row.get(product_col),
                     source=f'db_table:{table_name}',
-                )
+                ):
+                    unusable_rows[table_name] += 1
         elif {'reference_accession', 'gff_text'}.issubset(columns) or {'reference_accession', 'content'}.issubset(columns):
             text_col = 'gff_text' if 'gff_text' in columns else 'content'
             for _, row in df.iterrows():
@@ -717,16 +999,21 @@ def load_db_gff_feature_maps(conn, alias_lookup):
                 if not reference_accession:
                     continue
 
-                ref_candidate = str(row.get('reference_accession', '') or '').strip() if 'reference_accession' in columns else ''
-                master_candidate = str(row.get('master_ref_accession', '') or '').strip() if 'master_ref_accession' in columns else ''
                 is_allowed = reference_accession in allowed_accessions if allowed_accessions else True
                 if not is_allowed:
                     continue
-                if reference_accession not in {ref_candidate, master_candidate, reference_accession}:
-                    continue
+                # NOTE: a guard used to sit here testing
+                #   reference_accession not in {ref_candidate, master_candidate, reference_accession}
+                # whose set always contained the value under test, so it could
+                # never fire.  It is gone rather than repaired: on the shipped
+                # HCV build 120 rows in allowed_accessions disagree with both
+                # reference columns, and every one of them is a genotype
+                # reference's own annotation.  Making the guard live would drop
+                # them and change HCV output, so the permissive reading it has
+                # always had is the one kept - now deliberately.
 
                 feature_type = str(row.get(feature_type_col, 'gene') or 'gene') if feature_type_col else 'gene'
-                merge_feature_entry(
+                if not merge_feature_entry(
                     feature_maps,
                     reference_accession,
                     row.get(product_col),
@@ -736,43 +1023,62 @@ def load_db_gff_feature_maps(conn, alias_lookup):
                     alias_lookup,
                     raw_product=row.get(product_col),
                     source='db_table:features',
-                )
+                ):
+                    unusable_rows['features'] += 1
+
+    if unusable_rows:
+        detail = ', '.join(f'{table}={count}' for table, count in sorted(unusable_rows.items()))
+        print(
+            '[AnnotateMutations][warn] Skipped feature rows with an unusable product name '
+            f'or coordinate: {detail}'
+        )
 
     return feature_maps
 
 
-def resolve_reference_feature_map(reference_hint, fallback_candidates, db_gff_maps, alias_lookup, allow_genbank_gff):
-    attempted = []
-    candidates = []
-    for value in [reference_hint] + list(fallback_candidates):
-        for token in extract_accession_tokens(value):
-            if token and token not in candidates:
-                candidates.append(token)
+#: A catalogue position is written as digits.  A trailing '.0' is tolerated
+#: because a whole number that made a round trip through a float column is the
+#: one respelling that carries no ambiguity; everything else is rejected.
+AA_POSITION_RE = re.compile(r'^(?P<digits>\d+)(?:\.0*)?$')
 
-    for candidate in candidates:
-        attempted.append(candidate)
-        if candidate in db_gff_maps and feature_map_has_gene_information(db_gff_maps[candidate]):
-            return candidate, db_gff_maps[candidate], attempted, 'db_gff'
 
-    if not allow_genbank_gff:
-        raise AnnotationMappingError(
-            f'No DB GFF annotations could be resolved for reference candidates: {attempted}. Re-run with --allow_genbank_reference_gff to fetch GFF from NCBI.'
-        )
+def parse_aa_position(value):
+    """A catalogue amino-acid position as a positive integer, or None.
 
-    last_error = None
-    for candidate in candidates:
-        try:
-            feature_map = fetch_reference_gff_map(candidate, alias_lookup)
-            if feature_map:
-                return candidate, feature_map, attempted, 'genbank_gff'
-        except Exception as exc:
-            last_error = exc
+    Every rejection lands in the caller's ``invalid_positions`` tally, which is
+    reported before annotation starts.  Letting a bad cell through is worse
+    than dropping its row: a position that is merely *wrong* still resolves to
+    a codon, and the call it produces is attributed to a residue nobody
+    curated.
 
-    if last_error is not None:
-        raise AnnotationMappingError(
-            f'Unable to fetch GFF annotations for reference candidates: {attempted}. Last error: {last_error}'
-        )
-    raise AnnotationMappingError(f'Unable to resolve any GFF annotations from candidates: {attempted}')
+    Rejects, in the order they bite in practice:
+      * text that is not a number at all ('abc', '', NaN);
+      * '1e400', which float() reads as infinity - int() then raises
+        OverflowError, which is not a ValueError and so escaped the previous
+        handler and aborted the entire run before a single sequence was read;
+      * scientific notation such as '1e1'.  int(float('1e1')) is 10, but a
+        catalogue cell in that shape is far more often a mangled accession or
+        identifier than a deliberate position, and reading it as residue 10 is
+        unrecoverable once written;
+      * a fractional position such as '6.7', which int(float(...)) truncated to
+        6, silently relocating a mutation to a different residue;
+      * zero and negatives, which used to survive this far and were then
+        tallied under 'reference_coordinate_missing_in_alignment' - a catalogue
+        defect hiding behind an alignment-coverage counter.
+    """
+    match = AA_POSITION_RE.match(clean_cell(value))
+    if not match:
+        return None
+    position = int(match.group('digits'))
+    return position if position >= 1 else None
+
+
+# NOTE: resolve_reference_feature_map() and find_reference_alignment_row() used
+# to live here.  Neither had a caller anywhere in scripts/ or tests/, and both
+# reached canonicalize_product() through their own make_feature_entry chain -
+# so once product canonicalisation became virus-aware they were a second,
+# permanently-HCV code path that no test could ever have caught drifting.
+# Deleted rather than threaded.
 
 
 def prepare_catalog(catalog, alias_lookup):
@@ -784,10 +1090,9 @@ def prepare_catalog(catalog, alias_lookup):
     aa_positions = []
     invalid_positions = 0
     for value in prepared['aa_position']:
-        try:
-            aa_positions.append(int(float(value)))
-        except (TypeError, ValueError):
-            aa_positions.append(None)
+        position = parse_aa_position(value)
+        aa_positions.append(position)
+        if position is None:
             invalid_positions += 1
     prepared['_aa_position_int'] = aa_positions
 
@@ -800,11 +1105,26 @@ def validate_required_catalog_columns(catalog):
         raise ValueError(f"Catalog missing required column(s): {', '.join(missing)}")
 
 
+def catalog_columns_for_profile(catalog_column_profile):
+    """The extra catalogue columns a profile name selects, or None for all of them.
+
+    Accepts a legacy profile name ('HCV', 'influenza', 'all_columns') or any
+    virus name.  An unrecognised name yields None - every column the catalogue
+    supplies - rather than raising: the profile argument reaches this from a
+    shell variable at both call sites, and losing a curator's columns is a
+    worse answer to a typo than keeping all of them.
+    """
+    if catalog_column_profile in CATALOG_COLUMN_PROFILES:
+        return CATALOG_COLUMN_PROFILES[catalog_column_profile]
+    return virus_profile(catalog_column_profile)['columns']
+
+
 def build_catalog_reference_table(catalog, catalog_column_profile):
-    if catalog_column_profile == 'all_columns':
+    extra_columns = catalog_columns_for_profile(catalog_column_profile)
+    if extra_columns is None:
         selected_columns = [column for column in catalog.columns if not column.startswith('_')]
     else:
-        selected_columns = REQUIRED_MUTATION_CATALOG_COLUMNS + CATALOG_COLUMN_PROFILES[catalog_column_profile]
+        selected_columns = REQUIRED_MUTATION_CATALOG_COLUMNS + extra_columns
 
     catalog_reference = catalog.copy()
     for column in selected_columns:
@@ -829,6 +1149,12 @@ def build_alignment_coordinate_map(alignment):
     return coord_map
 
 
+#: The alignment columns the annotator reads. `segment` is not optional: it is
+#: what keeps a segmented build from resolving one coordinate space for all of
+#: its segments at once.
+ANNOTATION_ALIGNMENT_COLUMNS = ['sequence_id', 'primary_accession', 'alignment', 'alignment_name', 'segment']
+
+
 def prepare_sequence_alignment(seq_aln):
     seq_aln = seq_aln.copy()
     if 'sequence_id' not in seq_aln.columns:
@@ -842,25 +1168,9 @@ def prepare_sequence_alignment(seq_aln):
         raise AnnotationMappingError('sequence_alignment must contain an alignment column')
     if 'alignment_name' not in seq_aln.columns:
         seq_aln['alignment_name'] = ''
+    if 'segment' not in seq_aln.columns:
+        seq_aln['segment'] = ''
     return seq_aln
-
-
-def find_reference_alignment_row(group_df, reference_id, master_candidates):
-    candidates = extract_accession_tokens(reference_id) + list(master_candidates)
-    seen = []
-    for candidate in candidates:
-        if candidate and candidate not in seen:
-            seen.append(candidate)
-
-    for candidate in seen:
-        mask = (
-            group_df['sequence_id'].astype(str).str.strip() == candidate
-        ) | (
-            group_df['primary_accession'].astype(str).str.strip() == candidate
-        )
-        if mask.any():
-            return group_df.loc[mask].iloc[0], candidate
-    return None, None
 
 
 def resolve_aligned_codon_indices(coord_map, cds_start, aa_pos):
@@ -905,6 +1215,129 @@ def extract_feature_codon(alignment, coord_map, cds_start, aa_pos):
 
 
 
+def resolve_master_coordinate_space(seq_aln, coord_candidates, db_gff_maps, alias_lookup,
+                                    allow_genbank_reference_gff):
+    """``(accession, coord_map, feature_map)`` for one set of alignment rows.
+
+    Answers ``(None, None, None)`` rather than raising, because with more than
+    one segment in play a segment that cannot be resolved must not take the
+    other seven down with it.  The caller decides whether an empty result is
+    fatal.
+
+    All catalog positions are defined relative to the master reference, and
+    every sequence sharing that master's alignment is padded to the same width,
+    so the master's column positions apply to all of them.  Per-genotype
+    reference OG coordinates must NOT be used: they produce shifted column
+    indices for sequences aligned to a divergent genotype reference (D10988 NS3
+    cds_start_OG=3345 against NC_004102's 3420 shifts everything downstream by
+    ~71 bp relative to the master numbering).
+    """
+    def coord_map_for(candidate):
+        mask = (
+            seq_aln['sequence_id'].astype(str).str.strip() == candidate
+        ) | (
+            seq_aln['primary_accession'].astype(str).str.strip() == candidate
+        )
+        if not mask.any():
+            return None
+        return build_alignment_coordinate_map(seq_aln.loc[mask].iloc[0]['alignment'])
+
+    for candidate in coord_candidates:
+        cand_coord_map = coord_map_for(candidate)
+        if cand_coord_map is None:
+            continue
+        for token in extract_accession_tokens(candidate):
+            if token in db_gff_maps and feature_map_has_gene_information(db_gff_maps[token]):
+                return candidate, cand_coord_map, db_gff_maps[token]
+
+    # Fallback: any reference group in this set with a usable feature map.
+    for ref_id in seq_aln['_reference_id'].dropna().unique():
+        mask = seq_aln['sequence_id'].astype(str).str.strip() == str(ref_id).strip()
+        if not mask.any():
+            continue
+        for token in extract_accession_tokens(str(ref_id)):
+            if token in db_gff_maps and feature_map_has_gene_information(db_gff_maps[token]):
+                return (
+                    str(ref_id),
+                    build_alignment_coordinate_map(seq_aln.loc[mask].iloc[0]['alignment']),
+                    db_gff_maps[token],
+                )
+
+    if not allow_genbank_reference_gff:
+        return None, None, None
+
+    for candidate in coord_candidates:
+        cand_coord_map = coord_map_for(candidate)
+        if cand_coord_map is None:
+            continue
+        try:
+            fetched_map = fetch_reference_gff_map(candidate, alias_lookup)
+        except Exception:
+            continue
+        if fetched_map:
+            return candidate, cand_coord_map, fetched_map
+
+    return None, None, None
+
+
+def build_segment_position_index(catalog, master_coord_map, master_feature_map, diagnostics,
+                                 protein_miss_counts, proteins_resolved):
+    """``{(protein, aa_pos, alignment_indices): {alt_residue: [rows]}}`` for one segment.
+
+    Every catalog row that does not make it into the index is accounted for:
+    an unusable protein name or position, a protein absent from this
+    reference's features, a position past the protein's own end, or a
+    coordinate the master's alignment does not carry.
+    """
+    grouped_positions = {}
+    mappable_catalog_rows = 0
+
+    for _, row in catalog.iterrows():
+        protein_name = row['_canonical_protein']
+        aa_pos = row['_aa_position_int']
+        if not protein_name or aa_pos is None:
+            diagnostics['invalid_catalog_rows'] += 1
+            continue
+
+        gene_entry = master_feature_map.get(protein_name)
+        if gene_entry is None:
+            protein_miss_counts[protein_name] += 1
+            continue
+        proteins_resolved.add(protein_name)
+
+        # A position has to fall inside the protein it is catalogued against.
+        # Only the alignment bounded it before, so a position past the feature
+        # end resolved into the NEXT gene's reading frame and the residue found
+        # there was reported under this protein's name - correct-looking output
+        # attributed to the wrong protein.  Mature-peptide annotations are
+        # per-reference and can be truncated, and choose_feature_entry() breaks
+        # a priority tie by preferring the SHORTEST span, so this is reachable
+        # without any curation error at all.
+        feature_end = gene_entry.get('cds_end')
+        if feature_end is not None:
+            last_nucleotide = gene_entry['cds_start'] + aa_pos * 3 - 1
+            if last_nucleotide > feature_end:
+                diagnostics['catalog_position_past_feature_end'] += 1
+                continue
+
+        alignment_indices = resolve_aligned_codon_indices(
+            master_coord_map,
+            gene_entry['cds_start'],
+            aa_pos,
+        )
+        if alignment_indices is None:
+            diagnostics['reference_coordinate_missing_in_alignment'] += 1
+            continue
+
+        position_catalog = grouped_positions.setdefault(
+            (protein_name, aa_pos, tuple(alignment_indices)), {}
+        )
+        position_catalog.setdefault(row['_alt_residue_norm'], []).append(row)
+        mappable_catalog_rows += 1
+
+    return grouped_positions, mappable_catalog_rows
+
+
 def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_lookup, db_gff_maps, allow_genbank_reference_gff, call_evidence=None):
     """Annotate every sequence, gated by genotype scope and per-genotype wild type.
 
@@ -926,10 +1359,12 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
     seq_aln['_reference_id'] = seq_aln['alignment_name'].fillna('').astype(str).str.strip()
 
     if (seq_aln['_reference_id'] == '').any():
+        blank_reference_count = int((seq_aln['_reference_id'] == '').sum())
         if len(master_candidates) == 1:
             seq_aln.loc[seq_aln['_reference_id'] == '', '_reference_id'] = master_candidates[0]
             print(
-                f"[AnnotateMutations][warn] Filled {int((seq_aln['_reference_id'] == master_candidates[0]).sum())} blank alignment_name values with master accession {master_candidates[0]}"
+                f'[AnnotateMutations][warn] Filled {blank_reference_count} blank alignment_name '
+                f'values with master accession {master_candidates[0]}'
             )
         elif len(master_candidates) == 0 and not catalog_reference_hints:
             dummy_ref = seq_aln['sequence_id'].iloc[0]
@@ -963,239 +1398,268 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
     mutations_found = []
 
     # -----------------------------------------------------------------------
-    # Resolve the master reference's alignment and feature map.
+    # Segments.
     #
-    # All catalog positions (aa_position) are defined relative to the master
-    # reference (e.g. NC_004102 for HCV).  Because every sequence in the DB
-    # is padded to the SAME alignment width as the master, the master's column
-    # positions apply universally.  We must NOT use per-genotype-reference OG
-    # coordinates to resolve catalog positions — those produce shifted column
-    # indices for sequences aligned to divergent genotype references (e.g.
-    # D10988 NS3 cds_start_OG=3345 vs NC_004102 cds_start=3420 shifts all
-    # downstream column positions by ~71 bp relative to the master numbering).
+    # A segmented virus keeps every segment's alignment in the same table, each
+    # padded to its OWN width, with its own master reference and its own
+    # proteins.  Resolving one coordinate space for the whole run and scanning
+    # every row against it produced two failures on real data: where the widths
+    # happened to overlap, an HA (segment 4) catalogue entry was read out of an
+    # NA (segment 6) sequence's columns and emitted carrying segment '4' - a
+    # call asserting a provenance it did not have - and on the shipped 8-segment
+    # influenza build it simply aborted, because the one master it picked
+    # (segment 6, which annotates only NA) left every other segment's proteins
+    # 'not found in master feature map'.
+    #
+    # So the run is bucketed by segment.  With a single bucket - every
+    # non-segmented virus, and every caller that passes no segment column at
+    # all - this is exactly the single coordinate space it has always been, and
+    # catalogue segment values are not consulted.  Segment values are compared
+    # through normalize_segment() because the shipped HCV build really does
+    # store both '1' and '1.0' in this column.
     # -----------------------------------------------------------------------
+    if 'segment' in seq_aln.columns:
+        seq_aln['_segment_norm'] = seq_aln['segment'].apply(normalize_segment)
+    else:
+        seq_aln['_segment_norm'] = ''
+    segment_keys = sorted(set(seq_aln['_segment_norm'].tolist()))
+    segment_aware = len(segment_keys) > 1
+
     coord_candidates = []
     for cand in list(master_candidates) + catalog_reference_hints:
         for token in extract_accession_tokens(cand):
             if token and token not in coord_candidates:
                 coord_candidates.append(token)
 
-    master_coord_ref_acc = None
-    master_coord_map = None
-    master_feature_map = None
+    signature_scope = build_signature_genotype_scope(catalog)
+    wild_type_tables = build_wild_type_tables(catalog)
+    sequence_genotypes = build_sequence_genotype_map(meta_data, diagnostics)
 
-    for cand in coord_candidates:
-        mask = (
-            seq_aln['sequence_id'].astype(str).str.strip() == cand
-        ) | (
-            seq_aln['primary_accession'].astype(str).str.strip() == cand
-        )
-        if not mask.any():
-            continue
-        cand_coord_map = build_alignment_coordinate_map(seq_aln.loc[mask].iloc[0]['alignment'])
-        for token in extract_accession_tokens(cand):
-            if token in db_gff_maps and feature_map_has_gene_information(db_gff_maps[token]):
-                master_coord_ref_acc = cand
-                master_coord_map = cand_coord_map
-                master_feature_map = db_gff_maps[token]
-                break
-        if master_coord_map is not None:
-            break
-
-    if master_coord_map is None or master_feature_map is None:
-        # Fallback: try any reference group row with a usable feature map
-        for ref_id in seq_aln['_reference_id'].dropna().unique():
-            mask = seq_aln['sequence_id'].astype(str).str.strip() == str(ref_id).strip()
-            if not mask.any():
-                continue
-            for token in extract_accession_tokens(str(ref_id)):
-                if token in db_gff_maps and feature_map_has_gene_information(db_gff_maps[token]):
-                    master_coord_ref_acc = str(ref_id)
-                    master_coord_map = build_alignment_coordinate_map(seq_aln.loc[mask].iloc[0]['alignment'])
-                    master_feature_map = db_gff_maps[token]
-                    break
-            if master_coord_map is not None:
-                break
-
-    if master_coord_map is None or master_feature_map is None:
-        if not allow_genbank_reference_gff:
-            raise AnnotationMappingError(
-                'Could not resolve a master reference alignment + feature map. '
-                f'Candidates tried: {coord_candidates}. Re-run with --allow_genbank_reference_gff to fetch from NCBI.'
-            )
-        # Try fetching from NCBI
-        for cand in coord_candidates:
-            mask = (
-                seq_aln['sequence_id'].astype(str).str.strip() == cand
-            ) | (
-                seq_aln['primary_accession'].astype(str).str.strip() == cand
-            )
-            if not mask.any():
-                continue
-            try:
-                fetched_map = fetch_reference_gff_map(cand, alias_lookup)
-                if fetched_map:
-                    master_coord_ref_acc = cand
-                    master_coord_map = build_alignment_coordinate_map(seq_aln.loc[mask].iloc[0]['alignment'])
-                    master_feature_map = fetched_map
-                    break
-            except Exception:
-                continue
-        if master_coord_map is None or master_feature_map is None:
-            raise AnnotationMappingError(
-                'Could not resolve a master reference alignment + feature map. '
-                f'Candidates tried: {coord_candidates}'
-            )
-
-    print(
-        f'[AnnotateMutations] Coordinate reference: {master_coord_ref_acc} '
-        f"(all catalog positions resolved using this sequence's alignment column space)"
-    )
-
-    # -----------------------------------------------------------------------
-    # Build a single catalog position lookup using universal alignment column
-    # indices derived from the master reference coordinate system.
-    # -----------------------------------------------------------------------
-    grouped_positions = {}   # (protein_name, aa_pos, alignment_indices_tuple) -> {alt_residue: [catalog_rows]}
-    proteins_missing_from_reference = Counter()
+    resolved_maps = {}
+    protein_miss_counts = Counter()
+    proteins_resolved = set()
     mappable_catalog_rows = 0
 
-    for _, row in catalog.iterrows():
-        protein_name = row['_canonical_protein']
-        aa_pos = row['_aa_position_int']
-        if not protein_name or aa_pos is None:
-            diagnostics['invalid_catalog_rows'] += 1
+    if segment_aware:
+        catalog_segments = set(catalog['_segment_norm'].tolist())
+        stranded = {
+            value for value in catalog_segments
+            if value and value not in set(segment_keys)
+        }
+        if stranded:
+            stranded_rows = int(catalog['_segment_norm'].isin(stranded).sum())
+            diagnostics['catalog_rows_without_matching_segment'] += stranded_rows
+            print(
+                '[AnnotateMutations][warn] '
+                f'{stranded_rows} catalog row(s) name segment(s) '
+                f"{', '.join(sorted(stranded))}, which no sequence in this build carries"
+            )
+
+    for segment_key in segment_keys:
+        if segment_aware:
+            segment_aln = seq_aln[seq_aln['_segment_norm'] == segment_key]
+            # A catalogue row with no segment of its own applies to every
+            # segment: it is the shape a non-segmented catalogue has, and there
+            # is nothing better to do with it than try it everywhere.
+            segment_catalog = catalog[catalog['_segment_norm'].isin({segment_key, ''})]
+        else:
+            segment_aln = seq_aln
+            segment_catalog = catalog
+
+        label = f'segment {segment_key}' if segment_aware else 'all sequences'
+        if segment_catalog.empty:
+            diagnostics['segments_without_catalog_rows'] += 1
+            print(f'[AnnotateMutations][warn] No catalog rows apply to {label}')
             continue
 
-        gene_entry = master_feature_map.get(protein_name)
-        if gene_entry is None:
-            proteins_missing_from_reference[protein_name] += 1
-            continue
-
-        alignment_indices = resolve_aligned_codon_indices(
-            master_coord_map,
-            gene_entry['cds_start'],
-            aa_pos,
+        coord_ref_acc, coord_map, feature_map = resolve_master_coordinate_space(
+            segment_aln, coord_candidates, db_gff_maps, alias_lookup, allow_genbank_reference_gff
         )
-        if alignment_indices is None:
-            diagnostics['reference_coordinate_missing_in_alignment'] += 1
+        if coord_map is None or feature_map is None:
+            diagnostics['segments_without_reference_coordinates'] += 1
+            print(
+                f'[AnnotateMutations][warn] Could not resolve a reference coordinate space for '
+                f'{label}; its sequences are not annotated'
+            )
             continue
 
-        position_catalog = grouped_positions.setdefault(
-            (protein_name, aa_pos, tuple(alignment_indices)), {}
+        if segment_aware:
+            print(
+                f'[AnnotateMutations] Coordinate reference for segment {segment_key}: '
+                f'{coord_ref_acc} ({len(segment_aln)} sequences)'
+            )
+        else:
+            print(
+                f'[AnnotateMutations] Coordinate reference: {coord_ref_acc} '
+                f"(all catalog positions resolved using this sequence's alignment column space)"
+            )
+
+        grouped_positions, segment_mappable = build_segment_position_index(
+            segment_catalog, coord_map, feature_map, diagnostics,
+            protein_miss_counts, proteins_resolved,
         )
-        position_catalog.setdefault(row['_alt_residue_norm'], []).append(row)
-        mappable_catalog_rows += 1
+        mappable_catalog_rows += segment_mappable
+        resolved_maps[coord_ref_acc] = {
+            'resolved_accession': coord_ref_acc,
+            'feature_map': feature_map,
+            'attempted': coord_candidates,
+            'source': 'master_coord_ref',
+            'segment': segment_key,
+            'aligned_reference_accession': coord_ref_acc,
+            'aligned_reference_map': coord_map,
+        }
+        if not grouped_positions:
+            continue
+
+        for _, seq_row in segment_aln.iterrows():
+            alignment = seq_row['alignment']
+            primary_accession = seq_row['sequence_id']
+            genotype, subtype_code = sequence_genotypes.get(str(primary_accession).strip(), ('', ''))
+            if not genotype:
+                diagnostics['sequences_without_genotype'] += 1
+            covered_span = alignment_covered_span(alignment)
+            if covered_span is None:
+                # No non-gap column anywhere: this row reports no bases at all,
+                # so it is evidence for nothing.  It has to be stopped here
+                # rather than in residue_from_aligned_codon(), which reads a
+                # missing covered span as 'the caller gave me a bare codon' and
+                # answers with the deletion residue - which would fire every
+                # catalogued deletion against the one sequence carrying no data
+                # whatsoever.
+                diagnostics['sequences_without_sequenced_bases'] += 1
+                continue
+            for (protein_name, aa_pos, alignment_indices), alt_lookup in grouped_positions.items():
+                codon = extract_aligned_codon(alignment, alignment_indices)
+                if codon is None:
+                    diagnostics['codon_out_of_bounds'] += 1
+                    continue
+                aa = residue_from_aligned_codon(codon, covered_span, alignment_indices)
+                if aa == UNKNOWN_RESIDUE:
+                    # 'X' is the absence of a reading, not a residue.  Letting it
+                    # match meant any catalogue row spelled 'X' - a shape the
+                    # normalizer's [A-Z*] token grammar admits - fired on every
+                    # unsequenced or ambiguous codon, flagging the worst-covered
+                    # records the hardest.
+                    diagnostics['codon_residue_unresolved'] += 1
+                    continue
+                matched_rows = alt_lookup.get(aa, [])
+                if not matched_rows:
+                    continue
+
+                wild_type_residues, wild_type_tier = lookup_wild_type_residues(
+                    wild_type_tables, subtype_code, genotype, protein_name, aa_pos
+                )
+                for row in matched_rows:
+                    signature_id = clean_cell(row.get('signature_id', ''))
+                    scope_codes = signature_scope.get(signature_id, frozenset())
+                    scope_tier = classify_genotype_scope(scope_codes, genotype, subtype_code)
+
+                    if wild_type_residues is None:
+                        residue_status = RESIDUE_STATUS_WT_UNKNOWN
+                    elif aa in wild_type_residues:
+                        residue_status = RESIDUE_STATUS_ANCHOR
+                    else:
+                        residue_status = RESIDUE_STATUS_CHANGE
+
+                    if scope_tier == SCOPE_TIER_OUT_OF_SCOPE:
+                        call_status = CALL_STATUS_SUPPRESSED_OUT_OF_SCOPE
+                    elif residue_status == RESIDUE_STATUS_ANCHOR:
+                        call_status = CALL_STATUS_SUPPRESSED_WILD_TYPE
+                    else:
+                        call_status = CALL_STATUS_EMITTED
+
+                    record = {
+                        'primary_accession': primary_accession,
+                        'mutation_id': row['mutation_id'],
+                        'protein_name': protein_name,
+                        'segment': row['_segment_norm'],
+                        'aa_position': aa_pos,
+                        'alt_residue': row['_alt_residue_norm'],
+                        'combination_id': clean_cell(row.get('combination_id', '')),
+                        'signature_id': signature_id,
+                        'signature_kind': clean_cell(row.get('signature_kind', '')),
+                        'observed_residue': aa,
+                        'sequence_genotype': genotype,
+                        'sequence_subtype': subtype_code,
+                        'relevant_genotypes': ','.join(sorted(scope_codes)),
+                        'scope_tier': scope_tier,
+                        'wild_type_residues': ''.join(sorted(wild_type_residues)) if wild_type_residues else '',
+                        'wild_type_scope_tier': wild_type_tier,
+                        'residue_status': residue_status,
+                        'call_status': call_status,
+                    }
+                    if call_evidence is not None:
+                        call_evidence.append(record)
+
+                    if call_status != CALL_STATUS_EMITTED:
+                        diagnostics[call_status] += 1
+                        continue
+
+                    mutations_found.append(record)
+                    diagnostics['mutation_hits'] += 1
+                    if segment_aware and not row['_segment_norm']:
+                        # This build has several segments and the catalogue row
+                        # named none, so it was tried against every one of them.
+                        # The call is not wrong, but which segment it came from
+                        # rests on an assumption rather than on the catalogue.
+                        diagnostics['emitted_from_segment_unstated_catalog_row'] += 1
+                    diagnostics[f'emitted_{scope_tier}'] += 1
+                    diagnostics[f'emitted_{residue_status}'] += 1
+                    if aa == DELETION_RESIDUE:
+                        diagnostics['emitted_deletions'] += 1
+
+    if not resolved_maps:
+        message = (
+            'Could not resolve a master reference alignment + feature map. '
+            f'Candidates tried: {coord_candidates}.'
+        )
+        if not allow_genbank_reference_gff:
+            message += ' Re-run with --allow_genbank_reference_gff to fetch from NCBI.'
+        raise AnnotationMappingError(message)
+
+    proteins_missing_from_reference = Counter({
+        protein: count for protein, count in protein_miss_counts.items()
+        if protein not in proteins_resolved
+    })
 
     if mappable_catalog_rows == 0:
+        # Only a MAPPING failure is fatal - not one protein of the catalogue
+        # could be found in any reference's features, which means the build is
+        # misconfigured and every call would be missing.  If proteins did
+        # resolve and their rows were simply all rejected (every position past
+        # its protein's end, say), that is a catalogue problem already counted
+        # in the diagnostics, and an empty result is the honest answer to it
+        # rather than a crash.
         missing_summary = ', '.join(
             protein for protein, _ in proteins_missing_from_reference.most_common(10)
         )
-        raise AnnotationMappingError(
-            'No catalog coordinates could be mapped onto master reference CDS annotations. '
-            f'Proteins not found in master feature map: {missing_summary}'
+        if not proteins_resolved:
+            raise AnnotationMappingError(
+                'No catalog coordinates could be mapped onto master reference CDS annotations. '
+                f'Proteins not found in master feature map: {missing_summary}'
+            )
+        print(
+            '[AnnotateMutations][warn] Every catalog row was rejected before annotation; '
+            'see the mapping summary for the reason'
         )
 
-    # -----------------------------------------------------------------------
-    # Annotate every sequence using the master-derived universal column
-    # positions.  Because all padded alignments share the same column space,
-    # these indices are valid for every row regardless of alignment_name.
-    # -----------------------------------------------------------------------
-    signature_scope = build_signature_genotype_scope(catalog)
-    wild_type_tables = build_wild_type_tables(catalog)
-    sequence_genotypes = build_sequence_genotype_map(meta_data)
-
-    for _, seq_row in seq_aln.iterrows():
-        alignment = seq_row['alignment']
-        primary_accession = seq_row['sequence_id']
-        genotype, subtype_code = sequence_genotypes.get(str(primary_accession).strip(), ('', ''))
-        if not genotype:
-            diagnostics['sequences_without_genotype'] += 1
-        covered_span = alignment_covered_span(alignment)
-        for (protein_name, aa_pos, alignment_indices), alt_lookup in grouped_positions.items():
-            codon = extract_aligned_codon(alignment, alignment_indices)
-            if codon is None:
-                diagnostics['codon_out_of_bounds'] += 1
-                continue
-            aa = residue_from_aligned_codon(codon, covered_span, alignment_indices)
-            matched_rows = alt_lookup.get(aa, [])
-            if not matched_rows:
-                continue
-
-            wild_type_residues, wild_type_tier = lookup_wild_type_residues(
-                wild_type_tables, subtype_code, genotype, protein_name, aa_pos
-            )
-            for row in matched_rows:
-                signature_id = clean_cell(row.get('signature_id', ''))
-                scope_codes = signature_scope.get(signature_id, frozenset())
-                scope_tier = classify_genotype_scope(scope_codes, genotype, subtype_code)
-
-                if wild_type_residues is None:
-                    residue_status = RESIDUE_STATUS_WT_UNKNOWN
-                elif aa in wild_type_residues:
-                    residue_status = RESIDUE_STATUS_ANCHOR
-                else:
-                    residue_status = RESIDUE_STATUS_CHANGE
-
-                if scope_tier == SCOPE_TIER_OUT_OF_SCOPE:
-                    call_status = CALL_STATUS_SUPPRESSED_OUT_OF_SCOPE
-                elif residue_status == RESIDUE_STATUS_ANCHOR:
-                    call_status = CALL_STATUS_SUPPRESSED_WILD_TYPE
-                else:
-                    call_status = CALL_STATUS_EMITTED
-
-                record = {
-                    'primary_accession': primary_accession,
-                    'mutation_id': row['mutation_id'],
-                    'protein_name': protein_name,
-                    'segment': row['_segment_norm'],
-                    'aa_position': aa_pos,
-                    'alt_residue': row['_alt_residue_norm'],
-                    'combination_id': clean_cell(row.get('combination_id', '')),
-                    'signature_id': signature_id,
-                    'signature_kind': clean_cell(row.get('signature_kind', '')),
-                    'observed_residue': aa,
-                    'sequence_genotype': genotype,
-                    'sequence_subtype': subtype_code,
-                    'relevant_genotypes': ','.join(sorted(scope_codes)),
-                    'scope_tier': scope_tier,
-                    'wild_type_residues': ''.join(sorted(wild_type_residues)) if wild_type_residues else '',
-                    'wild_type_scope_tier': wild_type_tier,
-                    'residue_status': residue_status,
-                    'call_status': call_status,
-                }
-                if call_evidence is not None:
-                    call_evidence.append(record)
-
-                if call_status != CALL_STATUS_EMITTED:
-                    diagnostics[call_status] += 1
-                    continue
-
-                mutations_found.append(record)
-                diagnostics['mutation_hits'] += 1
-                diagnostics[f'emitted_{scope_tier}'] += 1
-                diagnostics[f'emitted_{residue_status}'] += 1
-                if aa == DELETION_RESIDUE:
-                    diagnostics['emitted_deletions'] += 1
-
     if proteins_missing_from_reference:
+        # These counts have to reach the diagnostics Counter, not just stdout:
+        # the 'Mapping summary' line built from it is what an operator and any
+        # downstream check actually parse, and only a TOTAL mapping failure
+        # raises.  Losing nine catalogue proteins out of ten was not an error
+        # and left no trace in the summary at all.
+        diagnostics['catalog_rows_without_reference_feature'] = sum(
+            proteins_missing_from_reference.values()
+        )
+        diagnostics['proteins_without_reference_feature'] = len(proteins_missing_from_reference)
         preview = ', '.join(
             protein for protein, _ in proteins_missing_from_reference.most_common(10)
         )
         print(f'[AnnotateMutations][warn] Missing protein annotations in master feature map: {preview}')
 
-    resolved_maps = {
-        master_coord_ref_acc: {
-            'resolved_accession': master_coord_ref_acc,
-            'feature_map': master_feature_map,
-            'attempted': coord_candidates,
-            'source': 'master_coord_ref',
-            'aligned_reference_accession': master_coord_ref_acc,
-            'aligned_reference_map': master_coord_map,
-        }
-    }
-
     return mutations_found, diagnostics, resolved_maps
+
 
 MUTATION_CALL_IDENTITY_COLUMNS = [
     'primary_accession',
@@ -1381,7 +1845,14 @@ def main():
     parser = argparse.ArgumentParser(description="Annotate mutations and drug resistance.")
     parser.add_argument("--db", required=True, help="Path to SQLite database.")
     parser.add_argument("--mutation_catalog", required=True, help="Path to mutation catalog TSV.")
-    parser.add_argument("--virus", default="", help="Virus context for specific logics (e.g. HCV)")
+    parser.add_argument(
+        "--virus", default="",
+        help="Virus this build is for (e.g. HCV, influenza). Selects the protein-name "
+             "vocabulary used to canonicalise catalog protein names against reference "
+             "features, and the default set of catalog columns written to the database. "
+             f"Known: {', '.join(sorted(VIRUS_PROFILES))}. Anything else is annotated with "
+             "the generic profile, which renames no proteins and keeps every catalog column.",
+    )
     parser.add_argument("--publications", default=None,
         help="Optional publication metadata CSV (id/title/authors_short/year/journal/url). "
              "Loaded into a publications table so the PMIDs already in mutation_catalog.pubmed_id "
@@ -1392,9 +1863,13 @@ def main():
              "to trial names.")
     parser.add_argument(
         "--catalog_column_profile",
-        required=True,
-        choices=['HCV', 'influenza', 'all_columns'],
-        help="Select which mutation catalog columns are written to the database.",
+        default=None,
+        help="Which mutation catalog columns are written to the database. Defaults to the "
+             "column set for --virus, and to every column the catalog supplies when the "
+             "virus is unknown or unspecified. Accepts a virus name or the legacy values "
+             "'HCV', 'influenza' and 'all_columns'. This used to be required with a fixed "
+             "choices list, which made every virus outside that list fail at argument "
+             "parsing.",
     )
     parser.add_argument(
         "--allow_genbank_reference_gff",
@@ -1410,8 +1885,30 @@ def main():
         print(f"Error: Catalog {args.mutation_catalog} not found.", file=sys.stderr)
         sys.exit(1)
 
+    virus_name = resolve_virus_name(args.virus, args.catalog_column_profile)
+    profile = VIRUS_PROFILES[virus_name]
+    catalog_column_profile = args.catalog_column_profile or args.virus or GENERIC_VIRUS
+    requested_virus = clean_cell(args.virus) or clean_cell(args.catalog_column_profile)
+    if requested_virus and virus_name == GENERIC_VIRUS and resolve_virus_name(requested_virus) == GENERIC_VIRUS:
+        if clean_cell(args.catalog_column_profile) != 'all_columns':
+            print(
+                f"[AnnotateMutations][warn] No virus profile named {requested_virus!r}; using the "
+                f"generic profile (no protein-name inference, every catalog column kept)"
+            )
+    print(
+        f'[AnnotateMutations] Virus profile: {virus_name}; catalog column profile: '
+        f'{catalog_column_profile}'
+    )
+
     print("Loading mutation catalog...")
-    catalog = pd.read_csv(args.mutation_catalog, sep='\t', dtype=str)
+    # keep_default_na=False: pandas' default NA sentinels include the literal
+    # 'NA', which is the standard name of influenza's neuraminidase - the
+    # protein oseltamivir resistance is catalogued against.  Without it every
+    # NA row loses its protein_name to NaN, canonicalize_product() renders that
+    # back as the string 'nan', and the entire segment silently fails to
+    # resolve.  'NULL', 'None', 'N/A' and 'nan' are sentinels too, and a
+    # curated catalogue is entitled to use any of them as a real value.
+    catalog = pd.read_csv(args.mutation_catalog, sep='\t', dtype=str, keep_default_na=False)
 
     try:
         validate_required_catalog_columns(catalog)
@@ -1430,7 +1927,7 @@ def main():
         except Exception:
             pass
 
-        gene_alias_lookup = load_gene_alias_lookup(conn)
+        gene_alias_lookup = load_gene_alias_lookup(conn, profile=profile)
         catalog, invalid_positions = prepare_catalog(catalog, gene_alias_lookup)
         if invalid_positions:
             print(f'[AnnotateMutations][warn] Skipping {invalid_positions} catalog rows with invalid aa_position values')
@@ -1441,7 +1938,10 @@ def main():
         call_evidence = []
         mutations_found, diagnostics, resolved_maps = annotate_from_reference_coordinates(
             catalog,
-            seq_aln[['sequence_id', 'primary_accession', 'alignment', 'alignment_name']].copy(),
+            # `segment` travels with the alignment: dropping it here was what
+            # made a segmented build resolve one coordinate space for every
+            # segment at once.
+            seq_aln[ANNOTATION_ALIGNMENT_COLUMNS].copy(),
             meta_data,
             gene_alias_lookup,
             db_gff_maps,
@@ -1463,7 +1963,7 @@ def main():
                 raise AnnotationMappingError('No mutations were annotated because coordinate mapping failed for all available reference groups.')
             print('[AnnotateMutations][warn] No mutation hits were found after successful coordinate mapping')
 
-        write_mutation_tables(conn, catalog, mutations_found, args.catalog_column_profile,
+        write_mutation_tables(conn, catalog, mutations_found, catalog_column_profile,
                               call_evidence=call_evidence,
                               publications=load_publications_table(args.publications),
                               clinical_trials=load_clinical_trials_table(args.clinical_trials))

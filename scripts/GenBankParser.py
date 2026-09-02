@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 from argparse import ArgumentParser
 from date_utils import split_date_components
 from ExportRefListFromUpdateDb import load_reference_dict, load_reference_file_dict
+import accession_utils
 import segment_utils
 
 # add source example NCBI or GISAID, or user define, add temp sequences 
@@ -45,6 +46,7 @@ class GenBankParser:
 		self.out_root = join(self.base_dir, self.output_dir)
 		os.makedirs(self.out_root, exist_ok=True)
 		self._existing_accessions = set()
+		self._existing_versions = {}
 
 	def _normalize_segment_value(self, raw_segment):
 		"""Canonicalise the GenBank ``/segment=`` qualifier.
@@ -99,12 +101,44 @@ class GenBankParser:
 		return list(exclusion_list)
 
 	def load_existing_accessions_from_db(self, db_path):
+		"""Which accessions does the update DB already hold, and at which version?
+
+		Returns the set of BARE ``meta_data.primary_accession`` values, as it
+		always has, and additionally populates :attr:`_existing_versions` - a
+		``{bare_accession: highest_stored_version}`` map read from
+		``meta_data.accession_version``, the one column that is allowed to keep
+		its ``.<digits>`` suffix.
+
+		The version map exists because the returned set is not enough to decide
+		what to skip. ``xml_to_tsv`` skipped every accession in that set, and the
+		set is keyed on the bare accession, so a record GenBank had *revised* -
+		``PV547761.1`` becoming ``PV547761.2`` - looked identical to one that had
+		not changed at all. GenBankFetcher downloads a revision deliberately and
+		records it in update_accessions.tsv; the parser then dropped it and the
+		run still exited 0, so ``--update_db`` could never apply a corrected
+		sequence.
+
+		Two shapes deliberately stay out of the map, because "no stored version"
+		must keep meaning "skip, exactly as before":
+
+		* a DB with no ``accession_version`` column at all (older builds, and the
+		  shared test fixture) - nothing is knowable, so nothing is re-parsed;
+		* an accession whose stored version is absent or unparseable.
+
+		Excluded accessions are removed from the map as well. A revision must not
+		resurrect a record an operator excluded by hand: ``exclusion_status`` is
+		cleared-on-update by CreateSqliteDB, so re-parsing one would overwrite the
+		stored exclusion with ``'0'``. GenBankFetcher never re-fetches an excluded
+		base either, so the two agree.
+		"""
 		if not db_path:
 			raise ValueError('Update DB path not provided')
 		if not os.path.exists(db_path):
 			raise FileNotFoundError(f"Update DB not found: {db_path}")
 
 		existing = set()
+		excluded = set()
+		versions = {}
 		conn = sqlite3.connect(db_path)
 		try:
 			cursor = conn.cursor()
@@ -125,7 +159,26 @@ class GenBankParser:
 					"SELECT primary_accession FROM meta_data WHERE primary_accession IS NOT NULL AND TRIM(primary_accession) != '' "
 					"AND LOWER(TRIM(COALESCE(CAST(exclusion_status AS TEXT), ''))) NOT IN ('', '0', 'false', 'no', 'na', 'none', 'nan')"
 				)
-				existing.update([row[0].strip() for row in cursor.fetchall() if row[0]])
+				excluded.update([row[0].strip() for row in cursor.fetchall() if row[0]])
+				existing.update(excluded)
+
+			if 'accession_version' in meta_cols:
+				cursor.execute(
+					"SELECT primary_accession, accession_version FROM meta_data "
+					"WHERE primary_accession IS NOT NULL AND TRIM(primary_accession) != '' "
+					"AND accession_version IS NOT NULL AND TRIM(CAST(accession_version AS TEXT)) != ''"
+				)
+				for stored_accession, stored_version in cursor.fetchall():
+					bare = accession_utils.normalise_accession(stored_accession)
+					if bare is None:
+						continue
+					_, version = accession_utils.split_accession_version(stored_version)
+					if version is None:
+						continue
+					# A segmented record has one row per segment; the newest
+					# version any of them carries is what GenBank last gave us.
+					if version > versions.get(bare, -1):
+						versions[bare] = version
 
 			cursor.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='excluded_accessions' LIMIT 1")
 			if cursor.fetchone() is not None:
@@ -133,12 +186,47 @@ class GenBankParser:
 				excl_cols = {row[1] for row in cursor.fetchall()}
 				if 'primary_accession' in excl_cols:
 					cursor.execute("SELECT primary_accession FROM excluded_accessions WHERE primary_accession IS NOT NULL AND TRIM(primary_accession) != ''")
-					existing.update([row[0].strip() for row in cursor.fetchall() if row[0]])
+					excluded_rows = [row[0].strip() for row in cursor.fetchall() if row[0]]
+					existing.update(excluded_rows)
+					excluded.update(excluded_rows)
 		finally:
 			conn.close()
 
+		for excluded_accession in excluded:
+			bare = accession_utils.normalise_accession(excluded_accession)
+			if bare is not None:
+				versions.pop(bare, None)
+
+		self._existing_versions = versions
 		print(f"[update] Loaded {len(existing)} existing/excluded accessions from {db_path}")
+		if versions:
+			print(f"[update] Loaded stored accession_version for {len(versions)} of them; revised records will be re-parsed")
 		return existing
+
+	def _is_revision_of_existing(self, primary_accession, accession_version):
+		"""Is this XML record NEWER than the copy the update DB already holds?
+
+		The only reason to re-parse an accession the DB already has. Both sides go
+		through :func:`accession_utils.split_accession_version` so that the bare
+		identity key and the version are separated by the same rule - the old
+		``rpartition('.')`` idiom would read the ``.1`` of a strain name as a
+		version number.
+
+		Returns ``False`` whenever the comparison cannot be made - the DB has no
+		stored version for this accession, or the incoming record carries no
+		parseable one. Unprovable is not the same as newer, and the safe answer is
+		the historical one: skip.
+		"""
+		bare = accession_utils.normalise_accession(primary_accession)
+		if bare is None:
+			return False
+		stored_version = self._existing_versions.get(bare)
+		if stored_version is None:
+			return False
+		_, incoming_version = accession_utils.split_accession_version(accession_version)
+		if incoming_version is None:
+			return False
+		return incoming_version > stored_version
 
 	def xml_to_tsv(self, xml_file, ref_seq_dict: dict, exclusion_acc_list: list):
 		tree = ET.parse(xml_file)
@@ -173,10 +261,19 @@ class GenBankParser:
 			else:
 				content['accession_type'] = 'query'
 
+			# Skip what the update DB already has - UNLESS GenBank has revised it.
+			# The membership test alone is keyed on the bare accession, so it could
+			# not tell a genuinely unchanged record from one whose version had been
+			# bumped, and threw the revision away silently.
 			if self.update_mode and self._existing_accessions:
 				acc_type = str(content['accession_type']).strip().lower()
 				if content['primary_accession'] in self._existing_accessions and acc_type not in {'master', 'reference'}:
-					continue
+					if not self._is_revision_of_existing(content['primary_accession'], content['accession_version']):
+						continue
+					print(
+						f"[update] Re-parsing revised record {content['accession_version']} "
+						f"(stored version {self._existing_versions.get(accession_utils.normalise_accession(content['primary_accession']))})"
+					)
 	
 			if content['primary_accession'] in exclusion_acc_list:
 				content['accession_type'] = 'excluded'

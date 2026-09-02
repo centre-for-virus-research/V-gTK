@@ -10,6 +10,7 @@ import sqlite3
 import requests
 import read_file
 import subprocess
+import accession_utils
 from Bio import SeqIO
 from time import sleep
 from Bio.Seq import Seq
@@ -38,8 +39,27 @@ class GenBankSequenceSubmitter:
 
 	@staticmethod
 	def path_to_basename(file_path):
-		path = os.path.basename(file_path)
-		return path.split('.')[0]
+		"""The canonical (bare) accession a pipeline file is named after.
+
+		Delegates to :mod:`accession_utils`, the single authority on accession
+		identity, so this script and :mod:`NextalignAlignment` cannot disagree
+		about what a file called ``NC_001542.1.fasta`` is.
+
+		This used to be ``os.path.basename(path).split('.')[0]``, which cuts at
+		the *first* dot rather than at a recognised extension. Every accession
+		this repo ships is bare and single-dotted, so the two agree on today's
+		data - it was a latent hazard, not a live defect. They disagree on the
+		shapes that do turn up: ``NC_001542.1.fasta`` (a versioned download),
+		``NC_001542.aligned.fasta``, and any dot-leading name, which collapsed
+		to ``''`` and then became a file called ``_aln.fasta`` at the call sites
+		below - one shared output name for every such input.
+
+		Bare is the identity key everywhere: ``meta_data.primary_accession``,
+		the FASTA headers, the on-disk filenames. The versioned spelling is
+		legitimate only in ``meta_data.accession_version``, where GenBankFetcher
+		uses it to spot a revised record.
+		"""
+		return accession_utils.accession_from_filename(file_path)
 
 	def table2asn(self):
 		os.makedirs(join(self.tmp_dir, self.output_dir), exist_ok=True)
@@ -341,7 +361,17 @@ class GenBankSequenceSubmitter:
 	def mafft_query_sequences(self, query_file, ref_alignment_file, output_dir):
 		output_file = self.path_to_basename(ref_alignment_file) + "_aln.fasta"
 		output_path = join(output_dir, output_file)
-		ref_alignment_file = ref_alignment_file.split('.')[0] + "_aln.fasta"
+		# process() hands this method an EXTENSION-LESS path, so this line rebuilds
+		# the sibling extract_matching_sequences() actually wrote:
+		# <reference_alignments>/<accession>_aln.fasta. It used to be
+		# ``ref_alignment_file.split('.')[0]``, which cut the WHOLE PATH at its
+		# first dot - so a tmp_dir spelled ``./tmp`` or ``../run.v2`` lost its
+		# directory and mafft was handed a path that does not exist. Only the
+		# basename names an accession, so only the basename is normalised.
+		ref_alignment_file = join(
+			os.path.dirname(ref_alignment_file),
+			self.path_to_basename(ref_alignment_file) + "_aln.fasta"
+		)
 		try:
 			with open(output_path, 'w') as out_f:
 				subprocess.run(['mafft', '--add', query_file, '--keeplength', ref_alignment_file], stdout=out_f, check=True)
@@ -354,7 +384,11 @@ class GenBankSequenceSubmitter:
 
 		for file in os.listdir(fasta_dir):
 			if file.endswith("_aln.fasta"):
-				accession = file.split("_")[0]
+				# Was file.split("_")[0], which cuts at the FIRST underscore - so
+				# every RefSeq accession collapsed to its prefix ('NC_001542_aln.fasta'
+				# -> 'NC') and then matched nothing, or matched the wrong record.
+				# The suffix this builder appends is exactly "_aln", so remove that.
+				accession = accession_utils.accession_from_filename(file[: -len("_aln.fasta")])
 				file_path = os.path.join(fasta_dir, file)
 
 				for record in SeqIO.parse(file_path, "fasta"):

@@ -18,13 +18,40 @@ _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
+import accession_utils
 import projectability
 
 
 def _normalize_accession(acc: str) -> str:
+    """The canonical (bare) id for a FASTA header, a ``query_aln/<ref>``
+    directory name, or a nextalign ``seqName`` cell.
+
+    Two separable jobs used to be fused into one chain of splits:
+
+    * ``.split()[0]`` keeps the first whitespace-delimited token, because a
+      FASTA header carries a free-text description after the id. That is real
+      work and it stays here.
+    * the version suffix is now dropped by :mod:`accession_utils` rather than
+      by ``.split(".")[0]``, which cut at the *first* dot. That is only "drop
+      the version" when the input has exactly one dot; it truncated influenza
+      strain names (``A/swine/Iowa/4.1/1976`` -> ``A/swine/Iowa/4``) and any
+      other label that happens to contain a dot.
+
+    Bare is the form the rest of the pipeline joins on, and in particular the
+    form ``PadAlignment --skip_ids`` expects: it strips the version from each
+    record id and looks the result up in the **raw** lines of
+    ``filtered_sequences_ids.txt``. A versioned id written into that file
+    therefore matches nothing, and the sequence it names is not skipped.
+
+    A header with no id at all now yields ``""`` instead of raising
+    IndexError, which used to abandon the parse of the rest of the file.
+    """
     if not acc:
         return ""
-    return acc.strip().split()[0].split(".")[0]
+    tokens = str(acc).strip().split()
+    if not tokens:
+        return ""
+    return accession_utils.normalise_accession(tokens[0]) or ""
 
 
 def _validate_nextalign_dir(nextalign_dir: str) -> Path:
@@ -254,8 +281,14 @@ def collect_filtered_sequences(nextalign_dir: str, output_file: str, max_gap_pro
     # alignment failures are diagnostics for subject/reference rows and must not
     # be turned into downstream query exclusions.
     for errors_file in nextalign_path.glob("query_aln/*/*.errors.csv"):
-        # Get reference ID from parent directory name
-        ref_id = errors_file.parent.name
+        # Canonical on both sides. The unprojectable and high-gap collectors
+        # below always normalised; this branch did not, so the writer emitted a
+        # MIXTURE of spellings into filtered_sequences_ids.txt - whatever
+        # nextalign happened to put in its seqName column, description and
+        # version included. PadAlignment --skip_ids compares a version-stripped
+        # record id against those lines verbatim, so every id that came from an
+        # errors.csv in a non-bare spelling was silently never skipped.
+        ref_id = _normalize_accession(errors_file.parent.name)
         
         try:
             with open(errors_file, "r", encoding="utf-8") as f:
@@ -266,7 +299,7 @@ def collect_filtered_sequences(nextalign_dir: str, output_file: str, max_gap_pro
                         f"Malformed nextalign errors file {errors_file}: required columns are seqName, errors, warnings"
                     )
                 for row in reader:
-                    seq_name = row.get("seqName", "").strip()
+                    seq_name = _normalize_accession(row.get("seqName", ""))
                     errors = row.get("errors", "").strip()
                     warnings = row.get("warnings", "").strip()
                     

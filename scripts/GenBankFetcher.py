@@ -7,6 +7,7 @@ from time import sleep
 from os.path import join
 from argparse import ArgumentParser
 from ExportRefListFromUpdateDb import load_reference_file_accessions
+import accession_utils
 
 try:
 	import requests
@@ -420,6 +421,36 @@ class GenBankFetcher:
 		except ValueError:
 			return base, None
 
+	def _canonical_exclusion_keys(self, values):
+		"""Bare identity keys for the curator's exclusion list.
+
+		The exclusion set is matched against the *bare* accession parsed out of
+		an NCBI id, but the rows feeding it come from whichever meta_data column
+		:meth:`_detect_meta_data_acc_col` picked - and the default, and the
+		column every shipped DB actually has, is ``accession_version``, which
+		holds ``PV547728.1``. A bare key is never equal to a versioned string,
+		so the guard was dead code: a record the curator had deliberately
+		excluded got silently re-downloaded the moment GenBank revised it.
+
+		It only ever bit on a revision because an *unrevised* excluded record is
+		caught earlier by the ``local_exact`` test - which means it bit on
+		exactly the run where honouring the exclusion matters, and looked fine
+		on every other run.
+
+		Normalising at load rather than at the comparison keeps this set
+		canonical whichever column was used, and matches the
+		``excluded_accessions`` table branch, which already stores bare
+		``primary_accession`` values. :mod:`accession_utils` is the authority on
+		what "bare" means: a strain name or a cluster label that happens to
+		contain a dot is left whole rather than truncated by ``split('.')[0]``.
+		"""
+		keys = set()
+		for value in values:
+			key = accession_utils.normalise_accession(value)
+			if key:
+				keys.add(key)
+		return keys
+
 	def _load_db_accession_context(self, db_path, meta_acc_col='accession_version'):
 		if not db_path:
 			raise ValueError('Update DB path not provided')
@@ -445,14 +476,14 @@ class GenBankFetcher:
 					f"SELECT {acc_col} FROM meta_data WHERE {acc_col} IS NOT NULL "
 					"AND LOWER(TRIM(COALESCE(CAST(exclusion_status AS TEXT), ''))) NOT IN ('', '0', 'false', 'no', 'na', 'none', 'nan')"
 				)
-				excluded_primary.update({row[0].strip() for row in cursor.fetchall() if row[0]})
+				excluded_primary.update(self._canonical_exclusion_keys(row[0] for row in cursor.fetchall()))
 			cursor.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='excluded_accessions' LIMIT 1")
 			if cursor.fetchone() is not None:
 				cursor.execute("PRAGMA table_info(excluded_accessions)")
 				excl_cols = {row[1] for row in cursor.fetchall()}
 				if 'primary_accession' in excl_cols:
 					cursor.execute("SELECT primary_accession FROM excluded_accessions WHERE primary_accession IS NOT NULL AND TRIM(primary_accession) != ''")
-					excluded_primary = {row[0].strip() for row in cursor.fetchall() if row[0]}
+					excluded_primary = self._canonical_exclusion_keys(row[0] for row in cursor.fetchall())
 		finally:
 			conn.close()
 
@@ -480,6 +511,10 @@ class GenBankFetcher:
 		print(f"[update] Wrote update log: {log_path}")
 
 	def _compute_missing_ids(self, ncbi_ids, meta_accessions, excluded_primary):
+		# Both sides of the exclusion test are reduced to the bare identity key.
+		# local_exact and local_versions below deliberately keep the versioned
+		# spelling: that is what detects a revised record.
+		excluded_bare = self._canonical_exclusion_keys(excluded_primary or ())
 		local_exact = set(str(x).strip() for x in meta_accessions if x is not None)
 		local_versions = {}
 		for acc_ver in meta_accessions:
@@ -514,7 +549,7 @@ class GenBankFetcher:
 			if not base:
 				continue
 
-			if base in excluded_primary:
+			if accession_utils.normalise_accession(base) in excluded_bare:
 				continue
 
 			if base in local_versions:

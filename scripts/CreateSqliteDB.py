@@ -12,6 +12,7 @@ from datetime import datetime
 from argparse import ArgumentParser
 from ExportRefListFromUpdateDb import load_reference_file_table
 from clade_from_tree import assign_labels_from_tree
+from accession_utils import normalise_accession
 import segment_utils
 
 
@@ -155,9 +156,32 @@ class CreateSqliteDB:
 			return set()
 		try:
 			with open(self.filtered_ids_file, "r", encoding="utf-8") as f:
-				return {line.strip() for line in f if line.strip()}
+				raw = {line.strip() for line in f if line.strip()}
 		except FileNotFoundError:
 			return set()
+		# These are matched against meta_data.primary_accession, which
+		# _normalise_identity_columns has already made bare. Normalising only one
+		# side of that comparison would silently stop the QC exclusion applying -
+		# strictly worse than the un-normalised state it replaced. Carrying BOTH
+		# spellings keeps the set a superset of what it used to be, so this can
+		# only ever exclude more, never less.
+		return raw | self._bare_variants(raw)
+
+	@staticmethod
+	def _bare_variants(ids):
+		"""The canonical spelling of every id that has one.
+
+		Composite ``<accession>_<segment>`` ids are left alone: an accession may
+		itself contain an underscore (``NC_001542``), so splitting one apart is
+		guesswork. They stay comparable because the composite is rebuilt from the
+		already-normalised accession on the other side.
+		"""
+		bare = set()
+		for value in ids:
+			normalised = normalise_accession(value)
+			if normalised and normalised != value:
+				bare.add(normalised)
+		return bare
 
 	@staticmethod
 	def _require_file(path, label):
@@ -274,6 +298,12 @@ class CreateSqliteDB:
 			else:
 				reason = "alignment_filtering"
 			reasons[seq] = reason
+		# Same asymmetry as _load_filtered_ids: these keys are looked up with an
+		# already-normalised accession, so the bare spelling has to be present too.
+		for key, reason in list(reasons.items()):
+			bare = normalise_accession(key)
+			if bare and bare not in reasons:
+				reasons[bare] = reason
 		return reasons
 
 	def _add_cluster_column(self, df_meta_data):
@@ -288,6 +318,13 @@ class CreateSqliteDB:
 		cluster_df = cluster_df.iloc[:, :2]
 		cluster_df.columns = ["cluster_rep", "member"]
 		cluster_map = dict(zip(cluster_df["member"], cluster_df["cluster_rep"]))
+		# Mapped onto the already-normalised primary_accession below, so a cluster
+		# TSV written with versioned members would otherwise map to nothing and
+		# quietly drop every sequence's cluster assignment.
+		for member, rep in list(cluster_map.items()):
+			bare = normalise_accession(member)
+			if bare and bare not in cluster_map:
+				cluster_map[bare] = rep
 		try:
 			min_id = float(self.cluster_min_seq_id) if self.cluster_min_seq_id is not None else None
 		except (TypeError, ValueError):
@@ -1083,6 +1120,114 @@ class CreateSqliteDB:
 			return cols[:1] if cols else []
 		return cols[:1] if cols else []
 
+	#: The columns whose value IS the pipeline's identity key, per table. Every one
+	#: of them is joined - directly or through valid_pairs - against
+	#: meta_data.primary_accession, so all of them have to carry the same (bare)
+	#: spelling of a GenBank name.
+	#:
+	#: meta_data.accession_version is deliberately absent, and must stay absent. It
+	#: is the ONE column whose job is to carry the version, so that GenBankFetcher
+	#: can notice on an update run that a record has been revised (PV547761.1 ->
+	#: PV547761.2) and re-fetch it. Normalising it would make every record look
+	#: unrevised for ever.
+	#:
+	#: sequence_alignment.sequence_id is listed because _normalize_alignment_columns
+	#: makes primary_accession a verbatim copy of it; normalising one and not the
+	#: other would leave a single row disagreeing with itself about its own name.
+	#: 'primary_accession' appears under features because the features TSV is
+	#: allowed to name its key column either way (see feat_acc_col in create_db).
+	IDENTITY_COLUMNS = {
+		"meta_data": ("primary_accession", "locus", "gi_number"),
+		"sequence_alignment": ("primary_accession", "sequence_id", "alignment_name"),
+		"features": ("accession", "primary_accession", "master_ref_accession", "reference_accession"),
+		"sequences": ("header",),
+		"insertions": ("primary_accession",),
+	}
+
+	#: How many offending values to name in the warning before trailing off. Enough
+	#: to identify the producer, few enough not to bury the message under a batch
+	#: of 3.9M rows.
+	IDENTITY_WARNING_SAMPLE = 5
+
+	def _normalise_identity_columns(self, df, table, columns=None):
+		"""Force this table's identity columns to the bare accession spelling.
+
+		This class used to do NO accession normalisation at all: whatever spelling
+		arrived was stored verbatim after .str.strip(). That was correct only by
+		luck - every upstream producer happens to emit bare accessions - and it
+		failed silently in three different ways the moment one of them emitted
+		'PV547761.1' instead of 'PV547761':
+
+		* a versioned accession in features.tsv or the padded alignment, against a
+		  bare meta_data, is not in valid_pairs, so the row is filtered out with no
+		  message. For features that can empty the table;
+		* sequences.header comes straight from Bio.SeqIO's record.id and keeps
+		  whatever the FASTA carried, so the sequence row vanished while its
+		  meta_data row stayed - a record with metadata and no sequence;
+		* on an --update run the UNIQUE indexes are over the raw column, so bare and
+		  versioned are two distinct keys: INSERT ... ON CONFLICT found no conflict
+		  and simply inserted, giving a DUPLICATE row per upsert table instead of an
+		  overwrite. Nothing logged it and the run exited 0.
+
+		So the value is repaired here, at ingest, where the table is read - and the
+		repair is REPORTED. A version leak upstream is a bug in the producer; being
+		quietly absorbed here is how it would survive to the next release. Only a
+		real version strip warns: leading/trailing whitespace is tidied silently,
+		as the surrounding .str.strip() calls already do.
+
+		Normalisation goes through accession_utils.normalise_accession, so it is
+		conservative: only a string that is entirely an accession followed by
+		'.<digits>' loses its suffix. A strain name, a GISAID id, a cluster label or
+		a segment group name containing a dot passes through untouched, which
+		split('.')[0] would not have done.
+		"""
+		if df is None or df.empty:
+			return df
+
+		columns = self.IDENTITY_COLUMNS.get(table, ()) if columns is None else columns
+		for column in columns:
+			if column not in df.columns:
+				continue
+
+			values = df[column].tolist()
+			new_values = []
+			version_strips = []
+			touched = False
+			for value in values:
+				# A missing value stays missing. Coercing it to '' here would turn a
+				# NULL locus into an empty string in every existing database.
+				if value is None or (not isinstance(value, str) and pd.isna(value)):
+					new_values.append(value)
+					continue
+				text = str(value)
+				stripped = text.strip()
+				bare = normalise_accession(text)
+				replacement = stripped if bare is None else bare
+				if replacement != text:
+					touched = True
+				if replacement != stripped:
+					version_strips.append((stripped, replacement))
+				new_values.append(replacement)
+
+			if touched:
+				df[column] = pd.Series(new_values, index=df.index, dtype=object)
+
+			if version_strips:
+				sample = ", ".join(
+					f"{raw} -> {new}" for raw, new in version_strips[:self.IDENTITY_WARNING_SAMPLE]
+				)
+				if len(version_strips) > self.IDENTITY_WARNING_SAMPLE:
+					sample += ", ..."
+				print(
+					f"[CreateSqliteDB][warn] {len(version_strips)} value(s) in {table}.{column} "
+					f"arrived carrying a GenBank version suffix and were normalised to the bare "
+					f"accession this pipeline joins on: {sample}. Fix the producer of that column - "
+					"a versioned identity key joins against nothing, so the row would have been "
+					"dropped on a fresh build and duplicated on an --update run. "
+					"meta_data.accession_version is the only column allowed to carry a version."
+				)
+		return df
+
 	#: Tables written with an upsert rather than an append. Every one of them needs
 	#: a UNIQUE index over its key or the "replace" half never fires.
 	UPSERT_TABLES = frozenset({"meta_data", "sequence_alignment", "features", "insertions", "sequences"})
@@ -1421,6 +1566,9 @@ class CreateSqliteDB:
 
 		# Strict baseline normalisation for metadata fields
 		df_meta_data["primary_accession"] = df_meta_data["primary_accession"].fillna("").astype(str).str.strip()
+		# ...and the identity spelling, which .str.strip() never touched. accession_version
+		# is not in IDENTITY_COLUMNS and must not be: it is the revision marker.
+		df_meta_data = self._normalise_identity_columns(df_meta_data, "meta_data")
 		df_meta_data["segment"] = df_meta_data["segment"].fillna("").astype(str).str.strip().map(self._normalize_segment_value)
 
 		# Build reference segment mapping from reference_tsv to backfill missing metadata segments
@@ -1534,6 +1682,9 @@ class CreateSqliteDB:
 		df_aln = self._normalize_alignment_columns(df_aln, "pad_aln")
 		df_aln["primary_accession"] = df_aln["primary_accession"].fillna("").astype(str).str.strip()
 		df_aln["sequence_id"] = df_aln["sequence_id"].fillna("").astype(str).str.strip()
+		# Before valid_pairs is built from meta_data: a versioned accession here is
+		# simply absent from it, and the alignment row is filtered away in silence.
+		df_aln = self._normalise_identity_columns(df_aln, "sequence_alignment")
 
 		# Ingest and normalise/backfill segment values safely within df_aln
 		if "segment" not in df_aln.columns:
@@ -1562,6 +1713,11 @@ class CreateSqliteDB:
 		feat_acc_col = "accession" if "accession" in df_features.columns else "primary_accession"
 		if feat_acc_col in df_features.columns:
 			df_features[feat_acc_col] = df_features[feat_acc_col].fillna("").astype(str).str.strip()
+		# master_ref_accession and reference_accession are normalised here too: they
+		# are joined against meta_data by VerifyMutations, not by this file, so a
+		# version leak in either survives the valid_pairs filter and only shows up
+		# much later as a feature map with no reference.
+		df_features = self._normalise_identity_columns(df_features, "features")
 
 		# Ingest and normalise/backfill segment values safely within df_features
 		if "segment" not in df_features.columns:
@@ -1617,6 +1773,9 @@ class CreateSqliteDB:
 		
 		df_insertions = self._read_tsv_required(self.insertions, [], "insertions", dtype=str)
 		df_insertions = self._ensure_primary_accession(df_insertions, "insertions", aliases=["accession", "sequence_id"])
+		# Filtered against valid_pairs below with the same membership idiom as
+		# features, so it needs the same canonical spelling.
+		df_insertions = self._normalise_identity_columns(df_insertions, "insertions")
 		df_insertions["primary_accession"] = df_insertions["primary_accession"].fillna("").astype(str).str.strip()
 		if "segment" not in df_insertions.columns:
 			df_insertions["segment"] = df_insertions["primary_accession"].map(acc_to_seg_map).fillna("")
@@ -1638,6 +1797,9 @@ class CreateSqliteDB:
 		
 		df_fasta_sequences = self.load_fasta()
 		df_fasta_sequences["header"] = df_fasta_sequences["header"].fillna("").astype(str).str.strip()
+		# record.id keeps whatever the FASTA carried, so this is the one identity
+		# column the pipeline does not control the spelling of at all.
+		df_fasta_sequences = self._normalise_identity_columns(df_fasta_sequences, "sequences")
 		if "segment" not in df_fasta_sequences.columns:
 			df_fasta_sequences["segment"] = df_fasta_sequences["header"].map(acc_to_seg_map).fillna("")
 		else:

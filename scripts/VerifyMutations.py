@@ -8,6 +8,28 @@ import re
 import sys
 from collections import Counter
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
+# The verifier's whole job is to re-derive what the annotator claimed, so it
+# must canonicalise protein names by exactly the same rules. It used to carry
+# verbatim private copies of these two functions with HCV's patterns hard-coded
+# into them; once AnnotateMutations learned which virus it was annotating, those
+# copies would have gone on applying HCV's vocabulary to every virus, and the
+# verifier would have reported mismatches that were artefacts of its own rules.
+# Importing removes the possibility by construction.
+from AnnotateMutations import (
+    canonicalize_product as _canonicalize_product,
+    infer_compact_product_name as _infer_compact_product_name,
+    virus_profile,
+)
+
+#: Which virus's protein vocabulary to canonicalise with. HCV is the default
+#: because every other default in this script's argument parser is an HCV path;
+#: main() replaces it from --virus.
+ACTIVE_VIRUS_PROFILE = virus_profile('HCV')
+
 # Standard genetic code dictionary
 CODON_TABLE = {
     'ATA':'I', 'ATC':'I', 'ATT':'I', 'ATG':'M',
@@ -37,41 +59,15 @@ def translate_codon(codon):
 def normalize_lookup_key(value):
     return re.sub(r'[^a-z0-9]+', '', str(value or '').strip().lower())
 
-def infer_compact_product_name(product_name):
-    text = str(product_name or '').strip()
-    if not text:
-        return ''
+def infer_compact_product_name(product_name, profile=None):
+    """Delegates to AnnotateMutations so the two scripts cannot drift apart."""
+    return _infer_compact_product_name(product_name, profile or ACTIVE_VIRUS_PROFILE)
 
-    ns_match = re.search(r'\b(NS[2-5](?:A|B)?)\b', text, flags=re.IGNORECASE)
-    if ns_match:
-        return ns_match.group(1).upper()
 
-    envelope_match = re.search(r'\b(E[12])\b', text, flags=re.IGNORECASE)
-    if envelope_match:
-        return envelope_match.group(1).upper()
+def canonicalize_product(product_name, alias_lookup, profile=None):
+    """Delegates to AnnotateMutations so the two scripts cannot drift apart."""
+    return _canonicalize_product(product_name, alias_lookup, profile or ACTIVE_VIRUS_PROFILE)
 
-    if re.search(r'\bp7\b', text, flags=re.IGNORECASE):
-        return 'p7'
-
-    if re.search(r'\bcore\b', text, flags=re.IGNORECASE):
-        return 'Core'
-
-    normalized = normalize_lookup_key(text)
-    if normalized in {'polyprotein', 'wholegenome'}:
-        return 'Whole genome'
-
-    return ''
-
-def canonicalize_product(product_name, alias_lookup):
-    product_name = str(product_name or '').strip()
-    if not product_name:
-        return ''
-
-    canonical = alias_lookup.get(normalize_lookup_key(product_name), product_name)
-    inferred = infer_compact_product_name(canonical)
-    if inferred:
-        return inferred
-    return canonical
 
 def load_gene_alias_lookup(conn):
     alias_lookup = {}
@@ -324,7 +320,14 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="Random seed for sampling.")
     parser.add_argument("--hcv_test_ns3_36a", action="store_true", help="Run verification specifically for NS3:36A on the 171 query accessions.")
     parser.add_argument("--min_identity", type=float, default=0.65, help="Minimum nucleotide identity threshold for alignment validation.")
+    parser.add_argument("--virus", default="HCV",
+        help="Virus whose protein-name vocabulary to canonicalise with. Must match the "
+             "--virus AnnotateMutations was run with, or this script will report "
+             "mismatches that are artefacts of a different vocabulary.")
     args = parser.parse_args()
+
+    global ACTIVE_VIRUS_PROFILE
+    ACTIVE_VIRUS_PROFILE = virus_profile(args.virus)
 
     if not os.path.isfile(args.db):
         print(f"Error: Database {args.db} not found.", file=sys.stderr)

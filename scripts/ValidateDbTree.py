@@ -253,6 +253,51 @@ def validate_accession_table(conn, expected_accessions, table_name, candidate_co
     return result
 
 
+
+def describe_missing_accessions(conn, missing, meta_cols, limit=2000):
+    """Print the accession_type / exclusion_status breakdown of missing rows.
+
+    A consistency failure lists accessions; what matters is what *kind* of row
+    they are. An `exclusion_list` reference with exclusion_status != 1 is a
+    different bug from a query that genuinely failed to align, and the accession
+    alone does not distinguish them.
+    """
+    if not missing or "accession_type" not in meta_cols:
+        return
+
+    has_status = "exclusion_status" in meta_cols
+    sample = [str(a) for a in missing[:limit]]
+    marks = ",".join("?" * len(sample))
+    columns = "accession_type" + (", exclusion_status" if has_status else "")
+
+    try:
+        rows = conn.execute(
+            f"SELECT {columns} FROM meta_data WHERE primary_accession IN ({marks})",
+            sample,
+        ).fetchall()
+    except sqlite3.Error:
+        return
+
+    tally = {}
+    for row in rows:
+        kind = str(row[0] or "").strip().lower() or "(blank)"
+        status = str(row[1] or "").strip() if has_status else "?"
+        tally[(kind, status)] = tally.get((kind, status), 0) + 1
+
+    for (kind, status), count in sorted(tally.items(), key=lambda kv: -kv[1]):
+        print(
+            f"[info]     -> {count} of them: accession_type={kind!r}"
+            + (f" exclusion_status={status!r}" if has_status else "")
+        )
+        if kind == "exclusion_list" and status != "1":
+            print(
+                "[warn]        an 'exclusion_list' row with exclusion_status != 1 "
+                "is the bug: it is a reference the list says to exclude, so it "
+                "will never have an alignment, but it is still being required to "
+                "have one. Check FilterAndExtractSequences classified it."
+            )
+
+
 def validate_sequence_alignment_vs_meta(conn, expected_accessions, accession_column="primary_accession", exclusion_column="exclusion_status", exclude_value="1"):
     table_name = "sequence_alignment"
     label = "sequence_alignment vs meta_data"
@@ -2444,6 +2489,15 @@ def main(argv=None):
                 )
                 if missing:
                     print(f"[info]   {title} missing (present in meta_data but missing in {result.get('table', 'table')}, first 10): {', '.join(missing[:10])}")
+                    # Say WHAT the missing rows are, not just that they are
+                    # missing. A CI failure on this check reported 22 bare
+                    # accessions and nothing else; they turned out to be
+                    # reference-list `exclusion_list` entries (influenza B
+                    # references, which cannot align to influenza A) that had not
+                    # been marked exclusion_status=1, so they were wrongly
+                    # expected to have alignments. That breakdown would have
+                    # named the cause immediately.
+                    describe_missing_accessions(conn, missing, meta_columns)
                 if extra:
                     print(f"[info]   {title} extra (present in {result.get('table', 'table')} but missing/excluded in meta_data, first 10): {', '.join(extra[:10])}")
         for result in invariant_results:
