@@ -98,6 +98,7 @@ def scriptDefinedParams = [
     "scripts_dir", "publish_dir", "email", "ref_list", "bulk_fillup_table", "is_flu", "gene_info",
     "xml_dir", "update", "update_file", "update_db",
     "mmseqs_min_seq_id", "mmseqs_trim_cds_file","mutation_catalog", "mutation_virus",
+    "max_filtered_fraction", "min_segment_retention",
     "mutation_publications", "mutation_clinical_trials",
     "gisaid_dir", "previous_db", "conda_path", "test_max_cluster_seqs", "max_threads", "iqtree_mem", "ref_set_aligned",
     "min_seq_length_ratio", "max_aln_gap_proportion", "tree_free", "base_tree_only",
@@ -617,17 +618,52 @@ process COLLECT_FILTERED_SEQUENCES {
     publishDir "${params.publish_dir}" , mode: 'copy'
     input:
         path nextalign_dir
+        path master_file_opt
+        val ref_set_aligned_dir
     output:
         path "filtered_sequences.tsv", emit: filtered_tsv
         path "filtered_sequences_ids.txt", emit: filtered_ids
         path "filtered_sequences_summary.txt", emit: filtered_summary
     shell:
     '''
+    # --precomputed_ref_dir and --ref_list must mirror what PAD_ALIGNMENT receives.
+    # This process decides which sequences PAD is allowed to drop, so if it resolves
+    # a different set of backbones than PAD projects through, it deletes real data:
+    # that disagreement removed 633,988 influenza sequences (see MISSING_H3_report.md).
+    # Both are passed exactly as PAD_ALIGNMENT gets them - master list as a staged
+    # path, backbone directory as a plain string. Never stage the .py files as
+    # `path` inputs: they import siblings from scripts/, and staging moves sys.path[0].
     python !{scripts_dir}/CollectFilteredSequences.py \
         -n !{nextalign_dir} \
         -o filtered_sequences.tsv \
         -b . \
-        --max_gap_proportion !{params.max_aln_gap_proportion}
+        --max_gap_proportion !{params.max_aln_gap_proportion} \
+        --ref_list !{master_file_opt} \
+        --precomputed_ref_dir "!{ref_set_aligned_dir}" \
+        --max_filtered_fraction !{params.max_filtered_fraction}
+    '''
+}
+
+process CHECK_SEGMENT_RETENTION {
+    publishDir "${params.publish_dir}" , mode: 'copy'
+    input:
+        path merged_msa
+        path tophit_annotated
+        val ref_seg_file
+        path filtered_ids
+    output:
+        path "segment_retention.txt", emit: retention_report
+    shell:
+    '''
+    # Guard: every segment must keep the sequences BLAST assigned to it. The HA/NA
+    # subtype loss showed up here as 0.358 and 0.481 while every healthy segment was
+    # above 0.998, and nothing failed the run. Now it does.
+    python !{scripts_dir}/CheckSegmentRetention.py \
+        -m !{merged_msa} \
+        -t !{tophit_annotated} \
+        -s "!{ref_seg_file}" \
+        -f !{filtered_ids} \
+        --min_retention !{params.min_segment_retention} | tee segment_retention.txt
     '''
 }
 
@@ -1242,9 +1278,18 @@ process VERIFY_MUTATIONS {
     '''
     set -o pipefail
 
+    VERIFY_VIRUS_ARG=""
+    if [ "!{params.mutation_virus}" != "null" ] && [ -n "!{params.mutation_virus}" ]; then
+        # Must match the --virus ANNOTATE_MUTATIONS used: the two scripts share
+        # one protein-name vocabulary, and verifying with a different one
+        # reports mismatches that are artefacts of the vocabulary, not of the
+        # annotation.
+        VERIFY_VIRUS_ARG="--virus !{params.mutation_virus}"
+    fi
+
     python !{scripts_dir}/VerifyMutations.py \
         --db !{sqlite_db} \
-        --mutation_catalog !{mutation_catalog} 2>&1 | tee mutation_verification.txt
+        --mutation_catalog !{mutation_catalog} ${VERIFY_VIRUS_ARG} 2>&1 | tee mutation_verification.txt
     '''
 }
 
@@ -1548,13 +1593,25 @@ workflow {
                     params.ref_list,
                     effective_ref_list)
     // Collect sequences that were filtered during nextalign alignment (runs first; feeds skip_ids into PAD)
-    COLLECT_FILTERED_SEQUENCES(NEXTALIGN_ALIGNMENT.out)
+    COLLECT_FILTERED_SEQUENCES(NEXTALIGN_ALIGNMENT.out,
+                               effective_ref_list,
+                               ref_backbone_dir)
 
     PAD_ALIGNMENT(NEXTALIGN_ALIGNMENT.out,
                   params.ref_list,
                 effective_ref_list,
                   ref_backbone_dir,
                   COLLECT_FILTERED_SEQUENCES.out.filtered_ids)
+
+    // Guard: every segment must retain the sequences BLAST assigned to it. Segmented
+    // builds only - the ratio is per-segment and meaningless for a single-segment virus.
+    // Runs before DEDUP so a bad merge is caught before clustering and tree building.
+    if( params.is_segmented == 'Y' ){
+        CHECK_SEGMENT_RETENTION(PAD_ALIGNMENT.out.merged_msa.collect(),
+                                BLAST_ALIGNMENT.out.query_uniq_tophit_annotated,
+                                effective_ref_list,
+                                COLLECT_FILTERED_SEQUENCES.out.filtered_ids)
+    }
 
     // For segmented viruses, PAD_ALIGNMENT emits multiple fasta files (one per segment).
     // Use flatten() to create a channel where each file is processed independently in parallel.

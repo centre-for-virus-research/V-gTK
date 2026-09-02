@@ -33,3 +33,4 @@ CLAUDE.md
 htmlcov/
 .pytest_cache/
 .venv/
+treepatch

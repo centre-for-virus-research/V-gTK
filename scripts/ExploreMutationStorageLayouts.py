@@ -30,6 +30,31 @@ REQUIRED_MUTATION_CATALOG_COLUMNS = {
 }
 
 
+#: Columns these layouts carry through but do not require any virus to have.
+#: They describe DRUG RESISTANCE, which is an HCV-shaped question - a rabies or
+#: influenza catalogue has no drug and no resistance category, and there is no
+#: sensible value to invent for one.  They were hard-projected, so a catalogue
+#: without them raised a bare KeyError out of pandas, which is not an
+#: AnnotationMappingError and so escaped AnnotateMutations.main()'s handler -
+#: after mutation_catalog had already been dropped, rewritten and committed.
+#: The two non-HCV catalogue profiles could therefore never complete a run.
+OPTIONAL_ANNOTATION_COLUMNS = ('drug', 'resistance_category')
+
+
+def _with_optional_columns(df, columns=OPTIONAL_ANNOTATION_COLUMNS):
+    """A copy of `df` guaranteed to carry `columns`, empty where it did not.
+
+    Filling rather than dropping keeps the output schema the same for every
+    virus, so a downstream query does not have to know which one it is looking
+    at.  A catalogue that already has the columns is untouched.
+    """
+    result = df.copy()
+    for column in columns:
+        if column not in result.columns:
+            result[column] = ''
+    return result
+
+
 def _require_columns(df, required_columns, table_name):
     missing = sorted(required_columns - set(df.columns))
     if missing:
@@ -159,6 +184,7 @@ def load_mutation_tables(db_path, mutation_catalog_tsv=None):
 
 
 def build_combination_catalog(mutation_catalog):
+    mutation_catalog = _with_optional_columns(mutation_catalog)
     combo_rows = mutation_catalog[
         (mutation_catalog['signature_kind'] == 'combination')
         & (mutation_catalog['combination_id'] != '')
@@ -235,6 +261,7 @@ def build_single_catalog(mutation_catalog):
     single_rows = single_rows.sort_values(['mutation_id'])
     deduped = single_rows.drop_duplicates(subset=['mutation_id']).copy()
     deduped['signature_id'] = deduped['signature_id'].where(deduped['signature_id'] != '', deduped['mutation_id'])
+    deduped = _with_optional_columns(deduped)
     return deduped[
         [
             'signature_id',
