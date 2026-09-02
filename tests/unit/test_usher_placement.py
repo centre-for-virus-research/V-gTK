@@ -938,7 +938,11 @@ def test_fetch_db_alignments_returns_empty_without_db(tmp_path: Path):
 	assert processor._fetch_db_alignments(["A", "B"]) == {}
 
 
-def test_build_vcf_retries_without_exclude_when_exclude_fails(tmp_path: Path, monkeypatch):
+def test_build_vcf_refuses_to_drop_the_exclude_filter_when_faToVcf_fails(tmp_path: Path, monkeypatch):
+	"""This used to retry without -excludeFile and return a VCF. That was wrong:
+	-excludeFile is what keeps backbone tips out of the placement VCF, so the
+	silent retry re-submitted every existing tree tip for placement and
+	duplicated them in the tree. A failure to exclude must abort."""
 	msa = tmp_path / "aln.fasta"
 	msa.write_text(">REF1\nATGC\n>Q1\nATGA\n", encoding="utf-8")
 	output_dir = tmp_path / "out"
@@ -962,18 +966,17 @@ def test_build_vcf_retries_without_exclude_when_exclude_fails(tmp_path: Path, mo
 	monkeypatch.setattr("subprocess.run", fake_run)
 
 	vcf_path = output_dir / "out.vcf"
-	result = processor.build_vcf(
-		"REF1",
-		exclude_ids_file=str(exclude),
-		alignment_fasta=str(msa),
-		vcf_path=str(vcf_path),
-	)
+	with pytest.raises(RuntimeError, match="Refusing to retry"):
+		processor.build_vcf(
+			"REF1",
+			exclude_ids_file=str(exclude),
+			alignment_fasta=str(msa),
+			vcf_path=str(vcf_path),
+		)
 
-	assert result == str(vcf_path)
-	# First attempt used -excludeFile and failed; the retry dropped it.
-	assert len(cmds) == 2
+	# Exactly one attempt: no unfiltered second call was made.
+	assert len(cmds) == 1
 	assert any(str(arg).startswith("-excludeFile=") for arg in cmds[0])
-	assert not any(str(arg).startswith("-excludeFile=") for arg in cmds[1])
 
 
 def test_build_vcf_uses_exclude_file_when_successful(tmp_path: Path, monkeypatch):
