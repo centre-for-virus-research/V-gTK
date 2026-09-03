@@ -42,7 +42,15 @@ jobs:
           auto-activate-base: false
           environment-file: environment.yml
           use-mamba: true
-          channels: conda-forge,bioconda,defaults
+          # Miniforge rather than the runner's preinstalled Anaconda Miniconda.
+          # That install plus a `defaults` channel fails conda's non-interactive
+          # Terms-of-Service check, and setup-miniconda surfaces it only as
+          # "The process '/usr/share/miniconda/condabin/conda' failed with exit
+          # code 1". python-unit-tests.yml already uses Miniforge, which is why
+          # that workflow gets as far as running pytest and this one does not.
+          miniforge-variant: Miniforge3
+          miniforge-version: latest
+          channels: conda-forge,bioconda
 
       - name: Show environment and Nextflow version
         shell: bash -l {0}
@@ -112,7 +120,9 @@ jobs:
   #         auto-activate-base: false
   #         environment-file: environment.yml
   #         use-mamba: true
-  #         channels: conda-forge,bioconda,defaults
+  #         miniforge-variant: Miniforge3
+  #         miniforge-version: latest
+  #         channels: conda-forge,bioconda
 
   #     - name: Run extended profile
   #       shell: bash -l {0}

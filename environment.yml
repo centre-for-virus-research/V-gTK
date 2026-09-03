@@ -1,8 +1,11 @@
 name: vgtk
 channels:
+  # No `defaults`. Every package below resolves from conda-forge/bioconda, and
+  # `defaults` is Anaconda's own channel: on a CI runner using the preinstalled
+  # Anaconda Miniconda it now fails the non-interactive Terms-of-Service check
+  # and the whole env solve exits 1 with no useful message.
   - conda-forge
   - bioconda
-  - defaults
 dependencies:
   - python=3.10
   # Core Science Stack (Moved from Pip to Conda for MKL/BLAS optimization)

@@ -822,6 +822,10 @@ def test_resolve_usher_tree_output_raises_when_missing(tmp_path: Path):
 
 
 def test_append_threads_probes_usher_once_and_caches(tmp_path: Path, monkeypatch):
+	# UsherPlacement clamps threads to os.cpu_count(), so a bare threads=8 means
+	# "-T 8" on a big machine and "-T 4" on a 4-core CI runner. Pin the core
+	# count: this test is about the probe being cached, not about the clamp.
+	monkeypatch.setattr("os.cpu_count", lambda: 16)
 	processor = UsherPlacement(
 		padded_aln=str(tmp_path / "a.fasta"),
 		output_dir=str(tmp_path / "out"),
@@ -850,7 +854,33 @@ def test_append_threads_probes_usher_once_and_caches(tmp_path: Path, monkeypatch
 	assert len(help_calls) == 1
 
 
+@pytest.mark.parametrize("requested,cores,expected", [
+	(8, 16, 8),      # fits: honoured
+	(8, 4, 4),       # more threads than cores: clamped (this is what CI hit)
+	(64, 4, 4),
+	(1, 1, 1),
+	(0, 8, 1),       # never below one
+	(-4, 8, 1),
+])
+def test_threads_are_clamped_to_the_core_count(tmp_path: Path, monkeypatch,
+                                               requested, cores, expected):
+	"""threads is min(requested, cpu_count) with a floor of 1.
+
+	Asking usher for more threads than the machine has is not honoured, so any
+	test that asserts on -T must pin the core count or it passes on a 256-core
+	workstation and fails on a 4-core runner.
+	"""
+	monkeypatch.setattr("os.cpu_count", lambda: cores)
+	processor = UsherPlacement(
+		padded_aln=str(tmp_path / "a.fasta"),
+		output_dir=str(tmp_path / "out"),
+		threads=requested,
+	)
+	assert processor.threads == expected
+
+
 def test_append_threads_omits_flag_when_unsupported(tmp_path: Path, monkeypatch):
+	monkeypatch.setattr("os.cpu_count", lambda: 16)
 	processor = UsherPlacement(
 		padded_aln=str(tmp_path / "a.fasta"),
 		output_dir=str(tmp_path / "out"),
