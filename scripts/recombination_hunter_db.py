@@ -218,14 +218,34 @@ def run_ripples(binary, mat, outdir, threads, ripples_kwargs,
 
 
 def run_chunk(binary, mat, chunk_dir, lo, hi, threads, ripples_kwargs, timeout=None):
-	"""Run one RIPPLES process over the half-open branch range [lo, hi)."""
+	"""Run one RIPPLES process over the half-open branch range [lo, hi).
+
+	A crashing chunk is reported and skipped rather than aborting the screen.
+	RIPPLES is a C++ binary that can and does die on particular data -
+	`ripples-fast` segfaults reproducibly on one of this repository's MATs with
+	more than one thread, while completing on another - and losing every other
+	branch to one bad range would mean losing the whole screen. What must NOT
+	happen is a crashed chunk being silently counted as "no recombination
+	here", so the failure is returned and ends up in the report.
+	"""
 	os.makedirs(chunk_dir, exist_ok=True)
 	started = time.time()
-	run_ripples(binary, mat, chunk_dir, threads, ripples_kwargs,
-	            start_index=lo, end_index=hi, timeout=timeout)
+	try:
+		run_ripples(binary, mat, chunk_dir, threads, ripples_kwargs,
+		            start_index=lo, end_index=hi, timeout=timeout)
+	except subprocess.CalledProcessError as error:
+		elapsed = time.time() - started
+		signal_note = ""
+		if error.returncode < 0:
+			signal_note = f" (signal {-error.returncode})"
+		elif error.returncode > 128:
+			signal_note = f" (signal {error.returncode - 128})"
+		print(f"[chunk] branches [{lo},{hi}) FAILED after {elapsed / 60:.1f} min: "
+		      f"exit {error.returncode}{signal_note} - these branches are NOT screened")
+		return chunk_dir, (lo, hi, error.returncode)
 	elapsed = time.time() - started
 	print(f"[chunk] branches [{lo},{hi}) finished in {elapsed / 60:.1f} min")
-	return chunk_dir
+	return chunk_dir, None
 
 
 def merge_chunks(chunk_dirs):
@@ -573,6 +593,16 @@ def build_report(db, rows, accessions, context, status_counts, meta, screened=Tr
 		add("")
 
 	# -- caveats ------------------------------------------------------------
+	failed = str(meta.get("failed branch ranges") or "none")
+	if failed != "none":
+		add("## This screen is incomplete")
+		add("")
+		add(f"One or more RIPPLES processes died: `{failed}`. Those branches "
+		    f"were **not** examined. Whatever appears below covers only the "
+		    f"ranges that completed - absence of a finding here is not evidence "
+		    f"that those branches are clean.")
+		add("")
+
 	binary = str(meta.get("ripples binary") or "")
 	if binary.endswith("-fast"):
 		add("## How the search was done")
@@ -664,6 +694,9 @@ class RecombinationHunter:
 		self.probe_timeout = probe_timeout
 		self.ripples_binary = ripples_binary
 		self.accessions = []
+		#: Branch ranges whose RIPPLES process died. Kept so the report can say
+		#: the screen was partial instead of implying the branches were clean.
+		self.failed_ranges = []
 		# Everything RIPPLES itself is parameterised by, passed explicitly rather
 		# than left to the binary's defaults, which change between versions.
 		self.ripples_kwargs = dict(
@@ -778,6 +811,10 @@ class RecombinationHunter:
 			"long branches tested": branches if branches is not None else "unknown",
 			"chunks x threads": f"{len(bounds)} x {self.threads_per_chunk}",
 			"ripples binary": self.ripples_binary,
+			"failed branch ranges": (
+				"none" if not self.failed_ranges else
+				"; ".join(f"[{lo},{hi}) exit {rc}" for lo, hi, rc in self.failed_ranges)
+			),
 			"wall clock": f"{elapsed / 3600:.2f} h",
 			"branch_length (-l)": self.ripples_kwargs["branch_length"],
 			"num_descendants (-n)": self.ripples_kwargs["num_descendants"],
@@ -816,7 +853,10 @@ class RecombinationHunter:
 					self.threads_per_chunk, self.ripples_kwargs, self.timeout,
 				))
 			for future in futures:
-				chunk_dirs.append(future.result())
+				chunk_dir, failure = future.result()
+				chunk_dirs.append(chunk_dir)
+				if failure:
+					self.failed_ranges.append(failure)
 		return chunk_dirs
 
 	def collect(self):
