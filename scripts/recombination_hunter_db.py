@@ -69,6 +69,28 @@ DEFAULT_THREADS_PER_CHUNK = 2
 #: on chunking and falling back to a single serial run.
 PROBE_TIMEOUT = 1800
 
+#: Which RIPPLES binary to drive. Both ship with the UShER suite and take an
+#: identical flag surface, so this is a drop-in choice.
+#:
+#: The default is the fast one, because the exhaustive one cannot finish on the
+#: data this tool exists to screen. RIPPLES was built for SARS-CoV-2, where a
+#: branch carries a handful of mutations. On a reference set spanning all eight
+#: HCV genotypes, 76% of the 9,644 bp genome is a variable site: the parsimony
+#: tree carries 223,252 mutations over 475 branches, the median branch carries
+#: 422 and only 7 branches carry fewer than 30. A `-l 3` "long branch" therefore
+#: selects essentially the whole tree, and plain `ripples` responds by
+#: enumerating ~2.6 million breakpoint pairs per branch at ~2.3 pairs/second -
+#: about 13 days per branch, ~250 days for 156 branches. Measured here: six days
+#: of wall clock finished 0 branches, reaching pair 1,582,696 of 2,591,226 on
+#: the first. `ripples-fast` completed all 156 in 65 seconds.
+#:
+#: The trade is real and is recorded in the report and in `detected_by`: the
+#: fast binary prunes the search rather than enumerating it, so it is not
+#: guaranteed to agree with the exhaustive scan - and on data like this there is
+#: no head-to-head to check it against, because the exhaustive scan never
+#: finishes a single branch.
+DEFAULT_RIPPLES_BINARY = "ripples-fast"
+
 #: Metadata worth seeing beside a flagged reference. Every one is optional -
 #: the columns are probed at runtime because schemas differ between builds.
 CONTEXT_COLUMNS = (
@@ -105,6 +127,7 @@ def plan_thread_budget(chunks, threads_per_chunk, ceiling=MAX_THREADS):
 
 
 def probe_long_branches(mat, outdir, threads, ripples_kwargs,
+                        binary=DEFAULT_RIPPLES_BINARY,
                         timeout=PROBE_TIMEOUT, poll=2.0):
 	"""Launch RIPPLES only to read ``Found N long branches``, then stop it.
 
@@ -122,7 +145,8 @@ def probe_long_branches(mat, outdir, threads, ripples_kwargs,
 	os.makedirs(results_dir, exist_ok=True)
 	log_path = os.path.join(probe_dir, "ripples.probe.log")
 
-	command = screen.build_ripples_command(mat, results_dir, threads, **ripples_kwargs)
+	command = screen.build_ripples_command(mat, results_dir, threads,
+	                                      binary=binary, **ripples_kwargs)
 	print("[probe] " + " ".join(command))
 
 	deadline = time.time() + timeout
@@ -164,22 +188,41 @@ def probe_long_branches(mat, outdir, threads, ripples_kwargs,
 # Running
 # ---------------------------------------------------------------------------
 
-def run_chunk(mat, chunk_dir, lo, hi, threads, ripples_kwargs, timeout=None):
-	"""Run one RIPPLES process over the half-open branch range [lo, hi)."""
-	os.makedirs(chunk_dir, exist_ok=True)
-	instance = screen.ReferenceRecombinationScreen(
-		outdir=chunk_dir,
-		threads=threads,
-		start_index=lo,
-		end_index=hi,
-		# chunks > 1 suppresses the screen's "you should split this up" hint,
-		# which is exactly what we are already doing.
-		chunks=2,
-		timeout=timeout,
+def run_ripples(binary, mat, outdir, threads, ripples_kwargs,
+                start_index=None, end_index=None, timeout=None):
+	"""Run one RIPPLES process and return its results directory.
+
+	The screen's own ``run_ripples`` hardcodes the ``ripples`` binary, so this
+	reimplements the few lines around it rather than monkey-patching a module
+	that other callers share.
+	"""
+	screen._require_binary(binary)
+	results = os.path.join(outdir, "ripples")
+	os.makedirs(results, exist_ok=True)
+	command = screen.build_ripples_command(
+		mat, results, threads,
+		start_index=start_index, end_index=end_index, binary=binary,
 		**ripples_kwargs,
 	)
+	log_path = os.path.join(outdir, "ripples.log")
+	print("[ripples] " + " ".join(command))
+	with open(log_path, "w", encoding="utf-8") as log:
+		try:
+			subprocess.run(command, check=True, stdout=log,
+			               stderr=subprocess.STDOUT, timeout=timeout)
+		except subprocess.TimeoutExpired:
+			# Partial output is still output; discarding it would turn a slow
+			# run into a silently clean one.
+			print(f"[ripples] TIMED OUT after {timeout}s - partial results kept")
+	return results
+
+
+def run_chunk(binary, mat, chunk_dir, lo, hi, threads, ripples_kwargs, timeout=None):
+	"""Run one RIPPLES process over the half-open branch range [lo, hi)."""
+	os.makedirs(chunk_dir, exist_ok=True)
 	started = time.time()
-	instance.run_ripples(mat)
+	run_ripples(binary, mat, chunk_dir, threads, ripples_kwargs,
+	            start_index=lo, end_index=hi, timeout=timeout)
 	elapsed = time.time() - started
 	print(f"[chunk] branches [{lo},{hi}) finished in {elapsed / 60:.1f} min")
 	return chunk_dir
@@ -288,6 +331,57 @@ def count_screened(conn):
 		f"AND lower(COALESCE(accession_type,'')) IN ('reference','master')"
 	).fetchone()
 	return int(row[0]) if row else 0
+
+
+SCREEN_RUNS_TABLE = "recombination_screen_runs"
+
+
+def record_screen_run(conn, meta, rows, accessions, branches_tested, binary):
+	"""Append a provenance row describing this screen.
+
+	``meta_data.recombination_status`` records *that* a sequence was screened,
+	and ``reference_recombination`` records what was found. Neither records
+	*how* - and when nothing is found the events table is empty, so the method
+	disappears entirely. That matters here: `ripples-fast` prunes the breakpoint
+	search instead of enumerating it, so "no evidence" from a pruned search is a
+	weaker statement than "no evidence" from an exhaustive one, and a reader six
+	months from now cannot tell the two apart from a status column alone.
+
+	Rows accumulate rather than replace, so re-screening leaves a history.
+	"""
+	conn.execute(
+		f"CREATE TABLE IF NOT EXISTS {SCREEN_RUNS_TABLE} ("
+		f"screened_at TEXT, ripples_binary TEXT, search_mode TEXT, "
+		f"references_screened INTEGER, branches_tested INTEGER, "
+		f"events_found INTEGER, accessions_flagged INTEGER, "
+		f"branch_length INTEGER, min_range INTEGER, max_range INTEGER, "
+		f"parsimony_improvement INTEGER, num_descendants INTEGER, "
+		f"chunks TEXT, note TEXT)"
+	)
+	flagged = len({r["primary_accession"] for r in rows if r.get("primary_accession")})
+	events = len({r.get("recomb_node_id") for r in rows}) if rows else 0
+	pruned = str(binary).endswith("-fast")
+	note = (
+		"pruned search: not guaranteed identical to the exhaustive scan, and no "
+		"head-to-head is available on trees this divergent because exhaustive "
+		"ripples does not finish a single branch"
+		if pruned else
+		"exhaustive breakpoint-pair enumeration"
+	)
+	conn.execute(
+		f"INSERT INTO {SCREEN_RUNS_TABLE} VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+		(
+			time.strftime("%Y-%m-%d %H:%M:%S"), binary,
+			"pruned" if pruned else "exhaustive",
+			len(accessions), branches_tested, events, flagged,
+			meta.get("branch_length (-l)"), meta.get("min_range (-r)"),
+			meta.get("max_range (-R)"), meta.get("parsimony_improvement (-p)"),
+			meta.get("num_descendants (-n)"), str(meta.get("chunks x threads")),
+			note,
+		),
+	)
+	conn.commit()
+	return note
 
 
 def read_events_from_db(conn):
@@ -479,6 +573,23 @@ def build_report(db, rows, accessions, context, status_counts, meta, screened=Tr
 		add("")
 
 	# -- caveats ------------------------------------------------------------
+	binary = str(meta.get("ripples binary") or "")
+	if binary.endswith("-fast"):
+		add("## How the search was done")
+		add("")
+		add(f"This screen used `{binary}`, which **prunes** the breakpoint search "
+		    f"rather than enumerating it. That is what makes it finish: on a "
+		    f"reference set spanning this much divergence, exhaustive `ripples` "
+		    f"evaluates ~2.6 million breakpoint pairs per branch at ~2.3/second, "
+		    f"about 13 days per branch.")
+		add("")
+		add("The consequence is that a pruned search is not guaranteed to agree "
+		    "with the exhaustive one, and here there is no head-to-head to check "
+		    "it against - exhaustive `ripples` does not finish a single branch on "
+		    "this data. **An empty result is therefore weaker evidence than it "
+		    "looks.**")
+		add("")
+
 	if not rows:
 		return "\n".join(out)
 
@@ -535,7 +646,8 @@ class RecombinationHunter:
 	             branch_length=3, min_range=1000, max_range=10000000,
 	             parsimony_improvement=3, num_descendants=3,
 	             write_db=False, skip_build=False, timeout=None,
-	             probe_timeout=PROBE_TIMEOUT):
+	             probe_timeout=PROBE_TIMEOUT,
+	             ripples_binary=DEFAULT_RIPPLES_BINARY):
 		self.db = db
 		self.outdir = outdir
 		self.tree = tree
@@ -550,6 +662,7 @@ class RecombinationHunter:
 		self.skip_build = skip_build
 		self.timeout = timeout
 		self.probe_timeout = probe_timeout
+		self.ripples_binary = ripples_binary
 		self.accessions = []
 		# Everything RIPPLES itself is parameterised by, passed explicitly rather
 		# than left to the binary's defaults, which change between versions.
@@ -624,7 +737,7 @@ class RecombinationHunter:
 		# One probe decides the split for the whole run.
 		branches = probe_long_branches(
 			mat, self.outdir, self.threads_per_chunk, self.ripples_kwargs,
-			timeout=self.probe_timeout,
+			binary=self.ripples_binary, timeout=self.probe_timeout,
 		)
 		if branches == 0:
 			# With a MAT that has been checked, this is a real answer rather than
@@ -636,6 +749,13 @@ class RecombinationHunter:
 		elif branches is None:
 			print("[plan] branch count unknown - running a single unchunked RIPPLES")
 			bounds = [(None, None)]
+		elif self.chunks == 1:
+			# One chunk is the whole run, so say so by omitting -S/-E entirely.
+			# Both binaries mark those flags EXPERIMENTAL; there is no reason to
+			# exercise them when nothing is being split.
+			bounds = [(None, None)]
+			print(f"[plan] {branches} long branches in a single unchunked run "
+			      f"x {self.threads_per_chunk} thread(s)")
 		else:
 			bounds = screen.chunk_bounds(branches, self.chunks) or [(None, None)]
 			print(f"[plan] {branches} long branches over {len(bounds)} chunk(s) "
@@ -657,6 +777,7 @@ class RecombinationHunter:
 			"reference sequences": len(self.accessions),
 			"long branches tested": branches if branches is not None else "unknown",
 			"chunks x threads": f"{len(bounds)} x {self.threads_per_chunk}",
+			"ripples binary": self.ripples_binary,
 			"wall clock": f"{elapsed / 3600:.2f} h",
 			"branch_length (-l)": self.ripples_kwargs["branch_length"],
 			"num_descendants (-n)": self.ripples_kwargs["num_descendants"],
@@ -669,9 +790,14 @@ class RecombinationHunter:
 		if self.write_db and self.db:
 			conn = sqlite3.connect(self.db)
 			try:
-				written, flagged = screen.store_results(conn, rows, self.accessions)
+				written, flagged = screen.store_results(
+					conn, rows, self.accessions, detected_by=self.ripples_binary
+				)
+				record_screen_run(conn, meta, rows, self.accessions,
+				                  branches, self.ripples_binary)
 				print(f"[db] wrote {written} row(s) to {RECOMBINATION_TABLE}; "
-				      f"{flagged} marked {STATUS_RECOMBINANT}")
+				      f"{flagged} marked {STATUS_RECOMBINANT}; "
+				      f"provenance in {SCREEN_RUNS_TABLE}")
 			finally:
 				conn.close()
 
@@ -686,7 +812,7 @@ class RecombinationHunter:
 			for index, (lo, hi) in enumerate(bounds):
 				chunk_dir = os.path.join(self.outdir, f"chunk_{index:03d}")
 				futures.append(pool.submit(
-					run_chunk, mat, chunk_dir, lo, hi,
+					run_chunk, self.ripples_binary, mat, chunk_dir, lo, hi,
 					self.threads_per_chunk, self.ripples_kwargs, self.timeout,
 				))
 			for future in futures:
@@ -728,7 +854,9 @@ class RecombinationHunter:
 		if self.write_db and self.db:
 			conn = sqlite3.connect(self.db)
 			try:
-				written, flagged = screen.store_results(conn, rows, self.accessions)
+				written, flagged = screen.store_results(
+					conn, rows, self.accessions, detected_by=self.ripples_binary
+				)
 				print(f"[db] wrote {written} row(s) to {RECOMBINATION_TABLE}; "
 				      f"{flagged} marked {STATUS_RECOMBINANT}")
 			finally:
@@ -738,6 +866,7 @@ class RecombinationHunter:
 			"database": self.db or "(alignment input)",
 			"reference sequences": len(self.accessions),
 			"chunks merged": len(chunk_dirs),
+			"ripples binary": self.ripples_binary,
 			"source": f"existing chunk output under {self.outdir} (--collect_only)",
 			"generated": time.strftime("%Y-%m-%d %H:%M:%S"),
 		}
@@ -794,6 +923,11 @@ def parse_args(argv=None):
 	                    help="seconds before each chunk is stopped; partial results kept")
 	parser.add_argument("--probe_timeout", type=float, default=PROBE_TIMEOUT,
 	                    help="seconds to wait for the RIPPLES branch count")
+	parser.add_argument("--ripples_binary", default=DEFAULT_RIPPLES_BINARY,
+	                    help=f"which RIPPLES binary to drive (default "
+	                         f"{DEFAULT_RIPPLES_BINARY}). Use 'ripples' for the "
+	                         f"exhaustive search - only viable on trees whose "
+	                         f"branches carry few mutations.")
 	parser.add_argument("--collect_only", action="store_true",
 	                    help="merge/store/report existing chunk_* output without "
 	                         "re-running RIPPLES")
@@ -825,6 +959,7 @@ def main(argv=None):
 		skip_build=args.skip_build,
 		timeout=args.timeout,
 		probe_timeout=args.probe_timeout,
+		ripples_binary=args.ripples_binary,
 	)
 
 	if args.report_only:
