@@ -448,3 +448,128 @@ class TestSingleTipRootingIsFlagged:
         rc, log, out = run(tmp_path, BALANCED, "--outgroup", "C")
         assert rc == 0
         assert tips(out) == {"A", "B", "C", "D", "E", "F"}
+
+
+# ---------------------------------------------------------------------------
+# Linear-time midpoint rooting
+#
+# Biopython's Tree.root_at_midpoint re-roots the tree at every tip in turn and
+# recomputes all depths each time. Measured on this repository's HCV trees:
+# 250 tips 0.07s, 500 0.28s, 1000 1.21s, 2000 6.16s - a clean 4x per doubling.
+# The 138,095-tip UShER tree extrapolates to about eight hours, and midpoint
+# rooting is now part of the pipeline, so that is a per-run cost on every real
+# dataset.
+#
+# midpoint_root finds the diameter with two farthest-point searches instead.
+# The placement arithmetic afterwards is deliberately Biopython's own: its
+# `root_with_outgroup` does not split a branch around the new root, and the
+# `max_distance` its formula expects is measured AFTER rooting at the first
+# tip, which is larger than the true diameter. Both of those are easy to get
+# wrong in ways that still produce a plausible-looking tree, so the contract
+# asserted here is equality with Biopython, not merely "a midpoint".
+# ---------------------------------------------------------------------------
+
+import copy as _copy
+import random as _random
+
+from Bio.Phylo.BaseTree import Clade as _Clade, Tree as _Tree
+
+import TreeReRoot as _TRR
+
+
+def _random_tree(n, seed, zero_length_fraction=0.0):
+    rng = _random.Random(seed)
+
+    def length():
+        if zero_length_fraction and rng.random() < zero_length_fraction:
+            return 0.0
+        return rng.uniform(0.001, 2.0)
+
+    clades = [_Clade(branch_length=length(), name=f"t{i}") for i in range(n)]
+    while len(clades) > 1:
+        a = clades.pop(rng.randrange(len(clades)))
+        b = clades.pop(rng.randrange(len(clades)))
+        clades.append(_Clade(branch_length=length(), clades=[a, b]))
+    return _Tree(root=clades[0], rooted=False)
+
+
+def _tip_depths(tree):
+    return {t.name: round(tree.distance(tree.root, t), 9) for t in tree.get_terminals()}
+
+
+class TestMidpointRootMatchesBiopython:
+    @pytest.mark.parametrize("n,seed", [
+        (2, 40), (3, 9), (8, 1), (25, 2), (60, 3), (150, 4), (400, 5), (900, 6),
+    ])
+    def test_identical_rooting(self, n, seed):
+        original = _random_tree(n, seed)
+        reference = _copy.deepcopy(original)
+        reference.root_at_midpoint()
+        fast = _copy.deepcopy(original)
+        _TRR.midpoint_root(fast)
+        assert _tip_depths(fast) == _tip_depths(reference)
+
+    @pytest.mark.parametrize("n,seed", [(30, 11), (120, 12), (500, 13)])
+    def test_identical_with_zero_length_branches(self, n, seed):
+        # Zero-length branches let an internal node tie a leaf for "farthest",
+        # which would put the root off the tip-to-tip path.
+        original = _random_tree(n, seed, zero_length_fraction=0.3)
+        reference = _copy.deepcopy(original)
+        reference.root_at_midpoint()
+        fast = _copy.deepcopy(original)
+        _TRR.midpoint_root(fast)
+        assert _tip_depths(fast) == _tip_depths(reference)
+
+    def test_root_sits_at_half_the_diameter(self):
+        """The defining property, asserted independently of Biopython."""
+        tree = _random_tree(300, 21)
+        parent = {}
+        for clade in tree.find_clades(order="level"):
+            for child in clade.clades:
+                parent[id(child)] = clade
+        end, _, _ = _TRR._farthest_from(tree.get_terminals()[0], parent)
+        _, diameter, _ = _TRR._farthest_from(end, parent)
+
+        _TRR.midpoint_root(tree)
+        deepest = max(tree.distance(tree.root, t) for t in tree.get_terminals())
+        assert deepest == pytest.approx(diameter / 2.0, abs=1e-9)
+
+    def test_single_tip_is_left_alone(self):
+        tree = _Tree(root=_Clade(branch_length=1.0, name="only"))
+        assert _TRR.midpoint_root(tree) is tree
+
+    def test_all_zero_lengths_is_left_alone(self):
+        # There is no midpoint to find, and re-rooting would move the root
+        # arbitrarily while looking like it had done something meaningful.
+        tree = _random_tree(20, 31)
+        for clade in tree.find_clades():
+            clade.branch_length = 0.0
+        before = _tip_depths(tree)
+        _TRR.midpoint_root(tree)
+        assert _tip_depths(tree) == before
+
+
+class TestFarthestFrom:
+    def test_returns_a_tip_not_an_internal_node(self):
+        tree = _random_tree(50, 41, zero_length_fraction=0.5)
+        parent = {}
+        for clade in tree.find_clades(order="level"):
+            for child in clade.clades:
+                parent[id(child)] = clade
+        found, _, _ = _TRR._farthest_from(tree.get_terminals()[0], parent)
+        assert not found.clades, "a diameter endpoint must be a tip"
+
+    def test_finds_the_true_diameter_on_a_known_tree(self):
+        # ((A:1,B:1):1,C:5)  ->  diameter is B..C (or A..C) = 1 + 1 + 5 = 7
+        a = _Clade(branch_length=1.0, name="A")
+        b = _Clade(branch_length=1.0, name="B")
+        ab = _Clade(branch_length=1.0, clades=[a, b])
+        c = _Clade(branch_length=5.0, name="C")
+        tree = _Tree(root=_Clade(branch_length=0.0, clades=[ab, c]), rooted=False)
+        parent = {}
+        for clade in tree.find_clades(order="level"):
+            for child in clade.clades:
+                parent[id(child)] = clade
+        end, _, _ = _TRR._farthest_from(tree.get_terminals()[0], parent)
+        _, diameter, _ = _TRR._farthest_from(end, parent)
+        assert diameter == pytest.approx(7.0)

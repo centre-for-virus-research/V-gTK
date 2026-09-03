@@ -12,6 +12,119 @@ python scripts/TreeReRoot.py --input_tree generic/rabv/tree/ref.treefile --outpu
 python scripts/TreeReRoot.py --input_tree generic/rabv/tree/ref_plus_outgroup.treefile --output_tree ref_plus_outgroup_rerooted.treefile --outgroup NC_009528.2 NC_009527.1 --order_node decrease 
 
 '''
+def _neighbours(clade, parent):
+    """Every node adjacent to `clade`, treating the tree as unrooted.
+
+    A phylogeny's stored root is an arbitrary artefact of how the file was
+    written; the midpoint does not depend on it. Walking children *and* parent
+    is what makes the search below see the real tree.
+    """
+    for child in clade.clades:
+        yield child, (child.branch_length or 0.0)
+    up = parent.get(id(clade))
+    if up is not None:
+        yield up, (clade.branch_length or 0.0)
+
+
+def _farthest_from(start, parent):
+    """Node farthest from `start`, its distance, and the predecessor map.
+
+    Iterative rather than recursive: a 138,095-tip tree is far deeper than the
+    default recursion limit.
+    """
+    dist = {id(start): 0.0}
+    prev = {id(start): None}
+    best, best_distance = start, 0.0
+    stack = [start]
+    while stack:
+        current = stack.pop()
+        base = dist[id(current)]
+        for neighbour, weight in _neighbours(current, parent):
+            if id(neighbour) in dist:
+                continue
+            reached = base + weight
+            dist[id(neighbour)] = reached
+            prev[id(neighbour)] = current
+            # Only a tip may be a diameter endpoint. With zero-length branches
+            # an internal node can tie a leaf, and returning it would place the
+            # root off the taxa-to-taxa path.
+            if reached > best_distance and not neighbour.clades:
+                best, best_distance = neighbour, reached
+            stack.append(neighbour)
+    return best, best_distance, prev
+
+
+def midpoint_root(tree):
+    """Root `tree` at the midpoint of its two most distant tips, in O(n).
+
+    Biopython's ``Tree.root_at_midpoint`` re-roots the tree at every tip in
+    turn and recomputes all depths each time, which is quadratic. Measured on
+    this repository's HCV trees: 250 tips 0.07s, 500 0.28s, 1000 1.21s, 2000
+    6.16s - a clean 4x per doubling. Extrapolated, the 11,825-tip IQ-TREE takes
+    about 4 minutes and the 138,095-tip UShER tree about 8 hours. Since
+    midpoint rooting is now part of the pipeline, that is a per-run cost on
+    every real dataset.
+
+    Two farthest-point searches find the diameter instead, which is the
+    standard linear method: the farthest node from any start is an end of some
+    diameter, and the farthest node from *that* is the other end. Walking the
+    path between them to its halfway point gives the branch and the offset,
+    and one call to ``root_with_outgroup`` does the actual re-rooting.
+
+    Returns the tree, rooted in place.
+    """
+    tips = tree.get_terminals()
+    if len(tips) < 2:
+        return tree
+
+    parent = {}
+    for clade in tree.find_clades(order="level"):
+        for child in clade.clades:
+            parent[id(child)] = clade
+
+    # Two farthest-point searches identify an endpoint of the tree's diameter
+    # in linear time. That is the ONLY thing Biopython's loop is computing, at
+    # the cost of re-rooting and recomputing every depth once per tip.
+    endpoint, _, _ = _farthest_from(tips[0], parent)
+    endpoint, distance, _ = _farthest_from(endpoint, parent)
+    if distance <= 0:
+        # Every branch is zero length; there is no midpoint to find.
+        return tree
+
+    # Everything from here is Biopython's own arithmetic, deliberately not
+    # reinvented. Two details make that necessary:
+    #
+    #   * `root_with_outgroup` does not split a branch around the new root, so
+    #     naive placement silently inflates the tree.
+    #   * the `max_distance` its formula expects is the depth measured AFTER
+    #     rooting at the first tip, which is larger than the true diameter -
+    #     rooting at a tip adds that tip's branch. Feeding the true diameter
+    #     into `root_remainder` puts the root in the wrong place, so the
+    #     measurement has to be taken the way the formula expects.
+    tree.root_with_outgroup(endpoint)
+    far_tip, max_distance = max(tree.depths().items(), key=lambda item: item[1])
+
+    root_remainder = 0.5 * (max_distance - (tree.root.branch_length or 0))
+    if root_remainder < 0:
+        root_remainder = 0.0
+
+    outgroup_node = None
+    outgroup_branch_length = None
+    for node in tree.get_path(far_tip):
+        root_remainder -= node.branch_length
+        if root_remainder < 0:
+            outgroup_node = node
+            outgroup_branch_length = -root_remainder
+            break
+    if outgroup_node is None:
+        raise ValueError("Failed to find the midpoint along the diameter path")
+
+    tree.root_with_outgroup(
+        outgroup_node, outgroup_branch_length=outgroup_branch_length
+    )
+    return tree
+
+
 class Tree_Rerooter:
 
     def __init__(self, input_tree, output_tree, outgroup, allow_extra_outgroup_descendants, root_fraction, order_node):
@@ -344,6 +457,19 @@ class Tree_Rerooter:
             raise ValueError("--root_fraction must be between 0 and 1.")
 
         original_tree = Phylo.read(self.input_tree, "newick")
+
+        # Bio.Phylo does not reject arbitrary text: "this is not newick" parses
+        # as a single unnamed-structure tree with one tip. That used to be
+        # caught only by accident, when root_at_midpoint fell over an unbound
+        # variable on a one-tip tree; now that midpoint rooting handles the
+        # degenerate case cleanly, the input has to be checked here instead.
+        tip_count = len(original_tree.get_terminals())
+        if tip_count < 2:
+            raise ValueError(
+                f"{self.input_tree} does not contain a usable tree: parsed "
+                f"{tip_count} tip(s). Rerooting needs at least two."
+            )
+
         terminal_names = self.terminal_lookup(original_tree)
         all_taxa = set(terminal_names.keys())
         supports = self.get_supports(original_tree, all_taxa)
@@ -383,7 +509,7 @@ class Tree_Rerooter:
                     file=sys.stderr
                 )
 
-            rerooted_tree.root_at_midpoint()
+            midpoint_root(rerooted_tree)
             rooting_method = "midpoint"
 
         rerooted_tree.rooted = True
