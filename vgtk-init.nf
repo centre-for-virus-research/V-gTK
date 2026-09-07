@@ -946,10 +946,20 @@ process CALC_ALIGNMENT_CORD {
 }
 
 process SOFTWARE_VERSION {
+    // db_name is a cache discriminator, not data: the script never reads it.
+    // With no inputs at all this process hashed identically in every profile,
+    // so a bare `-resume` (which resumes the *last* session, not the last run
+    // of this profile) let a throwaway test run satisfy a production run and
+    // staged software_info.tsv straight out of `work_test_seg`. Deleting that
+    // disposable work dir mid-run then left CREATE_SQLITE_DB with a dangling
+    // symlink. Keying on the database keeps each DB's entry in its own work dir.
+    input:
+        val db_name
     output:
         path "Software_info/software_info.tsv", emit: software_info
     shell:
     '''
+    echo "Recording software versions for database: !{db_name}" >&2
     python !{scripts_dir}/SoftwareVersion.py -d . -o Software_info \
      -f software_info.tsv
     '''
@@ -1740,7 +1750,7 @@ workflow {
                         params.ref_list,
                         effective_ref_list)
                         
-    SOFTWARE_VERSION()
+    SOFTWARE_VERSION("${params.db_name ?: 'unnamed_db'}_${params.tax_id ?: 'no_taxid'}")
     
     GENERATE_TABLES(data, 
                     BLAST_ALIGNMENT.out.query_uniq_tophits, 

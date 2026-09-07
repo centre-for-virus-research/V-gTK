@@ -233,6 +233,28 @@ pytest -q tests/unit --cov-fail-under=80
 CI execution on every push/PR:
 - [.github/workflows/python-unit-tests.yml](.github/workflows/python-unit-tests.yml)
 
+### Run the test profiles from their own launch directory
+
+`nextflow run -resume` with no session id resumes the **last session in
+`.nextflow/history`**, not the last run of the profile you asked for. A test
+profile launched from the repo root becomes that last session, so the next
+production `-resume` inherits the test run's cache and can stage inputs out of
+a disposable test work dir. When that work dir is later deleted, the production
+run dies on a dangling symlink - see [test_stale_staged_input_symlink.py](tests/unit/test_stale_staged_input_symlink.py).
+
+Give the test runs their own launch directory so they keep their own history and
+cache. Every pipeline path is `${projectDir}`-based, so this works unchanged:
+
+```bash
+mkdir -p /tmp/vgtk-tests && cd /tmp/vgtk-tests
+nextflow run /path/to/RABV-gTK/vgtk-init.nf -profile test -w work_unseg
+nextflow run /path/to/RABV-gTK/vgtk-init.nf -profile segmented_test -w work_seg
+```
+
+If you do run them from the repo root, resume production runs by explicit
+session id (`nextflow run ... -resume <session-uuid>`, from `nextflow log`)
+rather than bare `-resume`.
+
 ### For Segmented Virus (Influenza)
 ```bash
 nextflow run vgtk-init.nf -profile segmented_test

@@ -185,6 +185,18 @@ class CreateSqliteDB:
 
 	@staticmethod
 	def _require_file(path, label):
+		if path and os.path.islink(path) and not os.path.exists(path):
+			# A broken symlink here almost always means Nextflow staged this input
+			# from a work dir that has since been deleted - typically a disposable
+			# test work dir that a bare `-resume` pulled into a production run.
+			# Say so, because "file not found: software_info.tsv" on a file that is
+			# sitting right there in the task dir is otherwise baffling.
+			target = os.readlink(path)
+			raise FileNotFoundError(
+				f"{label} file is a broken symlink: {path} -> {target} "
+				f"(the staged file's source directory no longer exists; "
+				f"re-run the producing step rather than resuming it from cache)"
+			)
 		if not path or not os.path.isfile(path):
 			raise FileNotFoundError(f"{label} file not found: {path}")
 
