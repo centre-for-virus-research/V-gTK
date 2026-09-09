@@ -61,7 +61,8 @@ HCV_DB_COLUMNS = [
     'mutation_type', 'signature_id', 'signature_kind', 'combination_id', 'combination_size',
     'phenotype', 'resistance_category', 'drug', 'drug_category', 'drug_producer', 'pubmed_id',
     'DOI', 'any_in_vitro_evidence', 'in_vitro_max_ec50_midpoint', 'any_in_vivo_evidence',
-    'in_vivo_baseline', 'in_vivo_treatment_emergent'
+    'in_vivo_baseline', 'in_vivo_treatment_emergent',
+    'relevant_genotypes', 'wild_type_residues', 'clinical_trials',
 ]
 
 
@@ -822,6 +823,39 @@ def test_build_catalog_reference_table_hcv_profile_keeps_required_and_hcv_column
     assert result.columns.tolist() == HCV_DB_COLUMNS
     assert result.iloc[0]['phenotype'] == 'RAS'
     assert result.iloc[0]['drug'] == 'drugA'
+    # A catalogue that does not supply the generic columns gets them empty, not
+    # missing: the profile is a request, not a requirement on the curator.
+    assert result.iloc[0]['clinical_trials'] == ''
+    assert result.iloc[0]['relevant_genotypes'] == ''
+
+
+def test_hcv_profile_stops_two_findings_collapsing_into_one():
+    """Rows differing only in a dropped column were silently merged.
+
+    build_catalog_reference_table selects columns and THEN de-duplicates, so a
+    column left out of the profile does not merely fail to be stored - it erases
+    the distinction it carried.  In the shipped HCV catalogue exactly one pair
+    was affected: NS5A:93H against velpatasvir, supported by NCT02639247 in one
+    row and NCT02607735 in another, arrived as a single row citing neither.
+    """
+    base = {
+        'mutation_id': 'NS5A:93H', 'protein_name': 'NS5A', 'segment': '1',
+        'aa_position': '93', 'alt_residue': 'H', 'reference_accession': 'REF1',
+        'mutation_type': 'snp', 'signature_id': 'NS5A:93H', 'signature_kind': 'single',
+        'combination_id': '', 'combination_size': '', 'phenotype': 'drug_resistance',
+        'resistance_category': 'category_II', 'drug': 'velpatasvir',
+        'relevant_genotypes': '1a;1b', 'wild_type_residues': '1a:Y:88.93;1b:Y:94.62',
+    }
+    catalog = pd.DataFrame([
+        dict(base, clinical_trials='NCT02639247'),
+        dict(base, clinical_trials='NCT02607735'),
+    ])
+
+    result = AnnotateMutations.build_catalog_reference_table(catalog, 'HCV')
+
+    assert len(result) == 2
+    assert set(result['clinical_trials']) == {'NCT02639247', 'NCT02607735'}
+    assert set(result['relevant_genotypes']) == {'1a;1b'}
 
 
 def test_build_catalog_reference_table_all_columns_preserves_input_columns():

@@ -51,6 +51,11 @@ REQUIRED_MUTATION_CATALOG_COLUMNS = [
 #: data, and inventing empty HCV drug-resistance columns is not a prerequisite
 #: for annotating a virus that has no drugs.
 #:
+#: A column NOT listed here is dropped, and the drop is silent: the surviving
+#: columns are then de-duplicated, so two catalogue rows that differed only in a
+#: dropped column arrive as one row.  This list is therefore a claim about what
+#: a row's identity is, not just about what is worth storing.
+#:
 #: ``product_patterns`` are tried in order against a feature product name or a
 #: catalogue protein name; the first to match supplies the compact name.
 #: Anything not listed is left exactly as written.
@@ -66,6 +71,15 @@ VIRUS_PROFILES = {
             'resistance_category', 'drug', 'drug_category', 'drug_producer', 'pubmed_id',
             'DOI', 'any_in_vitro_evidence', 'in_vitro_max_ec50_midpoint',
             'any_in_vivo_evidence', 'in_vivo_baseline', 'in_vivo_treatment_emergent',
+            # The three generic columns BuildCatalogGenotypeColumns.py appends.
+            # They are what makes a catalogue row self-describing in the
+            # database: the genotypes it was curated in, the wild type it was
+            # judged against, and the trials behind it.  clinical_trials has no
+            # other route in - without it the clinical_trials registry table is
+            # written on every HCV build and joined to by nothing.  Listed last
+            # because they are last in the catalogue TSV, so this profile and
+            # 'all_columns' agree on their order.
+            'relevant_genotypes', 'wild_type_residues', 'clinical_trials',
         ],
         # The ten HCV mature peptides. 'core' and 'E1'/'E2' are the reason this
         # list must not be applied to another virus: they are ordinary English
@@ -1738,9 +1752,23 @@ def write_mutation_tables(conn, catalog, mutations_found, catalog_column_profile
 
     if clinical_trials is not None and not clinical_trials.empty:
         print(f'Writing clinical_trials table ({len(clinical_trials)} rows)...')
+        duplicate_ncts = clinical_trials.loc[clinical_trials['nct_id'].duplicated(), 'nct_id'].tolist()
+        if duplicate_ncts:
+            # The unique index below would catch this, but only after to_sql has
+            # written the rows and before conn.commit() - an IntegrityError
+            # naming nothing, over a half-written database.  Say which ids.
+            raise ValueError(
+                'clinical_trials must be one row per nct_id before it is written; '
+                f'{len(duplicate_ncts)} duplicate(s): {sorted(set(duplicate_ncts))[:5]}'
+            )
         cursor.execute('DROP TABLE IF EXISTS clinical_trials')
         clinical_trials.to_sql('clinical_trials', conn, if_exists='replace', index=False)
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_clinical_trials_nct ON clinical_trials(nct_id)')
+        # UNIQUE, not merely indexed: one row per nct_id is the property that
+        # makes the join from mutation_catalog.clinical_trials safe, and a
+        # constraint states it to anyone reading the schema.  A loader that
+        # regresses then fails at build time instead of silently doubling the
+        # trial evidence in every downstream query.
+        cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_clinical_trials_nct ON clinical_trials(nct_id)')
 
     print('Writing compact mutation summary tables...')
     df_catalog_for_layouts = catalog.fillna('').copy()
@@ -1780,8 +1808,15 @@ def write_mutation_tables(conn, catalog, mutations_found, catalog_column_profile
 
     conn.commit()
 
+#: Separator for a multi-valued string field, as everywhere else in this
+#: catalogue: pubmed_id, clinical_trials and relevant_genotypes all use it, and
+#: no trial id or display name in the registry contains one.  A comma would have
+#: been ambiguous - 'Magellan-1, Part 1' is a single trial name.
+TRIAL_VALUE_SEP = ';'
+
+
 def load_clinical_trials_table(clinical_trial_path):
-    """The trial registry entries the catalogue's NCT identifiers refer to.
+    """The trial registry, merged to one row per NCT identifier.
 
     ``mutation_catalog.clinical_trials`` holds semicolon-separated NCT numbers,
     scoped per (mutation, genotype, drug) - trial support genuinely varies by
@@ -1789,23 +1824,74 @@ def load_clinical_trials_table(clinical_trial_path):
     nine in 1b. This loads the registry rows so an NCT resolves to the trial's
     name rather than staying an opaque accession.
 
+    PHDR keys the registry on its own ``id``, a curator label, not on the
+    registry number, so five NCT numbers arrive twice: the same registration
+    curated under two ids (ALLY-2 / NCT02032888, M12-536 / NCT01672983), one
+    carrying a sponsor code beside its name (ASTRAL-1 / GS-US-342-1138), and two
+    split into arms (C-WORTHy Part D, Magellan-1 Parts 1 and 2).  Loaded verbatim
+    those five fan the join out: the catalogue's 2,290 (row, trial) pairs become
+    2,597, inflating the visible evidence by 13% on exactly the rows citing the
+    most widely used trials.
+
+    So one row per nct_id, keeping every DISTINCT id and every DISTINCT name,
+    joined; a group agreeing on both fields collapses to one value.  Nothing a
+    curator wrote is lost and nothing is duplicated.
+
+    A registry row with no NCT number cannot be keyed and is not loaded, but it
+    is reported rather than vanishing: PHDR carries one, UMIN000015627, a
+    Japanese UMIN-CTR registration with no ClinicalTrials.gov entry.  Nothing in
+    the catalogue cites it.
+
     Optional. Without it the NCT identifiers are still present and still
     correct, just not resolvable inside the database.
     """
     if not clinical_trial_path or not os.path.isfile(clinical_trial_path):
         return None
-    rows = []
+
+    # dicts, not sets, for the group members: dicts preserve insertion order, so
+    # a merged value is the curator's own order and is byte-identical run to
+    # run.  Set order follows hash order, which would show up as unexplainable
+    # churn in every checksum diff.
+    merged = defaultdict(lambda: ({}, {}))
+    source_rows = 0
+    without_nct = []
     with open(clinical_trial_path, newline='', encoding='utf-8', errors='replace') as handle:
         for row in csv.DictReader(handle):
+            source_rows += 1
             nct = (row.get('nct_id') or '').strip()
+            trial_id = (row.get('id') or '').strip()
+            trial_name = (row.get('display_name') or '').strip()
             if not nct:
+                without_nct.append(trial_id or trial_name or '<unnamed>')
                 continue
-            rows.append({
-                'nct_id': nct,
-                'trial_id': (row.get('id') or '').strip(),
-                'trial_name': (row.get('display_name') or '').strip(),
-            })
-    return pd.DataFrame(rows) if rows else None
+            ids, names = merged[nct]
+            if trial_id:
+                ids[trial_id] = None
+            if trial_name:
+                names[trial_name] = None
+
+    if without_nct:
+        print(
+            f'[AnnotateMutations][warn] {len(without_nct)} trial registry row(s) carry no '
+            f'nct_id and are not loaded: {", ".join(without_nct)}'
+        )
+    if not merged:
+        return None
+
+    rows = [
+        {
+            'nct_id': nct,
+            'trial_id': TRIAL_VALUE_SEP.join(ids),
+            'trial_name': TRIAL_VALUE_SEP.join(names),
+        }
+        for nct, (ids, names) in merged.items()
+    ]
+    fanned = sum(1 for ids, names in merged.values() if len(ids) > 1 or len(names) > 1)
+    print(
+        f'[AnnotateMutations] Trial registry: {source_rows} rows -> {len(rows)} trials '
+        f'({fanned} merged from duplicate nct_id, {len(without_nct)} without an nct_id)'
+    )
+    return pd.DataFrame(rows, columns=['nct_id', 'trial_id', 'trial_name'])
 
 
 def load_publications_table(publications_path):

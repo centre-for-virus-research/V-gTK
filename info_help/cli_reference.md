@@ -37,7 +37,7 @@ Annotates a finished database against a catalogue. Run by the
 | `--mutation_catalog` | yes | — | Catalogue TSV. |
 | `--virus` | no | `""` | Virus context, e.g. `HCV`. Selects virus-specific handling. |
 | `--publications` | no | none | Publication metadata CSV. Loads a `publications` table so the PMIDs in `mutation_catalog.pubmed_id` resolve to titles. Without it they stay bare references. |
-| `--clinical_trials` | no | none | Trial registry CSV. Loads a `clinical_trials` table so the NCT ids in `mutation_catalog.clinical_trials` resolve to trial names. |
+| `--clinical_trials` | no | none | Trial registry CSV (`id,display_name,nct_id`). Loads a `clinical_trials` table, **one row per `nct_id`**, so the NCT ids in `mutation_catalog.clinical_trials` resolve to trial names without the join fanning out. Rows sharing an NCT number are merged, keeping every distinct id and name semicolon separated; a row with no NCT number is reported on stdout and not loaded. |
 
 ```
 python scripts/AnnotateMutations.py \
@@ -57,7 +57,10 @@ To turn gating off, use a catalogue without those columns.
 
 **Writes:** `mutation_catalog`, `sequence_relevant_mutation_summary`,
 `completed_signatures_only`, and `sequence_mutation_calls` (every evaluated call
-with the reason it was emitted or suppressed).
+with the reason it was emitted or suppressed). With `--publications` and
+`--clinical_trials` it also writes the `publications` and `clinical_trials`
+lookup tables that `mutation_catalog.pubmed_id` and
+`mutation_catalog.clinical_trials` join to.
 
 ---
 

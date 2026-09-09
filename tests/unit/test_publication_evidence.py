@@ -69,10 +69,72 @@ class TestClinicalTrialRegistry:
     @requires_trials
     def test_table_loads_with_the_expected_shape(self):
         frame = AM.load_clinical_trials_table(str(CLINICAL_TRIAL))
-        assert frame is not None and len(frame) >= 100
-        for column in ("nct_id", "trial_id", "trial_name"):
-            assert column in frame.columns
+        assert frame is not None and len(frame) == 97
+        assert frame.columns.tolist() == ["nct_id", "trial_id", "trial_name"]
         assert frame["nct_id"].str.startswith("NCT").all()
+
+    @requires_trials
+    def test_one_row_per_nct_number(self):
+        """The registry is keyed on PHDR's own id, not on the NCT number.
+
+        Five NCT numbers therefore appear twice - the same registration under
+        two ids (ALLY-2 / NCT02032888), a sponsor code beside a trial name
+        (GS-US-342-1138 / ASTRAL-1), and two split into arms. Loaded verbatim
+        they fan the join out: every catalogue row citing one of the five
+        matches twice and its trial evidence reads as doubled.
+        """
+        frame = AM.load_clinical_trials_table(str(CLINICAL_TRIAL))
+        assert frame["nct_id"].is_unique
+        source = list(csv.DictReader(open(CLINICAL_TRIAL, encoding="utf-8", errors="replace")))
+        assert len(frame) == len({r["nct_id"].strip() for r in source if r["nct_id"].strip()})
+
+    @requires_trials
+    def test_merging_keeps_every_distinct_value(self):
+        """Nothing a curator wrote is lost.
+
+        Distinct ids and distinct names are both kept, semicolon separated; a
+        group agreeing on both fields would collapse to one value.
+        """
+        frame = AM.load_clinical_trials_table(str(CLINICAL_TRIAL))
+        by_nct = {row.nct_id: row for row in frame.itertuples()}
+
+        assert by_nct["NCT02446717"].trial_id == "Magellan-1_Part_1;Magellan-1_Part_2"
+        assert by_nct["NCT02446717"].trial_name == "Magellan-1, Part 1;Magellan-1, Part 2"
+        assert by_nct["NCT02201940"].trial_name == "ASTRAL-1;GS-US-342-1138 (ASTRAL-1)"
+        assert by_nct["NCT02032888"].trial_id == "ALLY-2;NCT02032888"
+        # A trial appearing once keeps a bare, unjoined value.
+        assert ";" not in by_nct["NCT02265237"].trial_id
+
+        # Set equality both ways: no value invented, no value dropped.
+        source = [r for r in csv.DictReader(open(CLINICAL_TRIAL, encoding="utf-8", errors="replace"))
+                  if (r["nct_id"] or "").strip()]
+        for column, field in (("trial_id", "id"), ("trial_name", "display_name")):
+            assert {v for cell in frame[column] for v in cell.split(";")} == \
+                   {(r[field] or "").strip() for r in source}
+
+    @requires_trials
+    def test_the_separator_could_not_have_been_a_comma(self):
+        """'Magellan-1, Part 1' is one trial name, not two.
+
+        Semicolon is the separator every multi-valued string field in this
+        catalogue uses, and no registry value contains one.
+        """
+        source = list(csv.DictReader(open(CLINICAL_TRIAL, encoding="utf-8", errors="replace")))
+        assert not any(";" in (v or "") for r in source for v in r.values())
+        assert any("," in (r["display_name"] or "") for r in source)
+
+    @requires_trials
+    def test_a_row_without_an_nct_is_reported_not_dropped_in_silence(self, capsys):
+        """PHDR carries one: UMIN000015627, a Japanese UMIN-CTR registration
+        with no ClinicalTrials.gov entry.
+
+        It cannot be keyed on an NCT number and nothing in the catalogue cites
+        it, so it is not loaded - but the run says so rather than losing a
+        registry row without a word.
+        """
+        frame = AM.load_clinical_trials_table(str(CLINICAL_TRIAL))
+        assert "UMIN000015627" in capsys.readouterr().out
+        assert "UMIN000015627" not in set(frame["nct_id"])
 
     def test_absent_file_is_not_an_error(self):
         """Optional: without it the NCT ids are still correct, just unresolvable."""
@@ -228,6 +290,84 @@ class TestPublications:
                 assert reference.isdigit() or any(t in reference for t in ("AASLD", "EASL"))
 
 
+@pytest.fixture(scope="module")
+def catalog_db(tmp_path_factory):
+    """mutation_catalog and clinical_trials exactly as AnnotateMutations writes them.
+
+    Built from the shipped catalogue TSV and registry CSV rather than read from
+    test_out/: the join these tests are about is a property of the two writers,
+    and reading the shipped database would make the suite depend on when
+    somebody last ran the pipeline. No alignment work is done, so it is fast.
+    """
+    if not (CATALOG.exists() and CLINICAL_TRIAL.exists()):
+        pytest.skip("HCV catalogue assets not present")
+    import pandas as pd
+    catalog = pd.read_csv(CATALOG, sep="\t", dtype=str, keep_default_na=False)
+    path = tmp_path_factory.mktemp("catalog_db") / "catalog.db"
+    conn = sqlite3.connect(str(path))
+    try:
+        AM.write_mutation_tables(
+            conn, catalog, [], "HCV",
+            clinical_trials=AM.load_clinical_trials_table(str(CLINICAL_TRIAL)),
+        )
+    finally:
+        conn.close()
+    return path
+
+
+class TestTheDatabaseJoin:
+    """mutation_catalog.clinical_trials -> clinical_trials.nct_id.
+
+    Until the three generic columns entered the HCV column profile this join did
+    not exist: clinical_trials was dropped on the way into the database and the
+    registry table was orphaned - written on every HCV build, referenced by
+    nothing.
+    """
+
+    def test_the_catalog_table_carries_the_generic_columns(self, catalog_db):
+        conn = sqlite3.connect(f"file:{catalog_db}?mode=ro", uri=True)
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(mutation_catalog)")}
+        conn.close()
+        assert {"relevant_genotypes", "wild_type_residues", "clinical_trials"} <= columns
+
+    def test_the_registry_is_one_row_per_nct(self, catalog_db):
+        conn = sqlite3.connect(f"file:{catalog_db}?mode=ro", uri=True)
+        total, distinct = conn.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT nct_id) FROM clinical_trials").fetchone()
+        conn.close()
+        assert total == distinct == 97
+
+    def test_every_cited_trial_resolves(self, catalog_db):
+        """A dangling NCT would be evidence pointing at nothing."""
+        conn = sqlite3.connect(f"file:{catalog_db}?mode=ro", uri=True)
+        cited = {n for (cell,) in conn.execute("SELECT clinical_trials FROM mutation_catalog")
+                 for n in (cell or "").split(";") if n}
+        registry = {r[0] for r in conn.execute("SELECT nct_id FROM clinical_trials")}
+        conn.close()
+        assert cited
+        assert not (cited - registry), sorted(cited - registry)[:5]
+        assert not (registry - cited), "registry entries nothing cites"
+
+    def test_the_join_does_not_fan_out(self, catalog_db):
+        """One matched (row, trial) pair per NCT token in the catalogue.
+
+        With the registry loaded verbatim - 102 rows for 97 distinct NCTs - the
+        five doubled registrations turn 2,290 genuine pairs into 2,597,
+        inflating the visible trial evidence by 13% on exactly the rows citing
+        the most widely used trials.
+        """
+        conn = sqlite3.connect(f"file:{catalog_db}?mode=ro", uri=True)
+        tokens = sum(len([n for n in (cell or "").split(";") if n])
+                     for (cell,) in conn.execute("SELECT clinical_trials FROM mutation_catalog"))
+        joined = conn.execute(
+            "SELECT COUNT(*) FROM mutation_catalog mc JOIN clinical_trials ct "
+            "  ON ';' || mc.clinical_trials || ';' LIKE '%;' || ct.nct_id || ';%'"
+        ).fetchone()[0]
+        conn.close()
+        assert tokens == 2290
+        assert joined == tokens
+
+
 @pytest.mark.skipif(not HCV_DB.exists(), reason="HCV reference database not built here")
 class TestShippedDatabase:
     def test_catalog_carries_pubmed_ids(self):
@@ -239,13 +379,15 @@ class TestShippedDatabase:
         conn.close()
         assert total > 0 and with_pmid > 0.9 * total
 
-    def test_lookup_tables_appear_once_the_database_is_rebuilt(self):
-        """Documents current state: the shipped DB predates these options.
+    def test_lookup_tables_are_present(self):
+        """The reference build is annotated with --publications and
+        --clinical_trials; without them mutation_catalog.pubmed_id and
+        .clinical_trials are bare identifiers resolving to nothing.
 
-        When this starts failing the reference database has been rebuilt with
-        --publications / --clinical_trials, which is the intended end state.
+        Column-level assertions live in TestTheDatabaseJoin, which builds its
+        own database - a stale test_out/ should not fail the suite.
         """
         conn = sqlite3.connect(f"file:{HCV_DB}?mode=ro", uri=True)
         names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         conn.close()
-        assert "mutation_catalog" in names
+        assert {"mutation_catalog", "publications", "clinical_trials"} <= names

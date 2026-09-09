@@ -192,7 +192,9 @@ columns are empty, including the entire epitope block.
 
 Each catalogue row carries the registered trials supporting it **for that row's
 genotype and drug**, in a `clinical_trials` column of semicolon-separated NCT
-identifiers.
+identifiers. The column reaches the database intact as
+`mutation_catalog.clinical_trials`, and is the only thing in the database that
+refers to the `clinical_trials` registry table.
 
 The chain PHDR ships:
 
@@ -219,8 +221,15 @@ trial sets, so a row takes **its own** genotype's trials rather than the union
 across the signature's scope. Unioning would attach 1b's evidence to a 1a call.
 
 Only in-vivo findings carry a trial — an in-vitro EC50 has none, and rows without
-a drug get nothing. 746 of 1,869 rows are populated, drawing on 97 distinct
-trials out of the registry's 102.
+a drug get nothing. 746 of the catalogue's 1,869 rows are populated, drawing on
+all 97 distinct trials the registry contains.
+
+The registry CSV has 103 rows for those 97 trials. It is keyed on PHDR's own
+`id`, a curator label, so five NCT numbers appear twice — under two ids, under a
+trial name and a sponsor code, or split into two arms — and one row
+(`UMIN000015627`) is a Japanese UMIN-CTR registration with no NCT number at all.
+The loader merges the five and reports the one, so the database table is one row
+per `nct_id` and the join from `mutation_catalog` cannot double-count.
 
 **A note on what was nearly built instead.** Before the trial tables arrived
 there was no registry identifier anywhere in the PHDR export — `publication.id`
@@ -240,10 +249,22 @@ column as an integer will break on them.
 
 | table | contents |
 |---|---|
-| `mutation_catalog` | the catalogue as loaded |
+| `mutation_catalog` | **not** the catalogue as loaded: one row per distinct combination of the columns the virus profile selects. For HCV that is the 12 required columns plus 14 more, including `relevant_genotypes`, `wild_type_residues` and `clinical_trials`. The PHDR join keys `alignment_name` and `display_structure` are dropped and the survivors de-duplicated — 1,869 TSV rows to 1,828. |
+| `publications` | one row per publication cited by `mutation_catalog.pubmed_id` (128). Written only with `--publications`. |
+| `clinical_trials` | one row per NCT number cited by `mutation_catalog.clinical_trials` (97). Written only with `--clinical_trials`. |
 | `sequence_relevant_mutation_summary` | per sequence, the mutations present and their count |
 | `completed_signatures_only` | per sequence, the signatures fully satisfied |
 | `sequence_mutation_calls` | **every evaluated call**, emitted or suppressed, with the reason |
+
+**Two tables now carry columns of the same name and different meaning.**
+`mutation_catalog.relevant_genotypes` is the catalogue's curated scope for that
+row (`1a;1b`, semicolon separated, optionally with frequencies);
+`sequence_mutation_calls.relevant_genotypes` is the signature's whole scope as
+the gate saw it (`1a,1b`, comma separated). `mutation_catalog.wild_type_residues`
+is per genotype with frequencies (`1a:Q:60.89;1b:R:92.26`);
+`sequence_mutation_calls.wild_type_residues` is the bare residues actually
+consulted for that one sequence (`Q`). Qualify the table name when you join the
+two, and do not use `SELECT *`.
 
 `sequence_mutation_calls` exists because a suppressed call and a call that was
 never evaluated are indistinguishable from the summary tables alone. Each row

@@ -278,6 +278,42 @@ params.is_segmented = "N"
 params.test = "1"
 ```
 
+## Mutation annotation: the invariance check
+
+`scripts/AnnotateMutations.py` turns an alignment and a curated catalogue into
+drug-resistance calls. Almost none of the ways it can go wrong show up as a
+crash: suppress one genotype's calls, or shift one protein's coordinates by a
+codon, and the database that comes out looks exactly as healthy as a correct
+one. The unit tests cannot see it either, because they run on synthetic
+alignments a few dozen columns wide.
+
+So any change to that script, or to `scripts/ExploreMutationStorageLayouts.py`
+or `scripts/VerifyMutations.py`, should be bracketed by a run of:
+
+```bash
+dev/check_annotation_invariance.sh before
+# ...make the change...
+dev/check_annotation_invariance.sh after
+diff /tmp/vgtk-invariance/{before,after}/SUMMARY.txt
+```
+
+It re-annotates a copy of a real build (`test_out/HCV_OM_test/` by default,
+338 sequences and 43,558 calls) and checksums every table the annotator writes.
+It takes about four seconds and never touches the source database. Per-table
+CSVs are kept beside the summary, so when a checksum does move you can diff
+those to see which rows moved and why.
+
+Any difference is either intended and explainable row by row, or it is a bug.
+A changed `Mapping summary` line alone is not a failure: new diagnostics
+counters are added deliberately and appear only when non-zero.
+
+Pass a different build, catalogue and virus as arguments to check another
+virus:
+
+```bash
+dev/check_annotation_invariance.sh before test_out/IAV_DB/iav-db.db my_catalog.tsv influenza
+```
+
 ## Test Output
 
 Test results are published to `${params.publish_dir}/tests/` and include:

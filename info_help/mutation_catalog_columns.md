@@ -73,10 +73,35 @@ NCT01717326;NCT02092350;NCT02105454
   evidence to a 1a call.
 - Only in-vivo findings carry a trial. An in-vitro EC50 has no trial behind it
   and correctly gets nothing — 826 of 1,740 findings have an in-vivo result.
-- Populated on 746 of 1,869 rows, drawing on 97 distinct trials.
+- Populated on 746 of the catalogue's 1,869 rows, drawing on 97 distinct trials
+  — all 97 the registry holds. In the database's `mutation_catalog`,
+  de-duplicated to 1,828 rows, 727 carry a trial: 2,290 (row, trial) pairs.
 
-Resolve an NCT identifier to a trial name through the `clinical_trials` table in
-the database, loaded with `--clinical_trials`.
+All three of these columns are written to the database's `mutation_catalog`
+table, not only to the catalogue TSV. `clinical_trials` was dropped on the way
+in until this was fixed, and it has no other route into the database — so the
+`clinical_trials` registry table was written on every HCV build and joined to by
+nothing.
+
+Resolve an NCT identifier to a trial name through that registry table, loaded
+with `--clinical_trials`. It is one row per `nct_id`, so the join cannot fan
+out:
+
+```sql
+SELECT mc.mutation_id, mc.drug, ct.nct_id, ct.trial_name
+FROM mutation_catalog mc
+JOIN clinical_trials ct
+  ON ';' || mc.clinical_trials || ';' LIKE '%;' || ct.nct_id || ';%';
+```
+
+PHDR keys its registry on its own `id`, a curator label, so five NCT numbers
+arrive under two ids each — `ALLY-2` / `NCT02032888`, `ASTRAL-1` /
+`GS-US-342-1138`, `C-WORTHy` and `C-WORTHy Part D`, `M12-536` / `NCT01672983`,
+`Magellan-1, Part 1` and `Part 2`. They are merged on load, keeping both ids and
+both names semicolon-separated in `trial_id` and `trial_name`. Loaded verbatim
+they would have turned those 2,290 pairs into 2,597. One further registry row,
+`UMIN000015627`, is a Japanese UMIN-CTR registration with no NCT number; it is
+reported at load time and not loaded, and nothing in the catalogue cites it.
 
 ---
 
@@ -89,7 +114,10 @@ the database, loaded with `--clinical_trials`.
 | genotypes and subtypes (HCV, influenza) | `1a;1b` | `1a:Q;1b:R` or `1a:Q:60.89;1b:R:92.26` |
 
 `clinical_trials` is optional everywhere and is omitted unless a virus has a
-trial registry to link against.
+trial registry to link against. A virus that supplies the column should also
+pass `--clinical_trials`: the column is the only thing that joins to the
+registry table, and the registry table is the only thing that makes the column
+readable. Either without the other is inert.
 
 **Subtypes are never required.** The genotype is the leading digits of whatever
 you write; if you write `1` the genotype is `1` and there is no subtype. Nothing

@@ -333,8 +333,10 @@ def test_relevant_mutations_summary_only_contains_drug_annotated_signatures():
 @requires_hcv_db
 @requires_hcv_assets
 @pytest.mark.xfail(
-    reason="the catalog's alignment_name (AL_1a, AL_3a, ...) is not in the HCV "
-           "column profile, so the DB mutation_catalog keeps no genotype scope",
+    reason="alignment_name and display_structure are PHDR join artefacts, "
+           "deliberately left out of the HCV column profile. The genotype scope "
+           "they encoded now reaches the DB as relevant_genotypes / "
+           "wild_type_residues, so this test's premise is superseded, not unmet",
     strict=False,
 )
 def test_db_mutation_catalog_retains_the_catalog_genotype_scope():
@@ -346,8 +348,11 @@ def test_db_mutation_catalog_retains_the_catalog_genotype_scope():
     column profile in AnnotateMutations does not list `alignment_name` (nor
     `display_structure`, which holds the wild-type letter), so
     build_catalog_reference_table drops both and then de-duplicates the
-    survivors.  Downstream nobody can tell that NS5A:30R is a 1a finding, and
-    nobody can re-scope the calls afterwards.
+    survivors.
+
+    The scope itself is no longer lost - `relevant_genotypes` and
+    `wild_type_residues` now reach the DB - so this remains an xfail only for
+    the two PHDR join keys themselves, which nothing downstream reads.
     """
     source = pd.read_csv(CATALOG_TSV, sep="\t", dtype=str)
     assert source["alignment_name"].notna().any()
