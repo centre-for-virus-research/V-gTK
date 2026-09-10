@@ -4,6 +4,14 @@ import sys
 import argparse
 from os.path import join
 
+# Normal mode:
+#   python scripts/HostTaxaTable.py
+#
+# Update mode: there is no --update flag.  Point the same options at the update
+# tree instead:
+#   python scripts/HostTaxaTable.py \
+#     --gb_matrix tmp/Update/GenBank-matrix/gB_matrix_raw.tsv \
+#     --names tmp/Update/Taxa/names.dmp --nodes tmp/Update/Taxa/nodes.dmp
 
 class HostTaxaTable:
   def __init__(self,
@@ -14,7 +22,8 @@ class HostTaxaTable:
                base_dir,
                host_output_file,
                child_output_file,
-               lineage_output_file):
+               lineage_output_file,
+               lineage_lookup_output_file="Host_taxa_lineage_lookup.tsv"):
     self.gb_matrix = gb_matrix
     self.output_dir = output_dir
     self.names_file = names_file
@@ -23,6 +32,7 @@ class HostTaxaTable:
     self.host_output_file = host_output_file
     self.child_output_file = child_output_file
     self.lineage_output_file = lineage_output_file
+    self.lineage_lookup_output_file = lineage_lookup_output_file
 
   def load_taxa_ids_from_tsv(self):
     column = "host_taxa_id"
@@ -34,6 +44,9 @@ class HostTaxaTable:
       if column not in reader.fieldnames:
         raise ValueError(f"Column '{column}' not found in TSV file")
       for row in reader:
+        # DictReader yields None for a column a ragged row never reaches, and
+        # None.strip() would abort the whole host taxonomy step over one short
+        # line.  Skip the row instead - see test_host_taxa_table.py.
         raw_val = row.get(column)
         if raw_val is None:
           continue
@@ -47,21 +60,36 @@ class HostTaxaTable:
   def load_names(self):
     all_names = {}
     sci_names = {}
+    common_names = {}
+
     with open(self.names_file, encoding="utf-8") as f:
       for line in f:
         parts = [p.strip() for p in line.split("|")]
         if len(parts) < 4:
           continue
+
         taxid_str, name_txt, _, class_name = parts[:4]
+
         try:
           taxid = int(taxid_str)
         except ValueError:
           continue
 
+        # Keep every name exactly as present in names.dmp
         all_names.setdefault(taxid, []).append((name_txt, class_name))
+
         if class_name == "scientific name":
           sci_names[taxid] = name_txt
-    return all_names, sci_names
+
+        # Prefer GenBank common name, e.g. taxid 9615 -> dog
+        if class_name == "genbank common name":
+          common_names[taxid] = name_txt
+
+        # Use normal common name only if genbank common name is not already present
+        elif class_name == "common name" and taxid not in common_names:
+          common_names[taxid] = name_txt
+
+    return all_names, sci_names, common_names
 
   def load_nodes(self):
     children_map = {}
@@ -115,32 +143,66 @@ class HostTaxaTable:
 
     return lineage
 
+  def _get_ancestor_taxids_root_to_leaf(self, taxid, parent_map):
+    """
+    Returns ancestor taxids from root -> ... -> taxid (includes taxid itself).
+    Includes 'no rank' nodes too because we don't filter by rank.
+    """
+    path = []
+    current = taxid
+    visited = set()
+
+    while True:
+      if current in visited:
+        break
+      visited.add(current)
+
+      path.append(current)
+
+      parent = parent_map.get(current)
+      if parent is None or parent == current:
+        break
+      current = parent
+
+    path.reverse()  # root -> leaf
+    return path
+
   def write_tables(self):
     os.makedirs(join(self.base_dir, self.output_dir), exist_ok=True)
 
     children_map, parent_map, rank_map = self.load_nodes()
-    all_names, sci_names = self.load_names()
+    all_names, sci_names, common_names = self.load_names()
     taxa_list = self.load_taxa_ids_from_tsv()
 
     host_op_file = join(self.base_dir, self.output_dir, self.host_output_file)
     child_op_file = join(self.base_dir, self.output_dir, self.child_output_file)
     lineage_op_file = join(self.base_dir, self.output_dir, self.lineage_output_file)
+    lineage_lookup_op_file = join(self.base_dir, self.output_dir, self.lineage_lookup_output_file)
 
+    # ---- Host_taxa.tsv ----
     with open(host_op_file, "w", encoding="utf-8", newline="") as out_host:
       writer = csv.writer(out_host, delimiter="\t")
-      writer.writerow(["taxa_id", "name", "name_type", "taxonomy_level"])
+      writer.writerow(["taxa_id", "name", "name_type", "taxonomy_level", "common_name"])
 
       for taxid in taxa_list:
         names_for_taxid = all_names.get(taxid, [])
         taxonomy_level = rank_map.get(taxid, "unknown")
+        common_name = common_names.get(taxid, "")
+
         if not names_for_taxid:
-          writer.writerow([taxid, "Unknown", "other", taxonomy_level])
+          writer.writerow([taxid, "Unknown", "other", taxonomy_level, common_name])
         else:
           for name_txt, class_name in names_for_taxid:
             name_type = self._map_name_type(class_name)
-            writer.writerow([taxid, name_txt, name_type, taxonomy_level])
+            writer.writerow([
+              taxid,
+              name_txt,
+              name_type,
+              taxonomy_level,
+              common_name
+            ])
 
-
+    # ---- Host_taxa_children.tsv ----
     with open(child_op_file, "w", encoding="utf-8", newline="") as out_child:
       writer = csv.writer(out_child, delimiter="\t")
       writer.writerow(["name", "child_taxa_id", "parent_taxa_id",
@@ -160,9 +222,9 @@ class HostTaxaTable:
             parent_rank
           ])
 
-  
+    # ---- Host_taxa_lineage.tsv (your ranked columns) ----
     ranks_order = ["superkingdom", "phylum", "class",
-                   "order", "family", "genus", "species"]
+                   "order_category", "family", "genus", "species"]
 
     with open(lineage_op_file, "w", encoding="utf-8", newline="") as out_lin:
       writer = csv.writer(out_lin, delimiter="\t")
@@ -170,12 +232,32 @@ class HostTaxaTable:
 
       for taxid in taxa_list:
         lineage = self._build_lineage_labels(taxid, parent_map, rank_map, sci_names)
-        row = [taxid] + [lineage.get(r, "") for r in ranks_order]
+        row = [taxid] + [lineage.get(("order" if r == "order_category" else r), "") for r in ranks_order]
         writer.writerow(row)
+
+    # ---- NEW: Host_taxa_lineage_lookup.tsv (reverse lookup) ----
+    # For each lineage node (ancestor), list which taxa in your dataset are under it
+    with open(lineage_lookup_op_file, "w", encoding="utf-8", newline="") as out_lu:
+      writer = csv.writer(out_lu, delimiter="\t")
+      writer.writerow([
+        "lineage_taxa_id", "lineage_name", "lineage_rank",
+        "desc_taxa_id", "desc_name", "desc_rank"
+      ])
+
+      for desc_taxid in taxa_list:
+        desc_name = sci_names.get(desc_taxid, f"taxid_{desc_taxid}")
+        desc_rank = rank_map.get(desc_taxid, "unknown")
+
+        ancestors = self._get_ancestor_taxids_root_to_leaf(desc_taxid, parent_map)
+        for anc_taxid in ancestors:
+          anc_name = sci_names.get(anc_taxid, f"taxid_{anc_taxid}")
+          anc_rank = rank_map.get(anc_taxid, "unknown")
+          writer.writerow([anc_taxid, anc_name, anc_rank, desc_taxid, desc_name, desc_rank])
 
     print(f"Host taxa table written to {host_op_file}")
     print(f"Child taxa table written to {child_op_file}")
     print(f"Lineage table written to {lineage_op_file}")
+    print(f"Lineage lookup table written to {lineage_lookup_op_file}")
 
 
 if __name__ == "__main__":
@@ -206,6 +288,12 @@ if __name__ == "__main__":
   parser.add_argument("-y", "--lineage_output_file",
                       default="Host_taxa_lineage.tsv",
                       help="Output TSV file for lineage / hierarchy table")
+
+  # NEW OUTPUT
+  parser.add_argument("--lineage_lookup_output_file",
+                      default="Host_taxa_lineage_lookup.tsv",
+                      help="Output TSV file for reverse lineage lookup (ancestor -> descendants)")
+
   args = parser.parse_args()
 
   write_taxa = HostTaxaTable(
@@ -217,6 +305,6 @@ if __name__ == "__main__":
     args.output_file,
     args.child_output_file,
     args.lineage_output_file,
+    args.lineage_lookup_output_file,   # NEW
   )
   write_taxa.write_tables()
-

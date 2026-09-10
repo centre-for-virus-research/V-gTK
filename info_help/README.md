@@ -46,11 +46,14 @@ everything "typical" would have silenced it; suppressing only the dominant
 residue keeps it. This is the single most consequential decision in the design
 and there is a standing test on it.
 
-**Evidence is attached per genotype, not per mutation.** Each call carries the
-registered clinical trials (NCT identifiers) and publications supporting it *in
-that genotype, for that drug*. `NS5A:31M` against daclatasvir has one trial in
-genotype 1a and nine in 1b; flattening them would attach one genotype's evidence
-to another's call.
+**Evidence is attached per genotype, not per mutation.** Each catalogue row
+carries the registered clinical trials (NCT identifiers) and publications
+supporting it *in that genotype, for that drug*, and both reach the database on
+`mutation_catalog`. `NS5A:31M` against daclatasvir has one trial in genotype 1a
+and nine in 1b; flattening them would attach one genotype's evidence to
+another's call. The `publications` and `clinical_trials` tables resolve those
+identifiers to something readable, and each is keyed one row per identifier, so
+joining to them cannot double the evidence a query reports.
 
 **Nothing is suppressed silently.** Every evaluated call, emitted or not, lands
 in `sequence_mutation_calls` with the reason. A call that was gated out, one
