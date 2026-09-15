@@ -279,6 +279,21 @@ class GenBankParser:
 				content['accession_type'] = 'excluded'
 				content['exclusion_criteria'] = 'excluded by the user'
 				content['exclusion_status'] = '1'
+			elif str(content['accession_type']).strip().lower() == 'exclusion_list':
+				# The reference list marks this accession as one to exclude - the
+				# influenza B/C/D references in a flu ref list, for instance.  It is
+				# never aligned and never gets features, so it has to carry the
+				# status that says so.  Left at '0' the row claims to be a live
+				# reference, and every cross-table check then demands an alignment
+				# it can never have.
+				#
+				# FilterAndExtractSequences sets the same flag, but only in the copy
+				# of the matrix it rewrites: the Nextflow process does not emit that
+				# copy, so under vgtk-init.nf the correction is discarded and the
+				# database is built from this file.  Setting it here fixes both
+				# entry points at source.
+				content['exclusion_criteria'] = 'excluded by reference list exclusion flag'
+				content['exclusion_status'] = '1'
 			else:
 				content['exclusion_criteria'] = ''
 				content['exclusion_status'] = '0'

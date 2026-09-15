@@ -596,6 +596,7 @@ if (( STEP >= START_STEP )); then
             -m "${REF_LIST}" \
             -g "${GFF_FILE}" \
             -bh "${BLAST_TOPHITS}" \
+            --master_seq_dir "${MASTER_SEQ_DIR}" \
             -b . -d . \
             -o "${FEATURES_TSV}" \
             "${CALC_EXTRA[@]+${CALC_EXTRA[@]}}"

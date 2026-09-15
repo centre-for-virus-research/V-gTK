@@ -162,6 +162,56 @@ def test_xml_to_tsv_parses_and_applies_exclusion(tmp_path: Path):
     assert by_acc["REF1"]["n"] == 2
 
 
+def test_xml_to_tsv_marks_ref_list_exclusions_as_excluded(tmp_path: Path):
+    """An 'exclusion_list' reference must carry exclusion_status '1'.
+
+    The reference list uses this type for accessions that are deliberately not
+    part of the build - the influenza B/C/D references in a flu ref list, say.
+    Such a row is never aligned and never gets features, so if it goes into
+    meta_data claiming exclusion_status '0' it reads as a live reference, and
+    ValidateDbTree fails the build demanding an alignment the row can never
+    have ("sequence_alignment vs meta_data: missing=22").
+
+    FilterAndExtractSequences sets the same flag, but only in the copy of the
+    matrix it rewrites - and the Nextflow FILTER_AND_EXTRACT process does not
+    emit that copy, so under vgtk-init.nf the correction never reaches the
+    database. This is the setting that does.
+    """
+    xml_file = tmp_path / "batch-1.xml"
+    _write_xml(
+        xml_file,
+        [
+            _gbseq_xml("REF1", "ATGCGG"),
+            _gbseq_xml("NC_002204", "ATGCTT"),
+            _gbseq_xml("Q1", "AATTCG"),
+        ],
+    )
+
+    parser = GenBankParser(
+        input_dir=str(tmp_path),
+        base_dir=str(tmp_path),
+        output_dir="out",
+        ref_list=None,
+        exclusion_list=None,
+        is_segmented_virus="N",
+    )
+
+    rows = parser.xml_to_tsv(
+        str(xml_file),
+        {"REF1": "master", "NC_002204": "exclusion_list"},
+        [],
+    )
+    by_acc = {r["primary_accession"]: r for r in rows}
+
+    assert by_acc["NC_002204"]["accession_type"] == "exclusion_list"
+    assert by_acc["NC_002204"]["exclusion_status"] == "1"
+    assert by_acc["NC_002204"]["exclusion_criteria"]
+
+    # The other two are untouched by this rule.
+    assert by_acc["REF1"]["exclusion_status"] == "0"
+    assert by_acc["Q1"]["exclusion_status"] == "0"
+
+
 def test_xml_to_tsv_non_segmented_forces_segment_one(tmp_path: Path):
     xml_file = tmp_path / "batch-1.xml"
     _write_xml(

@@ -96,6 +96,92 @@ def test_recalculate_cds_coordinates_keeps_reference_feature_span_for_partial_se
     ]
 
 
+def _master_coord_to_aln_pos(master_alignment: str) -> dict:
+    mapping = {}
+    residue = 0
+    for aln_pos, base in enumerate(master_alignment, start=1):
+        if base != "-":
+            residue += 1
+            mapping[residue] = aln_pos
+    return mapping
+
+
+# Master genome ATGAAACCCGGGTAA (15 nt), CDS 1..15, with three insertion columns
+# upstream so the master's OWN row is gapped - what a guide alignment does to
+# every influenza segment carrying an insertion. Fixtures elsewhere in this file
+# use an ungapped master, where a master coordinate and an alignment position are
+# the same number, which is why none of them can see this.
+GAPPED_MASTER_ALN = "---ATGAAACCCGGGTAA"
+
+
+def test_gapped_master_cds_coords_are_converted_to_alignment_positions_first(tmp_path: Path):
+    """A master genome coordinate must not be handed to count_gaps_before_position.
+
+    That function counts the query's gaps in ALIGNMENT columns. Passing it a
+    master coordinate shifted every OG coordinate upstream by the number of gaps
+    in the master's own row: the recorded CDS start landed before the real ATG
+    and the true stop codon fell outside the recorded end.
+    """
+    processor = make_processor(tmp_path)
+    query_aln = "TGAATGAAACCCGGGTAA"  # query carries the insertion, so it has no gaps
+
+    adjusted = processor.recalculate_cds_coordinates_with_span(
+        "Q_INSERTION",
+        processor.get_gap_ranges(query_aln),
+        [{"start": "1", "end": "15", "product": "DEMO"}],
+        start_offset=1,
+        master_coord_to_aln_pos=_master_coord_to_aln_pos(GAPPED_MASTER_ALN),
+    )
+
+    assert adjusted == [
+        {
+            "start": 4,
+            "end": 18,
+            "og_start": 4,
+            "og_end": 18,
+            "feature_start": 1,
+            "feature_end": 15,
+            "product": "DEMO",
+        }
+    ]
+
+    # The OG coordinates cut the CDS out of the query's own ungapped sequence
+    # exactly as slicing the alignment at the aln coordinates does.
+    entry = adjusted[0]
+    raw = query_aln.replace("-", "")
+    assert raw[entry["og_start"] - 1:entry["og_end"]] == "ATGAAACCCGGGTAA"
+    assert raw[entry["og_start"] - 1:entry["og_start"] + 2] == "ATG"
+    assert (
+        raw[entry["og_start"] - 1:entry["og_end"]]
+        == query_aln[entry["start"] - 1:entry["end"]].replace("-", "")
+    )
+
+
+def test_gapped_master_cds_coords_stay_in_range_for_a_query_without_the_insertion(tmp_path: Path):
+    """The same conversion, for a query that is gapped where the master is.
+
+    Counting from the master coordinate put og_start at 0 here - a coordinate
+    off the front of the sequence - because position 1 falls inside the query's
+    own leading gap.
+    """
+    processor = make_processor(tmp_path)
+    query_aln = "---ATGAAACCCGGGTAA"  # lacks the insertion, so it is gapped there
+
+    adjusted = processor.recalculate_cds_coordinates_with_span(
+        "Q_NO_INSERTION",
+        processor.get_gap_ranges(query_aln),
+        [{"start": "1", "end": "15", "product": "DEMO"}],
+        start_offset=1,
+        master_coord_to_aln_pos=_master_coord_to_aln_pos(GAPPED_MASTER_ALN),
+    )
+
+    entry = adjusted[0]
+    assert (entry["og_start"], entry["og_end"]) == (1, 15)
+    assert entry["og_start"] >= 1
+    raw = query_aln.replace("-", "")
+    assert raw[entry["og_start"] - 1:entry["og_end"]] == "ATGAAACCCGGGTAA"
+
+
 @pytest.mark.skip(reason="get_products_for_range has been removed from CalculateAlignmentCoordinates")
 def test_get_products_for_range(tmp_path: Path):
     processor = make_processor(tmp_path)

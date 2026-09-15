@@ -921,6 +921,7 @@ process CALC_ALIGNMENT_CORD {
         path update_scope_tsv
         val master_acc_str
         path master_file_opt
+        path master_seq_dir
     output:
         path "features.tsv", emit: features
     shell:
@@ -939,8 +940,12 @@ process CALC_ALIGNMENT_CORD {
         EXTRA_CALC_ARGS="--update_db !{params.update_db} --update_scope_tsv !{update_scope_tsv} --segment_map_tsv !{update_scope_tsv}"
     fi
     
+    # master_seq_dir carries the masters' full records, so the 5' trim between a
+    # master's GFF (record coordinates) and its row in the merged MSA can be
+    # located rather than assumed to be zero.
     python !{scripts_dir}/CalcAlignmentCord.py -i padded_alignments \
     -m "$TARGET_M" -g !{gff_file} -bh !{blast_hits} \
+    --master_seq_dir !{master_seq_dir} \
     -b . -d . -o features.tsv ${EXTRA_CALC_ARGS}
     '''
 }
@@ -1748,8 +1753,9 @@ workflow {
                         BLAST_ALIGNMENT.out.query_uniq_tophits,
                         data,
                         params.ref_list,
-                        effective_ref_list)
-                        
+                        effective_ref_list,
+                        BLAST_ALIGNMENT.out.master_seq_dir)
+
     SOFTWARE_VERSION("${params.db_name ?: 'unnamed_db'}_${params.tax_id ?: 'no_taxid'}")
     
     GENERATE_TABLES(data, 
