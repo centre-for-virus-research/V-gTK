@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Normalize HCV mutation assets into a single general catalog handoff file."""
+"""Normalise HCV mutation assets into a single general catalogue handoff file."""
 
 import csv
 import re
@@ -117,7 +117,7 @@ class ProteinNameMapper:
         return self.segment_by_protein.get(canonical_name, "")
 
 
-class HcvMutationCatalogNormalizer:
+class HcvMutationCatalogNormaliser:
     output_fields = [
         "protein_name",
         "segment",
@@ -168,7 +168,7 @@ class HcvMutationCatalogNormalizer:
         self.output_path = output_path
         self.protein_mapper = ProteinNameMapper(gene_info_path)
 
-    def normalize(self) -> Dict[str, Path]:
+    def normalise(self) -> Dict[str, Path]:
         variation_rows = read_delimited(self.variation_path)
         variation_metatag_rows = read_delimited(self.variation_metatag_path)
         alignment_rows = read_delimited(self.phdr_alignment_ras_path)
@@ -592,7 +592,7 @@ def build_parser() -> ArgumentParser:
     repo_root = Path(__file__).resolve().parents[1]
     hcv_tables_dir = repo_root / "generic" / "hcv" / "Tables"
 
-    parser = ArgumentParser(description="Normalize HCV mutation assets into a single general catalog TSV")
+    parser = ArgumentParser(description="Normalise HCV mutation assets into a single general catalogue TSV")
     parser.add_argument("--variation", default=str(hcv_tables_dir / "variation.csv"))
     parser.add_argument("--variation_metatag", default=str(hcv_tables_dir / "variation_metatag.csv"))
     parser.add_argument("--phdr_alignment_ras", default=str(hcv_tables_dir / "phdr_alignment_ras.csv"))
@@ -601,7 +601,7 @@ def build_parser() -> ArgumentParser:
     parser.add_argument(
         "--output_path",
         default=str(hcv_tables_dir / "generalized_mutation_catalog.tsv"),
-        help="Path to the normalized TSV handoff file",
+        help="Path to the normalised TSV handoff file",
     )
     return parser
 
@@ -609,7 +609,7 @@ def build_parser() -> ArgumentParser:
 def main(args=None) -> Dict[str, Path]:
     parser = build_parser()
     parsed_args = parser.parse_args(args=args)
-    normalizer = HcvMutationCatalogNormalizer(
+    normaliser = HcvMutationCatalogNormaliser(
         variation_path=Path(parsed_args.variation),
         variation_metatag_path=Path(parsed_args.variation_metatag),
         phdr_alignment_ras_path=Path(parsed_args.phdr_alignment_ras),
@@ -617,7 +617,7 @@ def main(args=None) -> Dict[str, Path]:
         gene_info_path=Path(parsed_args.gene_info),
         output_path=Path(parsed_args.output_path),
     )
-    outputs = normalizer.normalize()
+    outputs = normaliser.normalise()
     for name, path in outputs.items():
         print(f"{name}\t{path}")
     return outputs

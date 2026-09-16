@@ -1,0 +1,21 @@
+{
+  "description": "Invented eight-codon ORF; each row has the same 24 reference columns. No viral sequences or resistance catalogue. 'raw' is the submitted record where nextalign stripped an insertion from the aligned row; extra bases sit after codon 2. 'calls' is what is correct, derived by hand from the raw record: the residue of the codon's own raw bases, never a codon an insertion split or a frameshift moved. 'calls_codon2_split' replaces it when the guide carries an insertion inside codon 2, which leaves codon 2 with no single codon to read. STRIPPED_INS_FRAMESHIFT's raw ORF is intact (M K P R V K C *): the aligner's gap at codon 6 pairs with the stripped A after codon 3, so codon 5 is V, not the TAA its columns show.",
+  "utr": "GGTACCTCA",
+  "master": "ATGAAACCCGGGTTTAAATGCTAA",
+  "rows": [
+    {"id": "WT", "sequence": "ATGAAACCCGGGTTTAAATGCTAA", "calls": []},
+    {"id": "ALT2", "sequence": "ATGGTACCCGGGTTTAAATGCTAA", "calls": ["POL:2V"], "calls_codon2_split": []},
+    {"id": "LOWERCASE", "sequence": "atggtacccgggtttaaatgctaa", "calls": ["POL:2V"], "calls_codon2_split": []},
+    {"id": "DELETION3", "sequence": "ATGAAA---GGGTTTAAATGCTAA", "calls": ["POL:3del"]},
+    {"id": "UNKNOWN2", "sequence": "ATGNNNCCCGGGTTTAAATGCTAA", "calls": []},
+    {"id": "AMBIGUOUS2", "sequence": "ATGGTRCCCGGGTTTAAATGCTAA", "calls": []},
+    {"id": "PARTIAL5", "sequence": "---------GGGTTTAAATGCTAA", "calls": []},
+    {"id": "PARTIAL_BASE", "sequence": "-TGGTACCCGGGTTTAAATGCTAA", "calls": ["POL:2V"]},
+    {"id": "PARTIAL3", "sequence": "ATGAAACCCGGGTTTAAA------", "calls": []},
+    {"id": "PARTIAL_CODON2", "sequence": "ATGG-ACCCGGGTTTAAATGCTAA", "calls": []},
+    {"id": "STOP5", "sequence": "ATGAAACCCGGGTAAAAATGCTAA", "calls": ["POL:5*"]},
+    {"id": "STRIPPED_INS_SPLIT5", "sequence": "ATGAAACCCGGGTAAAAATGCTAA", "raw": "ATGAAACCCGGGTAGAAAATGCTAA", "calls": []},
+    {"id": "STRIPPED_INS_FRAMESHIFT", "sequence": "ATGAAACCCGGGTAAA-ATGCTAA", "raw": "ATGAAACCCAGGGTAAAATGCTAA", "calls": ["POL:5V"]},
+    {"id": "STRIPPED_INS_INFRAME", "sequence": "ATGAAACCCGGGTAAAAATGCTAA", "raw": "ATGAAACCCAAAGGGTAAAAATGCTAA", "calls": ["POL:5*"]}
+  ]
+}

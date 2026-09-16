@@ -2,10 +2,13 @@
 
 import argparse
 import copy
+import hashlib
 import os
 import sys
+from io import StringIO
 
 from Bio import Phylo
+from Bio.Phylo.BaseTree import Clade
 
 '''
 python scripts/TreeReRoot.py --input_tree generic/rabv/tree/ref.treefile --output_tree ref_midpoint_rooted.treefile --order_node decrease
@@ -54,6 +57,83 @@ def _farthest_from(start, parent):
     return best, best_distance, prev
 
 
+def _add_lengths(first, second):
+    if first is None and second is None:
+        return None
+    return (first or 0.0) + (second or 0.0)
+
+
+def root_on_branch(tree, node, node_side_length):
+    """Place a new root on the branch above `node`, `node_side_length` from it.
+
+    Written out rather than using ``Tree.root_with_outgroup``, which does not
+    split the branch when `node` hangs directly off the root: rooting
+    (A:0.1,B:0.2,C:0.3) on A with 0.05 gives A:0.05 and leaves 0.1 on the other
+    side, adding 0.05 of length the tree never had. IQ-TREE always writes its
+    first taxon under the root, so that case is the common one, not a corner.
+
+    Each node on the path from `node` up to the old root is flipped to become
+    the child of the node it used to hang from, taking that branch's length
+    with it. Linear in the tree size. Returns the tree.
+    """
+    if node is tree.root:
+        raise ValueError("Cannot root on the branch above the current root.")
+
+    parent = {}
+    for clade in tree.find_clades(order="level"):
+        for child in clade.clades:
+            parent[id(child)] = clade
+
+    total = node.branch_length
+    root_children = tree.root.clades
+    if parent[id(node)] is tree.root and len(root_children) == 2:
+        # Already a two-child root on this unrooted branch: just move the root
+        # along it. Measured over both halves, which are one branch.
+        sibling = root_children[0] if root_children[1] is node else root_children[1]
+        if total is not None and node_side_length is not None:
+            total += sibling.branch_length or 0.0
+            node.branch_length = min(max(node_side_length, 0.0), total)
+            sibling.branch_length = total - node.branch_length
+        tree.root = Clade(clades=[node, sibling])
+        return tree
+
+    if total is None or node_side_length is None:
+        node_length = other_length = None
+    else:
+        node_length = min(max(node_side_length, 0.0), total)
+        other_length = total - node_length
+
+    path = [parent[id(node)]]
+    while id(path[-1]) in parent:
+        path.append(parent[id(path[-1])])
+
+    path[0].clades = [child for child in path[0].clades if child is not node]
+    length = other_length
+    for index, clade in enumerate(path):
+        above_length = clade.branch_length
+        clade.branch_length = length
+        if index + 1 < len(path):
+            above = path[index + 1]
+            above.clades = [child for child in above.clades if child is not clade]
+            clade.clades.append(above)
+            length = above_length
+
+    node.branch_length = node_length
+    new_root = Clade(clades=[node, path[0]])
+
+    # The old root now hangs off the path. With a single child left it is a
+    # pass-through node, so splice it out and carry its length down.
+    old_root = path[-1]
+    if len(old_root.clades) == 1:
+        holder = path[-2] if len(path) > 1 else new_root
+        only = old_root.clades[0]
+        only.branch_length = _add_lengths(only.branch_length, old_root.branch_length)
+        holder.clades = [only if child is old_root else child for child in holder.clades]
+
+    tree.root = new_root
+    return tree
+
+
 def midpoint_root(tree):
     """Root `tree` at the midpoint of its two most distant tips, in O(n).
 
@@ -61,15 +141,15 @@ def midpoint_root(tree):
     turn and recomputes all depths each time, which is quadratic. Measured on
     this repository's HCV trees: 250 tips 0.07s, 500 0.28s, 1000 1.21s, 2000
     6.16s - a clean 4x per doubling. Extrapolated, the 11,825-tip IQ-TREE takes
-    about 4 minutes and the 138,095-tip UShER tree about 8 hours. Since
-    midpoint rooting is now part of the pipeline, that is a per-run cost on
-    every real dataset.
+    about 4 minutes and the 138,095-tip UShER tree about 8 hours. It is also
+    wrong on some small trees: it roots (A:0.1,(B:0.2,C:0.3):0.4) as
+    (A:0.5,(B,C):0.1), 0.1 longer than the input.
 
     Two farthest-point searches find the diameter instead, which is the
     standard linear method: the farthest node from any start is an end of some
     diameter, and the farthest node from *that* is the other end. Walking the
     path between them to its halfway point gives the branch and the offset,
-    and one call to ``root_with_outgroup`` does the actual re-rooting.
+    and root_on_branch splits that branch there.
 
     Returns the tree, rooted in place.
     """
@@ -82,47 +162,30 @@ def midpoint_root(tree):
         for child in clade.clades:
             parent[id(child)] = clade
 
-    # Two farthest-point searches identify an endpoint of the tree's diameter
-    # in linear time. That is the ONLY thing Biopython's loop is computing, at
-    # the cost of re-rooting and recomputing every depth once per tip.
-    endpoint, _, _ = _farthest_from(tips[0], parent)
-    endpoint, distance, _ = _farthest_from(endpoint, parent)
+    start, _, _ = _farthest_from(tips[0], parent)
+    end, distance, previous = _farthest_from(start, parent)
     if distance <= 0:
         # Every branch is zero length; there is no midpoint to find.
         return tree
 
-    # Everything from here is Biopython's own arithmetic, deliberately not
-    # reinvented. Two details make that necessary:
-    #
-    #   * `root_with_outgroup` does not split a branch around the new root, so
-    #     naive placement silently inflates the tree.
-    #   * the `max_distance` its formula expects is the depth measured AFTER
-    #     rooting at the first tip, which is larger than the true diameter -
-    #     rooting at a tip adds that tip's branch. Feeding the true diameter
-    #     into `root_remainder` puts the root in the wrong place, so the
-    #     measurement has to be taken the way the formula expects.
-    tree.root_with_outgroup(endpoint)
-    far_tip, max_distance = max(tree.depths().items(), key=lambda item: item[1])
-
-    root_remainder = 0.5 * (max_distance - (tree.root.branch_length or 0))
-    if root_remainder < 0:
-        root_remainder = 0.0
-
-    outgroup_node = None
-    outgroup_branch_length = None
-    for node in tree.get_path(far_tip):
-        root_remainder -= node.branch_length
-        if root_remainder < 0:
-            outgroup_node = node
-            outgroup_branch_length = -root_remainder
+    # Walk back from `end` towards `start` until the halfway point is passed.
+    half = distance / 2.0
+    travelled = 0.0
+    current = end
+    while True:
+        step_to = previous[id(current)]
+        if parent.get(id(current)) is step_to:
+            child, weight = current, current.branch_length or 0.0
+            child_side = half - travelled
+        else:
+            child, weight = step_to, step_to.branch_length or 0.0
+            child_side = weight - (half - travelled)
+        if travelled + weight >= half:
             break
-    if outgroup_node is None:
-        raise ValueError("Failed to find the midpoint along the diameter path")
+        travelled += weight
+        current = step_to
 
-    tree.root_with_outgroup(
-        outgroup_node, outgroup_branch_length=outgroup_branch_length
-    )
-    return tree
+    return root_on_branch(tree, child, child_side)
 
 
 class Tree_Rerooter:
@@ -186,26 +249,71 @@ class Tree_Rerooter:
 
         return min(first, second, key=lambda side: tuple(sorted(side)))
 
+    @staticmethod
+    def _tip_hash(name):
+        return int.from_bytes(
+            hashlib.blake2b(name.encode("utf-8"), digest_size=8).digest(), "big"
+        )
+
+    def split_keys(self, tree, all_taxa):
+        """{id(node): (tip count, split key)} for every node, in one pass.
+
+        Collecting each node's descendant set costs tips x depth, which on an
+        UShER tree (138,095 tips, deep ladders) runs for hours. Instead each
+        tip gets a fixed 64-bit hash and a node's side of the split is the XOR
+        of its tips - the other side is the total XOR with that removed. The
+        key is the smaller side's size and hash (both hashes on a tie), so the
+        same bipartition gets the same key under any rooting, like
+        canonical_split but linear.
+        """
+        total_hash = 0
+        for name in all_taxa:
+            total_hash ^= self._tip_hash(name)
+        total = len(all_taxa)
+
+        info = {}
+        for clade in reversed(list(tree.find_clades(order="level"))):
+            if not clade.clades:
+                named = clade.name is not None
+                count = 1 if named else 0
+                value = self._tip_hash(clade.name) if named else 0
+            else:
+                count = 0
+                value = 0
+                for child in clade.clades:
+                    child_count, child_value = info[id(child)][:2]
+                    count += child_count
+                    value ^= child_value
+            info[id(clade)] = (count, value)
+
+        keys = {}
+        for node_id, (count, value) in info.items():
+            other_count = total - count
+            other_value = total_hash ^ value
+            if count < other_count:
+                key = (count, value)
+            elif other_count < count:
+                key = (other_count, other_value)
+            else:
+                key = (count, min(value, other_value))
+            keys[node_id] = (count, key)
+        return keys
+
     def get_supports(self, tree, all_taxa):
         supports = {}
+        keys = self.split_keys(tree, all_taxa)
 
         for node in tree.get_nonterminals():
             if node is tree.root:
                 continue
 
-            descendants = set()
+            count, split = keys[id(node)]
 
-            for tip in node.get_terminals():
-                if tip.name is not None:
-                    descendants.add(tip.name)
-
-            if len(descendants) <= 1:
+            if count <= 1:
                 continue
 
-            if len(descendants) >= len(all_taxa) - 1:
+            if count >= len(all_taxa) - 1:
                 continue
-
-            split = self.canonical_split(descendants, all_taxa)
 
             if split not in supports:
                 supports[split] = node.confidence
@@ -321,6 +429,8 @@ class Tree_Rerooter:
             )
 
     def restore_supports(self, tree, all_taxa, supports):
+        keys = self.split_keys(tree, all_taxa)
+
         for node in tree.get_nonterminals():
             node.name = None
 
@@ -328,21 +438,16 @@ class Tree_Rerooter:
                 node.confidence = None
                 continue
 
-            descendants = set()
+            count, split = keys[id(node)]
 
-            for tip in node.get_terminals():
-                if tip.name is not None:
-                    descendants.add(tip.name)
-
-            if len(descendants) <= 1:
+            if count <= 1:
                 node.confidence = None
                 continue
 
-            if len(descendants) >= len(all_taxa) - 1:
+            if count >= len(all_taxa) - 1:
                 node.confidence = None
                 continue
 
-            split = self.canonical_split(descendants, all_taxa)
             node.confidence = supports.get(split)
 
         self.remove_duplicate_root_support(tree)
@@ -429,10 +534,24 @@ class Tree_Rerooter:
 
 
     def order_nodes(self, tree):
-        if self.order_node == "increase":
-            tree.ladderize(reverse=False)
-        elif self.order_node == "decrease":
-            tree.ladderize(reverse=True)
+        """Ladderize by descendant tip count, as Tree.ladderize does.
+
+        Tree.ladderize recounts every subtree at every node; counting once,
+        children first, gives the same stable order in linear time.
+        """
+        if self.order_node not in ("increase", "decrease"):
+            return
+
+        counts = {}
+        for clade in reversed(list(tree.find_clades(order="level"))):
+            if clade.clades:
+                counts[id(clade)] = sum(counts[id(child)] for child in clade.clades)
+                clade.clades.sort(
+                    key=lambda child: counts[id(child)],
+                    reverse=self.order_node == "decrease"
+                )
+            else:
+                counts[id(clade)] = 1
 
     def write_tree(self, tree):
         output_directory = os.path.dirname(self.output_tree)
@@ -452,47 +571,61 @@ class Tree_Rerooter:
 
         return count
 
-    def reroot_tree(self):
+    def root(self, tree):
+        """Root `tree` in place (outgroup if given, else midpoint) and return it.
+
+        Supports are carried across by bipartition, internal node names are
+        dropped, and nodes are ordered per `order_node`. No file I/O, so the
+        database builder can root trees it already holds in memory.
+        """
         if self.root_fraction < 0 or self.root_fraction > 1:
             raise ValueError("--root_fraction must be between 0 and 1.")
-
-        original_tree = Phylo.read(self.input_tree, "newick")
 
         # Bio.Phylo does not reject arbitrary text: "this is not newick" parses
         # as a single unnamed-structure tree with one tip. That used to be
         # caught only by accident, when root_at_midpoint fell over an unbound
         # variable on a one-tip tree; now that midpoint rooting handles the
         # degenerate case cleanly, the input has to be checked here instead.
-        tip_count = len(original_tree.get_terminals())
+        tip_count = len(tree.get_terminals())
         if tip_count < 2:
             raise ValueError(
-                f"{self.input_tree} does not contain a usable tree: parsed "
-                f"{tip_count} tip(s). Rerooting needs at least two."
+                f"{self.input_tree or 'the input'} does not contain a usable "
+                f"tree: parsed {tip_count} tip(s). Rerooting needs at least two."
             )
 
-        terminal_names = self.terminal_lookup(original_tree)
+        terminal_names = self.terminal_lookup(tree)
         all_taxa = set(terminal_names.keys())
-        supports = self.get_supports(original_tree, all_taxa)
-        self.warn_if_internal_labels_will_be_lost(original_tree)
-        rerooted_tree = copy.deepcopy(original_tree)
+        supports = self.get_supports(tree, all_taxa)
+        self.warn_if_internal_labels_will_be_lost(tree)
 
         if self.outgroup:
-            outgroup_clade = self.find_outgroup(rerooted_tree)
+            outgroup_clade = self.find_outgroup(tree)
             branch_length = outgroup_clade.branch_length
+            siblings = [
+                child for child in tree.root.clades if child is not outgroup_clade
+            ]
 
-            if branch_length is None:
-                rerooted_tree.root_with_outgroup(outgroup_clade)
+            if branch_length is not None and len(siblings) == 1 and len(tree.root.clades) == 2:
+                # Under a two-child root the branch above the outgroup runs on
+                # through the root into its sibling; that whole length is the
+                # one --root_fraction is a fraction of.
+                sibling_length = siblings[0].branch_length or 0.0
+                branch_length += sibling_length
+                root_on_branch(
+                    tree, outgroup_clade, branch_length * self.root_fraction
+                )
+            elif branch_length is None:
+                root_on_branch(tree, outgroup_clade, None)
             else:
-                rerooted_tree.root_with_outgroup(
-                    outgroup_clade,
-                    outgroup_branch_length=branch_length * self.root_fraction
+                root_on_branch(
+                    tree, outgroup_clade, branch_length * self.root_fraction
                 )
 
-            rooting_method = "outgroup: " + ", ".join(self.outgroup)
+            self.rooting_method = "outgroup: " + ", ".join(self.outgroup)
         else:
             missing = [
-                node for node in rerooted_tree.find_clades()
-                if node is not rerooted_tree.root and node.branch_length is None
+                node for node in tree.find_clades()
+                if node is not tree.root and node.branch_length is None
             ]
             if missing:
                 raise ValueError(
@@ -509,12 +642,19 @@ class Tree_Rerooter:
                     file=sys.stderr
                 )
 
-            midpoint_root(rerooted_tree)
-            rooting_method = "midpoint"
+            midpoint_root(tree)
+            self.rooting_method = "midpoint"
 
-        rerooted_tree.rooted = True
-        self.restore_supports(rerooted_tree, all_taxa, supports)
-        self.order_nodes(rerooted_tree)
+        tree.rooted = True
+        self.restore_supports(tree, all_taxa, supports)
+        self.order_nodes(tree)
+        self.all_taxa = all_taxa
+        return tree
+
+    def reroot_tree(self):
+        original_tree = Phylo.read(self.input_tree, "newick")
+        rerooted_tree = self.root(copy.deepcopy(original_tree))
+        all_taxa = self.all_taxa
         self.write_tree(rerooted_tree)
 
         output_tree = Phylo.read(self.output_tree, "newick")
@@ -529,7 +669,7 @@ class Tree_Rerooter:
                 "The output tree does not contain the same tips as the input tree."
             )
 
-        print("Rooting method: " + rooting_method)
+        print("Rooting method: " + self.rooting_method)
         print("Input tips: " + str(len(all_taxa)))
         print(
             "Bootstrap labels retained: "
@@ -537,6 +677,66 @@ class Tree_Rerooter:
         )
         print("Node order: " + self.order_node)
         print("Output tree: " + self.output_tree)
+
+
+def root_newick(newick, outgroup=None, order_node="increase"):
+    """Root a newick string (or a parsed Bio.Phylo tree, rooted in place) and
+    return the rooted newick string.
+
+    Midpoint rooting unless `outgroup` names tips. Raises ValueError on a tree
+    that cannot be rooted (fewer than two tips, missing branch lengths,
+    duplicate tip names).
+    """
+    rerooter = Tree_Rerooter(None, None, outgroup or [], False, 0.5, order_node)
+    if isinstance(newick, str):
+        newick = Phylo.read(StringIO(newick), "newick")
+    tree = rerooter.root(newick)
+    return rerooter.tree_to_newick(tree.root, is_root=True) + ";"
+
+
+def prune_to_tips(tree, keep):
+    """Drop every tip whose name is not in `keep`, in place, in O(n).
+
+    Biopython's ``Tree.prune`` walks from the root once per removed tip, which
+    is quadratic when most of an 11,000-tip tree goes. Here each node is
+    visited once, children first: a node left with no children is removed, and
+    a node left with one child is spliced out, its branch length added to the
+    child's so tip-to-tip distances are unchanged. The surviving child keeps
+    its own support value, since the bipartition it describes is what remains.
+
+    Returns the tree, or None when no tip survives.
+    """
+    order = list(tree.find_clades(order="level"))
+    alive = {}
+    replacement = {}
+
+    for clade in reversed(order):
+        if not clade.clades:
+            alive[id(clade)] = clade.name in keep
+            continue
+
+        children = []
+        for child in clade.clades:
+            if not alive[id(child)]:
+                continue
+            children.append(replacement.get(id(child), child))
+        clade.clades = children
+        alive[id(clade)] = bool(children)
+
+        if len(children) == 1 and clade is not tree.root:
+            only = children[0]
+            if clade.branch_length is not None or only.branch_length is not None:
+                only.branch_length = (clade.branch_length or 0.0) + (only.branch_length or 0.0)
+            replacement[id(clade)] = only
+
+    if not alive[id(tree.root)]:
+        return None
+
+    while len(tree.root.clades) == 1:
+        tree.root = tree.root.clades[0]
+        tree.root.branch_length = None
+
+    return tree
 
 
 if __name__ == "__main__":

@@ -863,12 +863,14 @@ def test_case_only_column_mismatch_names_the_case_collision(tmp_path: Path):
 @pytest.mark.skipif(
     not REAL_UPDATE_DB.exists(), reason=f"RABV update-mode DB not found at {REAL_UPDATE_DB}"
 )
-def test_real_update_db_has_no_unique_index_on_sequences_or_insertions():
-    """Confirm on real output that the two upsert tables are unprotected.
+def test_real_update_db_has_unique_index_on_every_upsert_table():
+    """The shipped RABV update database protects all five upsert tables.
 
-    The synthetic tests above show INSERT OR REPLACE degrading to INSERT; this
-    one shows the shipped RABV update database is in exactly that state, so the
-    next update against it will start duplicating rows rather than replacing.
+    This used to assert the opposite: sequences and insertions had no unique
+    index, so INSERT OR REPLACE quietly degraded to INSERT and every update
+    duplicated rows. CreateSqliteDB now builds idx_sequences_upsert and
+    idx_insertions_upsert too (47c7458), so the test guards the fix instead.
+    A test_out database built before that commit will fail here; rebuild it.
     """
     conn = _ro(REAL_UPDATE_DB)
     try:
@@ -881,9 +883,8 @@ def test_real_update_db_has_no_unique_index_on_sequences_or_insertions():
     finally:
         conn.close()
 
-    assert "meta_data" in indexed and "sequence_alignment" in indexed
-    assert "sequences" not in indexed
-    assert "insertions" not in indexed
+    for table in ("meta_data", "features", "sequence_alignment", "sequences", "insertions"):
+        assert table in indexed, f"{table} has no unique upsert index"
 
 
 @pytest.mark.xfail(

@@ -8,7 +8,7 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from NormalizeHcvMutationCatalog import HcvMutationCatalogNormalizer, main  # type: ignore[reportMissingImports]
+from NormaliseHcvMutationCatalog import HcvMutationCatalogNormaliser, main  # type: ignore[reportMissingImports]
 
 
 DRUG_SOURCE_COLUMNS = [
@@ -63,7 +63,7 @@ def row_for(rows, **criteria):
     return matches[0]
 
 
-def test_normalize_hcv_mutation_catalog_flattens_to_keyed_rows(tmp_path: Path):
+def test_normalise_hcv_mutation_catalog_flattens_to_keyed_rows(tmp_path: Path):
     tables_dir = tmp_path / "Tables"
     output_path = tables_dir / "generalized_mutation_catalog.tsv"
 
@@ -205,7 +205,7 @@ def test_normalize_hcv_mutation_catalog_flattens_to_keyed_rows(tmp_path: Path):
         DRUG_SOURCE_COLUMNS,
     )
 
-    normalizer = HcvMutationCatalogNormalizer(
+    normaliser = HcvMutationCatalogNormaliser(
         variation_path=tables_dir / "variation.csv",
         variation_metatag_path=tables_dir / "variation_metatag.csv",
         phdr_alignment_ras_path=tables_dir / "phdr_alignment_ras.csv",
@@ -214,7 +214,7 @@ def test_normalize_hcv_mutation_catalog_flattens_to_keyed_rows(tmp_path: Path):
         output_path=output_path,
     )
 
-    outputs = normalizer.normalize()
+    outputs = normaliser.normalise()
     rows = read_tsv(outputs["generalized_mutation_catalog"])
 
     assert rows
@@ -264,7 +264,7 @@ def test_normalize_hcv_mutation_catalog_flattens_to_keyed_rows(tmp_path: Path):
     assert undrugged_single["resistance_category"] == ""
 
 
-def test_normalize_hcv_mutation_catalog_cli_sets_segment_to_one_and_maps_alias(tmp_path: Path):
+def test_normalise_hcv_mutation_catalog_cli_sets_segment_to_one_and_maps_alias(tmp_path: Path):
     tables_dir = tmp_path / "Tables"
     output_path = tables_dir / "out.tsv"
 

@@ -1,0 +1,2 @@
+segment	master	references	width	master_length	master_gap_columns	codon_regions	skeleton_strategy	protein_strategy	broken_frame_references	insertion_units_dropped_low_support	all_gap_units_dropped	reference_bases_recorded_as_insertions	reverse_complemented	seconds
+1	NC_004102	237	9876	9646	230	1	FFT-NS-i	L-INS-i	0	199	0	581		825.8

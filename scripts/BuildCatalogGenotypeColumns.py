@@ -47,6 +47,12 @@ K is common, but Q80K is a genuine simeprevir resistance substitution. Marking
 only the dominant residue as wild type suppresses Q80Q while still calling
 Q80K. Recording the frequency alongside is what lets a reader see that the
 "wild type" at that position is only a 61% majority.
+
+WHERE ITS OUTPUT GOES
+---------------------
+This rewrites the wide catalogue (generalized_mutation_catalog_with_extra_info.tsv).
+The pipeline reads the long-format catalogue built from it by
+BuildHcvEvidenceCatalog.py, which carries these columns across unchanged.
 """
 
 import argparse
@@ -55,6 +61,8 @@ import csv
 import os
 import re
 import sys
+
+from evidence_sources import trial_registry_id
 
 csv.field_size_limit(min(sys.maxsize, 2 ** 31 - 1))
 
@@ -72,7 +80,7 @@ _GENOTYPE_DIGITS = re.compile(r'^(\d+)')
 
 
 def alignment_to_genotype_code(alignment_name):
-    """``AL_6xd`` -> ``6xd``; ``AL_6_unassigned_JX183558`` and ``AL_MASTER`` -> None.
+    """``AL_6xd`` -> ``6xd``; ``AL_6_unassigned_JX183558`` and ``AL_MASTER`` -> ''.
 
     The ``_unassigned_`` pseudo-alignments each describe a single sequence, not
     a genotype, so they are deliberately excluded.
@@ -110,7 +118,7 @@ def build_variant_frequencies(var_almt_note_path):
         return frequencies, counts
     for row in read_csv(var_almt_note_path):
         code = alignment_to_genotype_code(row.get('alignment_name'))
-        if code is None:
+        if not code:
             continue
         name = (row.get('variation_name') or '').strip()
         if not name:
@@ -139,7 +147,11 @@ def build_dominant_residues(typical_aa_path):
         return best
     for row in read_csv(typical_aa_path):
         code = alignment_to_genotype_code(row.get('alignment_name'))
-        if code is None:
+        # AL_MASTER and the single-sequence AL_*_unassigned_* alignments have
+        # no genotype code. Filing them under '' used to leave a blank-code
+        # entry (':T:100.00') at the head of every unscoped row's wild types,
+        # taken from whichever single sequence happened to read 100%.
+        if not code:
             continue
         key = (code, (row.get('feature_name') or '').strip(), (row.get('codon_label') or '').strip())
         try:
@@ -155,7 +167,7 @@ def build_dominant_residues(typical_aa_path):
 
 
 def build_trial_links(clinical_trial_path, result_trial_path, resistance_finding_path):
-    """(ras_id, genotype_code, drug) -> sorted NCT identifiers.
+    """(ras_id, genotype_code, drug) -> sorted trial registry identifiers.
 
     The evidence chain PHDR ships is:
 
@@ -177,11 +189,14 @@ def build_trial_links(clinical_trial_path, result_trial_path, resistance_finding
                for path in (clinical_trial_path, result_trial_path, resistance_finding_path)):
         return {}
 
+    # Keyed on the registry number, falling back to the curator's id for a
+    # trial registered outside ClinicalTrials.gov (UMIN000015627). Dropping
+    # those silently removed a real trial from two daclatasvir entries.
     nct_by_trial = {}
     for row in read_csv(clinical_trial_path):
-        nct = (row.get('nct_id') or '').strip()
-        if nct:
-            nct_by_trial[(row.get('id') or '').strip()] = nct
+        registry_id = trial_registry_id(row.get('nct_id'), row.get('id'))
+        if registry_id:
+            nct_by_trial[(row.get('id') or '').strip()] = registry_id
 
     trials_by_result = collections.defaultdict(set)
     for row in read_csv(result_trial_path):

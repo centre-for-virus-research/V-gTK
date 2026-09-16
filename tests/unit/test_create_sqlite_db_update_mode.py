@@ -1,3 +1,4 @@
+import re
 import sqlite3
 import shutil
 from pathlib import Path
@@ -758,7 +759,11 @@ def test_update_mode_replaces_existing_usher_tree_with_same_key(tmp_path: Path):
         rows = conn.execute("SELECT name, source, newick FROM trees WHERE source='usher'").fetchall()
         assert len(rows) == 1
         assert rows[0][0] == "Usher_tree_full_segment_1"
-        assert rows[0][2].strip() == "(A:0.1,B:0.2);"
+        # Stored midpoint rooted: both tips sit half the 0.3 diameter from the root.
+        lengths = dict(re.findall(r"([AB]):([0-9.e-]+)", rows[0][2]))
+        assert set(lengths) == {"A", "B"}
+        assert float(lengths["A"]) == pytest.approx(0.15)
+        assert float(lengths["B"]) == pytest.approx(0.15)
     finally:
         conn.close()
 
@@ -825,3 +830,41 @@ def test_update_mode_uses_meta_exclusion_criteria_when_filtered_files_are_empty(
         assert row == ("1", "Unable to align during update")
     finally:
         conn.close()
+
+
+def test_update_mode_keeps_seed_iqtree_but_drops_its_unlabelled_duplicate(tmp_path: Path):
+    """Updates never rebuild IQ-TREE; they only re-place with UShER.
+
+    The seed's segment-labelled IQ-TREE row must come through byte-for-byte.
+    Seeds built before the duplicate fix also carry an unlabelled copy of it,
+    which is removed.
+    """
+    initial = _inputs(tmp_path, "dup_initial", aln_a="ATGC")
+    seed_db = _build_db(tmp_path, initial, update=False)
+    backbone = "(A:0.1,(B:0.2,C:0.3):0.4,D:0.5);"
+    conn = sqlite3.connect(str(seed_db))
+    conn.executemany(
+        "INSERT INTO trees (name, source, segment_key, segment, newick, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            ("iqtree", "iqtree", None, None, backbone, "seed"),
+            ("iqtree_NC_001542", "iqtree", "NC_001542", "1", backbone, "seed"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    update_inputs = _inputs(tmp_path, "dup_update", aln_a="AT--")
+    placed = tmp_path / "placed.nwk"
+    placed.write_text("(A:0.1,B:0.2,C:0.3,D:0.4,NEW1:0.5);\n", encoding="utf-8")
+    out_db = _build_db(tmp_path, update_inputs, update=True, update_db=seed_db, usher_tree=placed)
+
+    conn = sqlite3.connect(str(out_db))
+    try:
+        iqtree_rows = conn.execute(
+            "SELECT name, segment, newick, created_at FROM trees WHERE source='iqtree'"
+        ).fetchall()
+        usher_rows = conn.execute("SELECT name FROM trees WHERE source='usher'").fetchall()
+    finally:
+        conn.close()
+    assert iqtree_rows == [("iqtree_NC_001542", "1", backbone, "seed")]
+    assert usher_rows == [("Usher_tree_full_segment_1",)]

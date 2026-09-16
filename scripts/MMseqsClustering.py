@@ -141,12 +141,36 @@ def strip_alignment_gaps(input_fasta, output_fasta):
     return written
 
 
-def split_by_completeness(alignment_fasta, min_completeness, complete_out, remainder_out):
+def reference_length_from_alignment(alignment_fasta, reference_ids):
+    """Ungapped length of the first of ``reference_ids`` found in the alignment, else None.
+
+    With a backbone that keeps every reference indel the alignment is wider than
+    any one genome (HCV: 10,270 columns against a 9,646 nt master), so dividing by
+    width makes a complete genome look incomplete. The master's own length is the
+    genome-scale denominator.
+    """
+    import accession_utils
+    wanted = {accession_utils.normalise_accession(r) or str(r).strip() for r in (reference_ids or [])}
+    wanted.discard("")
+    if not wanted:
+        return None
+    translation = str.maketrans("", "", GAP_CHARACTERS)
+    for record in SeqIO.parse(alignment_fasta, "fasta"):
+        if (accession_utils.normalise_accession(record.id) or record.id) in wanted:
+            length = len(str(record.seq).translate(translation))
+            return length or None
+    return None
+
+
+def split_by_completeness(alignment_fasta, min_completeness, complete_out, remainder_out,
+                          reference_length=None):
     """Split the alignment into near-complete sequences and everything else.
 
-    Completeness is informative bases / alignment width, so it measures how much
-    of the reference-coordinate alignment a sequence actually covers. Both
-    outputs are written unaligned, ready for MMseqs.
+    Completeness is informative bases / ``reference_length`` (the master's
+    ungapped length) when given, otherwise informative bases / alignment width.
+    Width is only a fair denominator while the alignment is in master
+    coordinates; a backbone with reference insertion columns is wider than any
+    genome. Both outputs are written unaligned, ready for MMseqs.
 
     The point is to keep fragments out of the backbone. Measured on influenza HA:
     a one-pass clustering put 35% of its representatives at >25% gaps, because
@@ -166,7 +190,7 @@ def split_by_completeness(alignment_fasta, min_completeness, complete_out, remai
             sequence = aligned.translate(translation)
             if not sequence:
                 continue
-            if informative_length(aligned) / width >= min_completeness:
+            if informative_length(aligned) / (reference_length or width) >= min_completeness:
                 complete_handle.write(f">{record.id}\n{sequence}\n")
                 n_complete += 1
             else:
@@ -259,7 +283,7 @@ def write_aligned_representatives(alignment_fasta, cluster_tsv, output_fasta):
 
 def run_mmseqs_clustering(input_fasta, output_dir, min_seq_id, threads=8, strip_gaps=True, max_seqs=None,
                           sort_by_quality=True, two_step=False, min_completeness=0.9,
-                          fast=False):
+                          fast=False, reference_ids=None):
     base_name = os.path.splitext(os.path.basename(input_fasta))[0]
     mmseqs_dir = os.path.join(output_dir, base_name)
     segments_db_dir = os.path.join(mmseqs_dir, "segments_DB")
@@ -291,8 +315,12 @@ def run_mmseqs_clustering(input_fasta, output_dir, min_seq_id, threads=8, strip_
         # cluster assignment afterwards.
         cluster_source = os.path.join(segments_db_dir, f"{base_name}_complete.seq")
         remainder_source = os.path.join(segments_db_dir, f"{base_name}_remainder.seq")
+        reference_length = reference_length_from_alignment(input_fasta, reference_ids)
+        if reference_length:
+            print(f"[info] Completeness measured against the master's length ({reference_length} nt)")
         n_complete, n_remainder = split_by_completeness(
-            input_fasta, min_completeness, cluster_source, remainder_source)
+            input_fasta, min_completeness, cluster_source, remainder_source,
+            reference_length=reference_length)
         print(f"[info] Two-step clustering: {n_complete} sequences >= {min_completeness:.0%} complete "
               f"form the backbone, {n_remainder} held back for assignment")
         if n_complete == 0:
@@ -425,8 +453,12 @@ if __name__ == "__main__":
                              "against those representatives and assigns each to its best match, so "
                              "they keep a cluster label without polluting the backbone.")
     parser.add_argument("--min-completeness", type=float, default=0.9,
-                        help="Fraction of the alignment width a sequence must cover with unambiguous "
-                             "bases to join step 1 (default: 0.9)")
+                        help="Fraction of the master's length (or of the alignment width when no "
+                             "--ref_list master is in the alignment) a sequence must cover with "
+                             "unambiguous bases to join step 1 (default: 0.9)")
+    parser.add_argument("--ref_list", default=None,
+                        help="Reference list. Its master accessions give the genome length that "
+                             "--min-completeness is measured against."),
     parser.add_argument("--no-quality-sort", action="store_true",
                         help="Do not order clustering input by informative (non-N, non-gap) length. "
                              "By default the input is sorted longest-informative-first and createdb "
@@ -440,6 +472,14 @@ if __name__ == "__main__":
                              "near-identical group appears to be crowding true neighbours out of the candidate list.")
 
     args = parser.parse_args()
+
+    reference_ids = []
+    if args.ref_list and str(args.ref_list).strip().lower() not in ("", "null", "none", "unset"):
+        if os.path.isfile(args.ref_list):
+            from ExportRefListFromUpdateDb import load_master_accessions_from_file
+            reference_ids = load_master_accessions_from_file(args.ref_list)
+        else:
+            print(f"[warn] --ref_list not found: {args.ref_list}; completeness uses alignment width.")
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -456,7 +496,8 @@ if __name__ == "__main__":
                                       strip_gaps=not args.keep_gaps, max_seqs=args.max_seqs,
                                       sort_by_quality=not args.no_quality_sort,
                                       two_step=args.two_step, min_completeness=args.min_completeness,
-                                      fast=str(args.test_mode).strip() == "1")
+                                      fast=str(args.test_mode).strip() == "1",
+                                      reference_ids=reference_ids)
             print("All processing completed.")
             exit(0)
 
@@ -476,7 +517,8 @@ if __name__ == "__main__":
                                   strip_gaps=not args.keep_gaps, max_seqs=args.max_seqs,
                                       sort_by_quality=not args.no_quality_sort,
                                       two_step=args.two_step, min_completeness=args.min_completeness,
-                                      fast=str(args.test_mode).strip() == "1")
+                                      fast=str(args.test_mode).strip() == "1",
+                                      reference_ids=reference_ids)
 
     print("All processing completed.")
 

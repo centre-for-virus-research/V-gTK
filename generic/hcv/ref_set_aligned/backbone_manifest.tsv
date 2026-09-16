@@ -1,0 +1,8 @@
+cached_on	2026-09-16
+source	HCV_test run of 15 Sep 2026 (dev/nf_runs/HCV_test/out/ref_set_aligned), built in 825.8 s on 8 threads
+reference_list	ref_list_subtype_genotype.txt
+reference_count	238
+reference_accessions_sha256	e7a391ce07c664be53c2d5d1678d93c0ffc8826ef71f6c7b444bf5ca0805ed8f
+min_insertion_support	2
+builder_sha256	db3a442ef5528b79392dceb4bc6adb76406945e83e127020b5490a85660fbaff
+files	refset_1_aln.fasta

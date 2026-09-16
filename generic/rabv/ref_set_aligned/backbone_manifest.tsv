@@ -1,0 +1,8 @@
+cached_on	2026-09-16
+source	Built 16 Sep 2026 by running BuildReferenceAlignment.py directly (dev/rabv_backbone_build) on NCBI-fetched ref_list_clades.txt sequences and the NC_001542 GFF3, in 2972.4 s on 2 threads
+reference_list	ref_list_clades.txt
+reference_count	497
+reference_accessions_sha256	e4458aacb3906f43bfac857127138e48f3f4f84b34faa5ed7d15314823abb7b9
+min_insertion_support	2
+builder_sha256	db3a442ef5528b79392dceb4bc6adb76406945e83e127020b5490a85660fbaff
+files	refset_1_aln.fasta

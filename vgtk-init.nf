@@ -104,7 +104,7 @@ def scriptDefinedParams = [
     "min_seq_length_ratio", "max_aln_gap_proportion", "tree_free", "base_tree_only",
     "pivot_isolate_key", "pivot_required_segments", "segment_names", "root_outgroup",
     "mmseqs_two_step", "mmseqs_min_completeness", "iqtree_model",
-    "fetch_batch_size"
+    "fetch_batch_size", "build_ref_alignment", "ref_aln_min_insertion_support"
     // Add all parameter names defined above
 ]
 
@@ -130,7 +130,9 @@ if( params.update && !params.update_db ){
 }
 
 // Normalize optional params used as `val` process inputs
-if( params.ref_set_aligned == null ){
+// `--ref_set_aligned null` on the command line arrives as the string 'null': it
+// means "no curated backbone, build one", the way to bypass a profile's cache.
+if( params.ref_set_aligned == null || params.ref_set_aligned.toString().trim() in ['', 'null', 'false'] ){
     params.ref_set_aligned = 'UNSET'
 }
 
@@ -193,6 +195,7 @@ process TEST_DEPENDENCIES{
     check_cmd seqkit version
     check_cmd nextalign --version
     check_cmd mmseqs --version
+    check_cmd mafft --version
     if command -v iqtree3 >/dev/null 2>&1; then
         iqv="$(iqtree3 --version 2>&1 | head -n 1)"
         echo "OK   iqtree3 :: ${iqv}" >> dependency_test.txt
@@ -253,12 +256,6 @@ PY
         echo "OK   FastTree :: $(FastTree -help 2>&1 | head -n 1)" >> dependency_test.txt
     else
         echo "WARN VeryFastTree/FastTree :: not found (only needed if VERY_FAST_TREE is enabled)" >> dependency_test.txt
-    fi
-
-    if command -v mafft >/dev/null 2>&1; then
-        echo "OK   mafft :: $(mafft --version 2>&1 | head -n 1)" >> dependency_test.txt
-    else
-        echo "WARN mafft :: not found (used by utility scripts, not main flow)" >> dependency_test.txt
     fi
 
     if command -v ncbi-acc-download >/dev/null 2>&1; then
@@ -561,6 +558,58 @@ process BLAST_ALIGNMENT{
 //gB_matrix_validated.tsv  master_seq     query_seq.fa  query_uniq_tophits.tsv  ref_seqs    sorted_fasta
 
 
+// Backbone alignment built from every reference when no curated
+// params.ref_set_aligned is given (see scripts/BuildReferenceAlignment.py and
+// info_help/guide_alignment_and_insertions.md). Shared reference indels keep their
+// columns instead of being stripped to the insertions table, and genes are
+// codon-aligned so gaps inside the master's genes are whole codons.
+process BUILD_REFERENCE_ALIGNMENT{
+    publishDir "${params.publish_dir}", mode: 'copy'
+    cpus MAX_THREADS
+    input:
+        path ref_seqs_fasta
+        path ref_list
+        path gff_files
+    output:
+        path "ref_set_aligned", type: 'dir', emit: ref_set_aligned
+    shell:
+    '''
+        python !{scripts_dir}/BuildReferenceAlignment.py \
+            --ref_fasta !{ref_seqs_fasta} \
+            --ref_list !{ref_list} \
+            --gff !{gff_files} \
+            --output_dir ref_set_aligned \
+            --threads !{task.cpus} \
+            --min_insertion_support !{params.ref_aln_min_insertion_support} \
+            --is_segmented !{params.is_segmented}
+    '''
+}
+
+// Every backbone - a profile's cache, a hand-curated one, or one built in this run -
+// is checked before anything aligns against it. The run fails if any reference in
+// the list is missing from the backbone file for its segment (a download failure
+// or a stale cache), and a cache also fails if its insertion-support setting no
+// longer matches. References are never added after the fact; see
+// scripts/CheckReferenceBackbone.py.
+process CHECK_REFERENCE_BACKBONE{
+    publishDir "${params.publish_dir}/tests", mode: 'copy', pattern: 'reference_backbone_check.txt'
+    input:
+        val backbone_dir
+        path ref_list
+    output:
+        val backbone_dir, emit: backbone
+        path "reference_backbone_check.txt"
+    shell:
+    '''
+        set -o pipefail
+        python !{scripts_dir}/CheckReferenceBackbone.py \
+            --backbone_dir "!{backbone_dir}" \
+            --ref_list !{ref_list} \
+            --min_insertion_support !{params.ref_aln_min_insertion_support} \
+            --is_segmented !{params.is_segmented} 2>&1 | tee reference_backbone_check.txt
+    '''
+}
+
 //python "${scripts_dir}/NextalignAlignment.py" -m $master_acc #-gff "tmp/Gff/NC_001542.gff3"
 process NEXTALIGN_ALIGNMENT{
     cpus MAX_THREADS
@@ -794,6 +843,7 @@ process MMSEQS_CLUSTERING{
             -i mmseqs_input \
             -o MMseqClusters_!{padded_aln.baseName} \
             --min-seq-id !{params.mmseqs_min_seq_id} \
+            --ref_list "!{params.ref_list}" \
             --threads !{task.cpus} --test_mode !{params.test} ${TWO_STEP_ARGS}
     '''
 }
@@ -909,6 +959,7 @@ process USHER_PLACEMENT{
         python !{scripts_dir}/UsherPlacement.py --padded_aln !{padded_aln} \
         --mmseq_cluster_dir "!{mmseq_cluster_dir}" --iqtree_dir "!{iqtree_dir}" \
         --output_dir "!{usher_output_dir}" --update_db "!{params.update_db}" \
+        --ref_list "!{params.ref_list}" \
         --threads !{task.cpus} --test_mode !{params.test}
     '''
 }
@@ -1056,6 +1107,7 @@ process GENERATE_TABLES {
         path padded_aln
         path nextalign_dir
         path ref_list
+        val ref_set_aligned_dir
     output:
         path "Tables/sequence_alignment.tsv", emit: sequence_alignment
         path "Tables/insertions.tsv", emit: insertions
@@ -1065,6 +1117,12 @@ process GENERATE_TABLES {
     EXTRA_TABLE_ARGS=""
     if [ "!{ref_list}" != "null" ] && [ -f "!{ref_list}" ]; then
         EXTRA_TABLE_ARGS="-r !{ref_list}"
+    fi
+    # A built backbone keeps shared reference insertions as columns; only the
+    # reference bases it dropped belong in the insertions table. Curated backbones
+    # carry no dropped_insertions.tsv and are unaffected.
+    if [ -f "!{ref_set_aligned_dir}/dropped_insertions.tsv" ]; then
+        EXTRA_TABLE_ARGS="${EXTRA_TABLE_ARGS} --reference_insertions !{ref_set_aligned_dir}/dropped_insertions.tsv"
     fi
 
     python !{scripts_dir}/GenerateTables.py -g !{gb_matrix} \
@@ -1258,8 +1316,8 @@ process CREATE_SQLITE_DB {
             CATALOG_PROFILE="!{params.mutation_virus}"
         fi
 
-        # Optional: resolves the PMIDs already in mutation_catalog.pubmed_id to
-        # titles/journals/years. Without it those stay bare numbers.
+        # Optional: lookup tables that resolve mutation_catalog.evidence_id to
+        # publication and trial details. Without them the ids stay bare.
         PUBLICATIONS_ARG=""
         if [ "!{params.mutation_publications}" != "null" ] && [ -n "!{params.mutation_publications}" ]; then
             PUBLICATIONS_ARG="--publications !{params.mutation_publications}"
@@ -1601,6 +1659,32 @@ workflow {
     }
 
 
+    // Backbone alignment. A curated params.ref_set_aligned wins. Update mode keeps
+    // deriving the backbone from the stored reference rows (PadAlignment
+    // --update_db), so an existing database's column layout is never changed.
+    def BUILD_REF_ALIGNMENT = !UPDATE_MODE && ref_backbone_dir == 'UNSET' && params.build_ref_alignment.toString().toBoolean()
+    def ref_backbone_ch
+    if( BUILD_REF_ALIGNMENT ){
+        BUILD_REFERENCE_ALIGNMENT(BLAST_ALIGNMENT.out.ref_seqs_fasta,
+                                  effective_ref_list,
+                                  DOWNLOAD_GFF.out.collect())
+        CHECK_REFERENCE_BACKBONE(BUILD_REFERENCE_ALIGNMENT.out.ref_set_aligned.map { it.toString() },
+                                 effective_ref_list)
+        ref_backbone_ch = CHECK_REFERENCE_BACKBONE.out.backbone
+    } else if( !UPDATE_MODE && ref_backbone_dir != 'UNSET' ){
+        CHECK_REFERENCE_BACKBONE(ref_backbone_dir, effective_ref_list)
+        ref_backbone_ch = CHECK_REFERENCE_BACKBONE.out.backbone
+    } else {
+        // Update mode always derives the backbone from the database's stored
+        // reference rows, so its column layout never changes. A supplied
+        // ref_set_aligned would override that in PadAlignment, unchecked, so it
+        // is ignored here - as vgtk-rabv.sh already does.
+        if( UPDATE_MODE && ref_backbone_dir != 'UNSET' ){
+            log.warn("ref_set_aligned=${ref_backbone_dir} is ignored in update mode: the backbone comes from the update database")
+        }
+        ref_backbone_ch = Channel.value(UPDATE_MODE ? 'UNSET' : ref_backbone_dir)
+    }
+
     NEXTALIGN_ALIGNMENT(data,
                         BLAST_ALIGNMENT.out.grouped_fasta,
                         BLAST_ALIGNMENT.out.ref_seqs_dir,
@@ -1611,12 +1695,12 @@ workflow {
     // Collect sequences that were filtered during nextalign alignment (runs first; feeds skip_ids into PAD)
     COLLECT_FILTERED_SEQUENCES(NEXTALIGN_ALIGNMENT.out,
                                effective_ref_list,
-                               ref_backbone_dir)
+                               ref_backbone_ch)
 
     PAD_ALIGNMENT(NEXTALIGN_ALIGNMENT.out,
                   params.ref_list,
                 effective_ref_list,
-                  ref_backbone_dir,
+                  ref_backbone_ch,
                   COLLECT_FILTERED_SEQUENCES.out.filtered_ids)
 
     // Guard: every segment must retain the sequences BLAST assigned to it. Segmented
@@ -1762,7 +1846,8 @@ workflow {
                     BLAST_ALIGNMENT.out.query_uniq_tophits, 
                     PAD_ALIGNMENT.out.merged_msa.collect(), 
                     NEXTALIGN_ALIGNMENT.out,
-                    params.ref_list)
+                    params.ref_list,
+                    ref_backbone_ch)
 
     HOST_TAXA_TABLE(data,
                     GENBANK_PARSER.out.taxa_names,

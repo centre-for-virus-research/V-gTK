@@ -40,7 +40,7 @@ class UsherPlacement:
 	_TREE_RECURSION_PER_LEVEL = 30
 	_TREE_RECURSION_BASE = 2000
 
-	def __init__(self, padded_aln, output_dir, mmseq_cluster_dir=None, iqtree_dir=None, update_db=None, threads=1, test_mode=False, chunk_size=50000, chunk_threshold=100000, starter_tree=None, existing_ids_file=None, placement_order="quality", segment=None, min_informative_bases=1):
+	def __init__(self, padded_aln, output_dir, mmseq_cluster_dir=None, iqtree_dir=None, update_db=None, threads=1, test_mode=False, chunk_size=50000, chunk_threshold=100000, starter_tree=None, existing_ids_file=None, placement_order="quality", segment=None, min_informative_bases=1, reference_ids=None):
 		self.padded_aln = padded_aln
 		self.output_dir = output_dir
 		self.mmseq_cluster_dir = self._normalize_optional_path(mmseq_cluster_dir)
@@ -63,6 +63,11 @@ class UsherPlacement:
 		segment = self._normalize_optional_path(segment)
 		self.segment = self._normalize_segment(segment) if segment is not None else None
 		self._usher_supports_T = None
+		# Preferred faToVcf reference, normally the masters. faToVcf numbers VCF
+		# positions along its reference row and drops columns where that row is
+		# gapped, so a fixed reference keeps positions in master coordinates instead
+		# of whichever cluster representative happens to come first.
+		self.reference_ids = [str(r).strip() for r in (reference_ids or []) if str(r).strip()]
 
 	@staticmethod
 	def _normalize_optional_path(path_value):
@@ -899,7 +904,33 @@ class UsherPlacement:
 			raise FileNotFoundError(f"Resume existing IDs file not found: {self.existing_ids_file}")
 		return self.starter_tree, self.existing_ids_file
 
+	def _preferred_reference_id(self, cluster_rep, target_fasta):
+		"""First of ``self.reference_ids`` usable as the reference, or None.
+
+		With cluster representatives it must also be one of them: the reference is
+		a backbone tip of the IQ-TREE tree, and a master that was clustered under
+		another representative is not in that tree.
+		"""
+		if not self.reference_ids:
+			return None
+		import accession_utils
+
+		def key(value):
+			return accession_utils.normalise_accession(value) or str(value).strip()
+
+		available = {key(i): i for i in self._read_ids_from_fasta(target_fasta)}
+		if cluster_rep:
+			representatives = {key(i) for i in self._read_ids_from_fasta(cluster_rep)}
+			available = {k: v for k, v in available.items() if k in representatives}
+		for candidate in self.reference_ids:
+			if key(candidate) in available:
+				return available[key(candidate)]
+		return None
+
 	def resolve_reference_id(self, cluster_rep=None, alignment_fasta=None):
+		preferred = self._preferred_reference_id(cluster_rep, alignment_fasta or self.padded_aln)
+		if preferred:
+			return preferred
 		if cluster_rep:
 			cluster_ids = self._read_ids_from_fasta(cluster_rep)
 			if cluster_ids:
@@ -1259,11 +1290,16 @@ class UsherPlacement:
 			centroid_ids = self._read_ids_from_fasta(cluster_rep)
 			self.write_ids_file("centroid_ids.txt", centroid_ids)
 			self.write_ids_file("aln_ids.txt", self._read_ids_from_fasta(self.padded_aln))
-			existing_ids_file = self.write_ids_file("exclude_ids.txt", centroid_ids[1:])
 			# every cluster representative is a backbone (IQ-TREE) tip, ref included
 			backbone_ids = centroid_ids
 
 		ref_id = self.resolve_reference_id(cluster_rep=cluster_rep, alignment_fasta=alignment_fasta)
+		if cluster_rep is not None:
+			# Every backbone tip except the faToVcf reference is held back from
+			# placement. This was centroid_ids[1:], the same set only while the
+			# reference is the first representative; with the master pinned as the
+			# reference it would have re-placed the first representative.
+			existing_ids_file = self.write_ids_file("exclude_ids.txt", [c for c in centroid_ids if c != ref_id])
 		existing_ids = []
 		if os.path.isfile(existing_ids_file):
 			existing_ids = self._read_text_lines(existing_ids_file)
@@ -1405,8 +1441,22 @@ if __name__ == "__main__":
 			 "unambiguous bases first, so partial sequences are matched against a tree that already "
 			 "contains their full-length relatives. 'input' keeps alignment order.",
 	)
+	parser.add_argument(
+		"--ref_list",
+		default=None,
+		help="Reference list. Its master accessions are preferred as the faToVcf reference when they "
+			 "are in the alignment (and, in a fresh build, among the cluster representatives).",
+	)
 	args = parser.parse_args()
-	
+
+	reference_ids = []
+	if args.ref_list and str(args.ref_list).strip().lower() not in ("", "null", "none", "unset"):
+		if os.path.isfile(args.ref_list):
+			from ExportRefListFromUpdateDb import load_master_accessions_from_file
+			reference_ids = load_master_accessions_from_file(args.ref_list)
+		else:
+			print(f"[warn] --ref_list not found: {args.ref_list}; using the default reference choice.")
+
 	UsherPlacement(
 		padded_aln=args.padded_aln,
 		output_dir=args.output_dir,
@@ -1422,4 +1472,5 @@ if __name__ == "__main__":
 		placement_order=args.placement_order,
 		segment=args.segment,
 		min_informative_bases=args.min_informative_bases,
+		reference_ids=reference_ids,
 	).run()

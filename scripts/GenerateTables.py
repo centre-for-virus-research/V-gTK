@@ -15,7 +15,7 @@ from collections import defaultdict
 from collections import Counter
 
 class GenerateTables:
-	def __init__(self, genbank_matrix, base_dir, output_dir, blast_hits, paded_aln, host_taxa_file, nextalign_dir, email, reference_tsv=None):
+	def __init__(self, genbank_matrix, base_dir, output_dir, blast_hits, paded_aln, host_taxa_file, nextalign_dir, email, reference_tsv=None, reference_insertions=None):
 		self.genbank_matrix = genbank_matrix
 		self.base_dir = base_dir
 		self.output_dir = output_dir
@@ -25,6 +25,7 @@ class GenerateTables:
 		self.nextalign_dir = nextalign_dir
 		self.email = email
 		self.reference_tsv = reference_tsv
+		self.reference_insertions = reference_insertions
 		os.makedirs(join(self.base_dir, self.output_dir), exist_ok=True)
 
 	def fetch_taxonomy_details(self, tax_id, max_retries=5, delay=2):
@@ -290,11 +291,23 @@ class GenerateTables:
 		print(f"Redundancy removed. File updated: {file_path}")
 
 	def create_insertion_table(self, segment_map=None):
+		"""Every base the merged alignment does not hold, one row per sequence.
+
+		Queries come from Nextalign's ``query_aln`` runs. References normally come
+		from ``reference_aln`` (each reference aligned to the master). When
+		BuildReferenceAlignment made the backbone, references keep their shared
+		insertions as columns, so ``reference_aln`` would count those bases twice;
+		the builder's ``dropped_insertions.tsv`` - the reference bases that really
+		are missing from the backbone - is used instead.
+		"""
 		segment_map = segment_map or {}
+		use_backbone_insertions = bool(self.reference_insertions) and os.path.isfile(self.reference_insertions)
 		write_file = open(join(self.base_dir, self.output_dir, "insertions.tsv"), 'w')
 		header = ["primary_accession", "reference", "insertion", "segment"]
 		write_file.write("\t".join(header) + "\n")
 		for aln_dir in os.listdir(self.nextalign_dir):
+			if use_backbone_insertions and aln_dir == "reference_aln":
+				continue
 			for each_aln_dir in os.listdir(join(self.nextalign_dir, aln_dir)):
 				with open(join(self.nextalign_dir, aln_dir, each_aln_dir, each_aln_dir + ".insertions.csv")) as f:
 					for each_line in islice(f, 1, None):
@@ -302,6 +315,16 @@ class GenerateTables:
 						if len(insertion) > 0:
 							data = [accession, each_aln_dir, insertion, segment_map.get(accession, "")]
 							write_file.write("\t".join(data) + "\n")
+
+		if use_backbone_insertions:
+			with open(self.reference_insertions) as f:
+				for each_line in islice(f, 1, None):
+					parts = each_line.rstrip("\r\n").split("\t")
+					if len(parts) < 3 or not parts[2]:
+						continue
+					accession, reference, insertion = parts[0], parts[1], parts[2]
+					segment = parts[3] if len(parts) > 3 and parts[3] else segment_map.get(accession, "")
+					write_file.write("\t".join([accession, reference, insertion, segment]) + "\n")
 
 		write_file.close()
 					
@@ -325,7 +348,8 @@ if __name__ == "__main__":
 	parser.add_argument('-n', '--nextalign_dir', help='Nextalign aligned directory', default="tmp/Nextalign/")
 	parser.add_argument('-e', '--email', help='Email id', default='your-email@example.com')
 	parser.add_argument('-r', '--reference_tsv', help='Optional reference list TSV/txt file', default=None)
+	parser.add_argument('--reference_insertions', help="BuildReferenceAlignment's dropped_insertions.tsv. When given, reference insertions come from it instead of Nextalign's reference_aln run.", default=None)
 	args = parser.parse_args()
 	
-	processor = GenerateTables(args.genbank_matrix, args.base_dir, args.output_dir, args.blast_hits, args.paded_aln, args.host_taxa, args.nextalign_dir, args.email, args.reference_tsv)
+	processor = GenerateTables(args.genbank_matrix, args.base_dir, args.output_dir, args.blast_hits, args.paded_aln, args.host_taxa, args.nextalign_dir, args.email, args.reference_tsv, args.reference_insertions)
 	processor.process()

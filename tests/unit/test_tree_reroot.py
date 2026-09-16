@@ -497,9 +497,92 @@ def _tip_depths(tree):
     return {t.name: round(tree.distance(tree.root, t), 9) for t in tree.get_terminals()}
 
 
+def _pairwise(tree):
+    lookup = {t.name: t for t in tree.get_terminals()}
+    names = sorted(lookup)
+    return {
+        (a, b): round(tree.distance(lookup[a], lookup[b]), 9)
+        for i, a in enumerate(names) for b in names[i + 1:]
+    }
+
+
+class TestMidpointRootIsExact:
+    """Rooting may move the root, never change a tip-to-tip distance.
+
+    Biopython's root_at_midpoint fails this on small trees: it roots
+    (A:0.1,(B:0.2,C:0.3):0.4) as (A:0.5,(B,C):0.1) and inflates a two-tip tree
+    to 1.5x its length, because root_with_outgroup does not split a branch that
+    hangs directly off the root. Before the fix, 45 of 180 random 2-5 tip trees
+    came out distorted.
+    """
+
+    @pytest.mark.parametrize("n", [2, 3, 4, 5, 8])
+    @pytest.mark.parametrize("seed", range(12))
+    def test_distances_kept_and_root_at_half_diameter(self, n, seed):
+        original = _random_tree(n, seed)
+        parent = {}
+        for clade in original.find_clades(order="level"):
+            for child in clade.clades:
+                parent[id(child)] = clade
+        end, _, _ = _TRR._farthest_from(original.get_terminals()[0], parent)
+        _, diameter, _ = _TRR._farthest_from(end, parent)
+
+        rooted = _TRR.midpoint_root(_copy.deepcopy(original))
+        assert _pairwise(rooted) == _pairwise(original)
+        deepest = max(rooted.distance(rooted.root, t) for t in rooted.get_terminals())
+        assert deepest == pytest.approx(diameter / 2.0, abs=1e-9)
+
+    def test_known_small_tree(self):
+        from io import StringIO
+        tree = Phylo.read(StringIO("(A:0.1,(B:0.2,C:0.3):0.4);"), "newick")
+        _TRR.midpoint_root(tree)
+        depths = _tip_depths(tree)
+        assert depths == {"A": 0.4, "B": 0.3, "C": 0.4}
+
+
+class TestRootOnBranch:
+    @pytest.mark.parametrize("newick,path,offset", [
+        ("(A:0.1,B:0.2,C:0.3);", [0], 0.05),
+        ("(A:0.5,(B:0.2,C:0.3):0.4,D:1);", [1], 0.1),
+        ("(A:0.5,((B:0.2,E:1):0.7,C:0.3):0.4,D:1);", [1, 0], 0.3),
+        ("((A:0.1,B:0.2):0.3,(C:0.1,D:0.2):0.4);", [0], 0.5),
+    ])
+    def test_splits_the_branch_without_adding_length(self, newick, path, offset):
+        from io import StringIO
+        tree = Phylo.read(StringIO(newick), "newick")
+        before = _pairwise(tree)
+        node = tree.root
+        for index in path:
+            node = node.clades[index]
+        _TRR.root_on_branch(tree, node, offset)
+        assert _pairwise(tree) == before
+        assert node in tree.root.clades
+        assert node.branch_length == pytest.approx(offset)
+
+
+class TestPruneToTips:
+    def test_keeps_distances_between_survivors(self):
+        tree = _random_tree(200, 77)
+        keep = {f"t{i}" for i in range(0, 200, 7)}
+        expected = {k: v for k, v in _pairwise(tree).items() if k[0] in keep and k[1] in keep}
+        pruned = _TRR.prune_to_tips(tree, keep)
+        assert {t.name for t in pruned.get_terminals()} == keep
+        assert _pairwise(pruned) == expected
+        assert all(len(c.clades) != 1 for c in pruned.find_clades())
+
+    def test_nothing_kept_returns_none(self):
+        assert _TRR.prune_to_tips(_random_tree(10, 1), set()) is None
+
+    def test_root_newick_accepts_a_pruned_tree(self):
+        pruned = _TRR.prune_to_tips(_random_tree(50, 3), {"t1", "t2", "t3"})
+        assert tips(_TRR.root_newick(pruned)) == {"t1", "t2", "t3"}
+
+
 class TestMidpointRootMatchesBiopython:
+    # Biopython is only a trustworthy reference where it does not hit the
+    # small-tree bug above.
     @pytest.mark.parametrize("n,seed", [
-        (2, 40), (3, 9), (8, 1), (25, 2), (60, 3), (150, 4), (400, 5), (900, 6),
+        (8, 1), (25, 2), (60, 3), (150, 4), (400, 5), (900, 6),
     ])
     def test_identical_rooting(self, n, seed):
         original = _random_tree(n, seed)

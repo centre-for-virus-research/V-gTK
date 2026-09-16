@@ -315,7 +315,7 @@ def resolve_feature_map(ref_acc, master_accessions, catalog_reference_hints, db_
 def main():
     parser = argparse.ArgumentParser(description="Verify mutation annotations against database alignment columns.")
     parser.add_argument("--db", default="/home3/oml4h/RABV-gTK/test_out/HCV_full_XML_treeless/HCV_full.db", help="Path to SQLite database.")
-    parser.add_argument("--mutation_catalog", default="/home3/oml4h/RABV-gTK/generic/hcv/Tables/generalized_mutation_catalog_with_extra_info.tsv", help="Path to mutation catalog TSV.")
+    parser.add_argument("--mutation_catalog", default="/home3/oml4h/RABV-gTK/generic/hcv/Tables/generalized_mutation_catalog_evidence_linked.tsv", help="Path to mutation catalog TSV.")
     parser.add_argument("--sample_size", type=int, default=100, help="Number of annotated sequences to sample and verify.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for sampling.")
     parser.add_argument("--hcv_test_ns3_36a", action="store_true", help="Run verification specifically for NS3:36A on the 171 query accessions.")

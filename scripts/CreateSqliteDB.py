@@ -12,6 +12,9 @@ from datetime import datetime
 from argparse import ArgumentParser
 from ExportRefListFromUpdateDb import load_reference_file_table
 from clade_from_tree import assign_labels_from_tree
+from TreeReRoot import prune_to_tips, root_newick
+from Bio import Phylo
+from io import StringIO
 from accession_utils import normalise_accession
 import segment_utils
 
@@ -86,6 +89,7 @@ class CreateSqliteDB:
 		# ON CONFLICT ... DO UPDATE SET list so a re-supplied accession keeps the
 		# value an earlier run computed for it. {table: [column, ...]}
 		self._insert_only_columns = {}
+		self._rooted_trees = {}
 
 	@staticmethod
 	def _normalize_segment_value(value):
@@ -109,6 +113,66 @@ class CreateSqliteDB:
 				return handle.read().strip()
 		except FileNotFoundError:
 			return None
+
+	@staticmethod
+	def _root_newick(newick, label):
+		"""Midpoint root a newick string; on failure warn and return it unchanged.
+
+		A stored tree's root is otherwise whatever IQ-TREE or UShER happened to
+		write, which is arbitrary. A tree that cannot be rooted (one tip, no
+		branch lengths) is still worth storing, so this never aborts the build.
+		"""
+		try:
+			return root_newick(newick)
+		except Exception as exc:
+			print(f"[warn] Could not midpoint root {label}; storing it unrooted: {exc}")
+			if not isinstance(newick, str):
+				handle = StringIO()
+				Phylo.write(newick, handle, "newick")
+				newick = handle.getvalue().strip()
+			return newick
+
+	def _read_rooted_tree_file(self, tree_path):
+		"""_read_tree_file, midpoint rooted, cached per path.
+
+		The same file feeds both clade assignment and the trees table, and
+		rooting a 138k-tip UShER tree takes ~20s, so it is only done once.
+		"""
+		if tree_path in self._rooted_trees:
+			return self._rooted_trees[tree_path]
+		newick = self._read_tree_file(tree_path)
+		if newick:
+			newick = self._root_newick(newick, tree_path)
+		self._rooted_trees[tree_path] = newick
+		return newick
+
+	def _reference_accessions(self):
+		"""Bare accessions of every row in the run's reference list."""
+		if not self.reference_tsv:
+			return set()
+		try:
+			refs = load_reference_file_table(self.reference_tsv)
+		except FileNotFoundError:
+			return set()
+		return {normalise_accession(acc) for acc in refs["primary_accession"]} - {None}
+
+	def _reference_only_tree(self, tree_path, references):
+		"""The IQ-TREE at `tree_path` pruned to the reference list, midpoint rooted.
+
+		Pruned first and rooted second: the midpoint of the reference tips alone
+		is not where the full tree's midpoint lands. Returns None when fewer than
+		two references are in the tree.
+		"""
+		newick = self._read_tree_file(tree_path)
+		if not newick or not references:
+			return None
+		tree = Phylo.read(StringIO(newick), "newick")
+		keep = {tip.name for tip in tree.get_terminals() if normalise_accession(tip.name) in references}
+		print(f"[CreateSqliteDB] Reference-only tree from {tree_path}: {len(keep)} of {len(references)} reference accessions are tips")
+		if len(keep) < 2:
+			print(f"[warn] Skipping reference-only tree for {tree_path}: needs at least two reference tips")
+			return None
+		return self._root_newick(prune_to_tips(tree, keep), f"reference-only tree from {tree_path}")
 
 	@staticmethod
 	def _load_tree_manifest(manifest_path):
@@ -391,7 +455,7 @@ class CreateSqliteDB:
 		manifest = self._load_tree_manifest(self.tree_manifest)
 
 		def _add(path, origin):
-			newick = self._read_tree_file(path)
+			newick = self._read_rooted_tree_file(path)
 			if newick:
 				candidates.append((origin, newick))
 
@@ -1889,15 +1953,27 @@ class CreateSqliteDB:
 		is_single_segment = self._should_force_unsegmented_segment_one(conn, [df_meta_data, df_features, df_aln, df_insertions])
 
 		tree_records = []
+		# Both callers pass the first IQ-TREE/UShER file as -it/-ut AND list it in
+		# the manifest, which stored it twice: once segment-labelled, once as an
+		# unlabelled "iqtree"/"usher" row (on flu, a silent copy of segment 8).
+		# The manifest row carries the segment, so it is the one kept.
+		manifest_paths = {
+			(entry["source"], os.path.realpath(entry["path"]))
+			for entry in self._load_tree_manifest(self.tree_manifest)
+		}
 		for name, source, tree_path in [("veryfasttree", "veryfasttree", self.tree_file), ("iqtree", "iqtree", self.iqtree_file), ("usher", "usher", self.usher_tree)]:
-			newick = self._read_tree_file(tree_path)
+			if is_single_segment and source == "usher":
+				continue
+			if tree_path and (source, os.path.realpath(tree_path)) in manifest_paths:
+				continue
+			newick = self._read_rooted_tree_file(tree_path)
 			if newick:
-				if is_single_segment and source == "usher":
-					continue
-				tree_records.append({"name": name, "source": source, "segment_key": None, "segment": None, "newick": newick})
+				tree_records.append({"name": name, "source": source, "segment_key": None, "segment": None, "newick": newick, "path": tree_path})
 
 		for entry in self._load_tree_manifest(self.tree_manifest):
-			newick = self._read_tree_file(entry["path"])
+			if is_single_segment and entry.get("source") == "usher":
+				continue
+			newick = self._read_rooted_tree_file(entry["path"])
 			if not newick:
 				continue
 			seg_key = entry.get("segment_key")
@@ -1905,18 +1981,16 @@ class CreateSqliteDB:
 			if seg_num is None:
 				seg_num = self._segment_from_key(seg_key)
 			name = entry.get("name") or f"{entry['source']}_{seg_key or 'tree'}"
-			if is_single_segment and entry.get("source") == "usher":
-				continue
-			tree_records.append({"name": name, "source": entry["source"], "segment_key": seg_key, "segment": seg_num, "newick": newick})
+			tree_records.append({"name": name, "source": entry["source"], "segment_key": seg_key, "segment": seg_num, "newick": newick, "path": entry["path"]})
 
 		if is_single_segment:
 			usher_newick = None
 			if self.usher_tree:
-				usher_newick = self._read_tree_file(self.usher_tree)
+				usher_newick = self._read_rooted_tree_file(self.usher_tree)
 			if not usher_newick and self.tree_manifest:
 				for entry in self._load_tree_manifest(self.tree_manifest):
 					if entry.get("source") == "usher":
-						usher_newick = self._read_tree_file(entry["path"])
+						usher_newick = self._read_rooted_tree_file(entry["path"])
 						if usher_newick:
 							break
 			if usher_newick:
@@ -1928,8 +2002,22 @@ class CreateSqliteDB:
 					"newick": usher_newick
 				})
 
+		# One reference-only tree per IQ-TREE, under its own source so nothing that
+		# picks a backbone by source (UsherPlacement, ValidateDbTree) takes it for
+		# the full tree.
+		references = self._reference_accessions()
+		for record in [r for r in tree_records if r["source"] == "iqtree"]:
+			newick = self._reference_only_tree(record["path"], references)
+			if newick:
+				tree_records.append({
+					**record,
+					"name": record["name"].replace("iqtree", "iqtree_reference_only", 1),
+					"source": "iqtree_reference_only",
+					"newick": newick,
+				})
+
 		if tree_records:
-			df_tree = pd.DataFrame(tree_records)
+			df_tree = pd.DataFrame(tree_records).drop(columns=["path"], errors="ignore")
 			df_tree["created_at"] = now_str
 			if not self.update:
 				df_tree.to_sql("trees", conn, if_exists="replace", index=False)
@@ -1950,6 +2038,20 @@ class CreateSqliteDB:
 							),
 						)
 				df_tree.to_sql("trees", conn, if_exists="append", index=False)
+
+		# An update keeps the seed database's IQ-TREE rows untouched (only UShER
+		# placement changes), but seeds built before the fix above carry the
+		# duplicate unlabelled row. Drop it only where it is an exact copy of a
+		# segment-labelled tree from the same source.
+		if self._table_exists(conn, "trees"):
+			removed = conn.execute(
+				"DELETE FROM trees WHERE COALESCE(TRIM(segment), '') = '' "
+				"AND EXISTS (SELECT 1 FROM trees AS labelled "
+				"WHERE labelled.source = trees.source AND labelled.newick = trees.newick "
+				"AND COALESCE(TRIM(labelled.segment), '') != '')"
+			).rowcount
+			if removed:
+				print(f"[CreateSqliteDB] Removed {removed} unlabelled duplicate tree row(s)")
 
 		creation_type = self._resolve_creation_type()
 		# Two columns, appended - the info table's shape is unchanged, so anything

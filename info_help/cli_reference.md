@@ -17,7 +17,7 @@ listed as the scripts actually declare them.
 Set together on the HCV profiles:
 
 ```groovy
-mutation_catalog = "${projectDir}/generic/hcv/Tables/generalized_mutation_catalog_with_extra_info.tsv"
+mutation_catalog = "${projectDir}/generic/hcv/Tables/generalized_mutation_catalog_evidence_linked.tsv"
 mutation_virus   = "HCV"
 ```
 
@@ -36,14 +36,16 @@ Annotates a finished database against a catalogue. Run by the
 | `--db` | yes | — | SQLite database to annotate, modified in place. |
 | `--mutation_catalog` | yes | — | Catalogue TSV. |
 | `--virus` | no | `""` | Virus context, e.g. `HCV`. Selects virus-specific handling. |
-| `--publications` | no | none | Publication metadata CSV. Loads a `publications` table so the PMIDs in `mutation_catalog.pubmed_id` resolve to titles. Without it they stay bare references. |
-| `--clinical_trials` | no | none | Trial registry CSV (`id,display_name,nct_id`). Loads a `clinical_trials` table, **one row per `nct_id`**, so the NCT ids in `mutation_catalog.clinical_trials` resolve to trial names without the join fanning out. Rows sharing an NCT number are merged, keeping every distinct id and name semicolon separated; a row with no NCT number is reported on stdout and not loaded. |
+| `--publications` | no | none | Publication metadata CSV. Loads a `publications` table, **one row per `evidence_id`**, with `data_source` (`pubmed` or `conference_abstract`), title, authors, year, journal and url, so publication references in `mutation_catalog.evidence_id` resolve. Without it they stay bare references. |
+| `--clinical_trials` | no | none | Trial registry CSV (`id,display_name,nct_id`). Loads a `clinical_trials` table, **one row per `evidence_id`** (the NCT number, or the registry's own id when there is none, e.g. `UMIN000015627`), so trial references in `mutation_catalog.evidence_id` resolve without the join fanning out. Curator rows sharing a registry id are merged, keeping every distinct id and name semicolon separated. A repeated `evidence_id` in either table stops the write. |
 
 ```
 python scripts/AnnotateMutations.py \
     --db test_out/HCV_OM_test/HCV_OM_test.db \
-    --mutation_catalog generic/hcv/Tables/generalized_mutation_catalog_with_extra_info.tsv \
-    --virus HCV
+    --mutation_catalog generic/hcv/Tables/generalized_mutation_catalog_evidence_linked.tsv \
+    --virus HCV \
+    --publications generic/hcv/Tables/phdr_publication.csv \
+    --clinical_trials generic/hcv/Tables/phdr_clinical_trial.csv
 ```
 
 **Behaviour controlled by the catalogue, not by flags.** Genotype gating and
@@ -59,43 +61,25 @@ To turn gating off, use a catalogue without those columns.
 `completed_signatures_only`, and `sequence_mutation_calls` (every evaluated call
 with the reason it was emitted or suppressed). With `--publications` and
 `--clinical_trials` it also writes the `publications` and `clinical_trials`
-lookup tables that `mutation_catalog.pubmed_id` and
-`mutation_catalog.clinical_trials` join to.
+lookup tables that `mutation_catalog.evidence_id` joins to (see
+[`mutation_catalog_columns.md`](mutation_catalog_columns.md#evidence-columns)).
+
+**Catalogue rows and calls.** A catalogue entry can span many rows: one per
+genotype, drug and evidence reference. A call is made from a row's identity
+(mutation, segment, residue, combination, signature), so rows sharing it are
+matched once. That keeps a long-format catalogue from multiplying the work, and
+it is why the `Mapping summary` counters count distinct catalogue identities, not
+raw rows.
 
 ---
 
-## `scripts/BuildCatalogGenotypeColumns.py`
+## `scripts/NormaliseHcvMutationCatalog.py`
 
-Folds per-genotype knowledge out of the PHDR source tables into the catalogue.
-**HCV-specific** — it is the only place alignment codes are understood.
-
-| option | required | default | effect |
-|---|---|---|---|
-| `--catalog` | yes | — | Catalogue TSV, rewritten in place unless `--output` is given. |
-| `--typical_aa` | yes | — | `phdr_alignment_typical_aa.csv`. Supplies the dominant residue per alignment. |
-| `--var_almt_note` | no | none | `var_almt_note.csv`. Supplies observed frequencies. Without it the columns are written without the optional frequency field. |
-| `--clinical_trial` | no | none | `phdr_clinical_trial.csv`. Supplies NCT identifiers. |
-| `--result_trial` | no | none | `phdr_result_trial.csv`. Links in-vivo results to trials. |
-| `--resistance_finding` | no | none | `phdr_resistance_finding.csv`. The evidence chain from a (RAS, genotype, drug) key to an in-vivo result. All three are needed together to populate `clinical_trials`. |
-| `--output` | no | in place | Write elsewhere instead of rewriting the input. |
-| `--no_frequency` | no | off | Emit `1a:Q;1b:R` rather than `1a:Q:60.89;1b:R:92.26`. Smaller; loses the ability to see that a wild type is only a bare majority. |
-
-```
-python scripts/BuildCatalogGenotypeColumns.py \
-    --catalog       generic/hcv/Tables/generalized_mutation_catalog_with_extra_info.tsv \
-    --typical_aa    generic/hcv/Tables/phdr_alignment_typical_aa.csv \
-    --var_almt_note generic/hcv/Tables/var_almt_note.csv
-```
-
-Prints how many rows got each column, and the size of the two lookup tables it
-built. It touches only the two generated columns.
-
----
-
-## `scripts/NormalizeHcvMutationCatalog.py`
-
-Builds the generalized catalogue from the PHDR source tables. Run by hand when
-the PHDR export is refreshed, not by the pipeline.
+Step 1 of the HCV catalogue build. Flattens the PHDR variation, combination and
+drug tables into `generalized_mutation_catalog.tsv`: one row per mutation
+component × genotype (alignment) × drug. Combinations are split into their
+components, and PHDR protein names are mapped to canonical names via `gene_info.tsv`.
+Run by hand when the PHDR export is refreshed, not by the pipeline.
 
 | option | default | effect |
 |---|---|---|
@@ -104,9 +88,66 @@ the PHDR export is refreshed, not by the pipeline.
 | `--phdr_alignment_ras` | `generic/hcv/Tables/phdr_alignment_ras.csv` | RAS × alignment scope. |
 | `--phdr_alignment_ras_drug` | `generic/hcv/Tables/phdr_alignment_ras_drug.csv` | Drug and resistance category. |
 | `--gene_info` | `generic/hcv/Tables/gene_info.tsv` | Gene names. |
+| `--output_path` | `generic/hcv/Tables/generalized_mutation_catalog.tsv` | Where to write. |
 
-After regenerating, re-run `BuildCatalogGenotypeColumns.py` — the generated
-columns are not reproduced by the normaliser's own inputs.
+Then run `BuildHcvEvidenceCatalog.py`. The normaliser's output is not what the
+pipeline reads.
+
+---
+
+## `scripts/BuildHcvEvidenceCatalog.py`
+
+Step 2 of the HCV catalogue build. Turns the normaliser's output into
+`generalized_mutation_catalog_evidence_linked.tsv`, the file the pipeline reads:
+
+- one row per catalogue entry × evidence reference (`evidence_id`, `data_source`,
+  `evidence_url`, `evidence_label`, `evidence_type`, `linked_evidence_ids`,
+  `finding_ids`), following PHDR's finding → publication / in-vivo result → trial
+  chain;
+- `genotype` in place of `alignment_name`;
+- `drug_producer` and `drug_category` from `phdr_drug.csv`;
+- `relevant_genotypes` and `wild_type_residues`, computed with
+  `BuildCatalogGenotypeColumns.py`;
+- numbers in shortest exact form.
+
+| option | required | effect |
+|---|---|---|
+| `--catalog` | yes | The normaliser's output. The older wide catalogue is also accepted and gives the same file. |
+| `--tables` | yes | Directory holding the `phdr_*.csv` tables. |
+| `--output` | yes | Catalogue TSV to write. |
+
+```
+python scripts/BuildHcvEvidenceCatalog.py \
+    --catalog generic/hcv/Tables/generalized_mutation_catalog.tsv \
+    --tables  generic/hcv/Tables \
+    --output  generic/hcv/Tables/generalized_mutation_catalog_evidence_linked.tsv
+python generic/hcv/Tables/audit_catalog_linkage.py \
+    --catalog generic/hcv/Tables/generalized_mutation_catalog_evidence_linked.tsv
+```
+
+The audit re-derives every value and link from the PHDR tables, reports PASS /
+WARN / FAIL per check, and exits 1 on any FAIL. `--json` writes the results as
+JSON.
+
+---
+
+## `scripts/BuildCatalogGenotypeColumns.py`
+
+Folds per-genotype knowledge out of the PHDR source tables into a catalogue.
+**HCV-specific**: it is the only place alignment codes are understood.
+`BuildHcvEvidenceCatalog.py` imports it; the command line remains for rewriting
+a wide catalogue that still carries `alignment_name`.
+
+| option | required | default | effect |
+|---|---|---|---|
+| `--catalog` | yes | — | Catalogue TSV with `alignment_name`, rewritten in place unless `--output` is given. |
+| `--typical_aa` | yes | — | `phdr_alignment_typical_aa.csv`. Supplies the dominant residue per alignment. `AL_MASTER` and the single-sequence `AL_*_unassigned_*` alignments are skipped. |
+| `--var_almt_note` | no | none | `var_almt_note.csv`. Supplies observed frequencies. |
+| `--clinical_trial` | no | none | `phdr_clinical_trial.csv`. Supplies trial registry ids (NCT, or the registry's own id when there is none). |
+| `--result_trial` | no | none | `phdr_result_trial.csv`. Links in-vivo results to trials. |
+| `--resistance_finding` | no | none | `phdr_resistance_finding.csv`. All three trial tables are needed together to populate the wide `clinical_trials` column. |
+| `--output` | no | in place | Write elsewhere instead of rewriting the input. |
+| `--no_frequency` | no | off | Emit `1a:Q;1b:R` rather than `1a:Q:60.89;1b:R:92.26`. |
 
 ---
 

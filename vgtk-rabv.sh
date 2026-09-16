@@ -35,9 +35,15 @@
 #   --mutation_virus    <name>  Virus name for catalog      (default: none)
 #   --max_aln_gap_proportion <f> Max gap fraction in aln   (default: 0.96)
 #   --min_seq_length_ratio   <f> Min length fraction       (default: 0.05)
+#   --ref_set_aligned        <dir> Curated backbone alignment dir (refset_<segment>_aln.fasta);
+#                                skips building one           (default: build it)
+#   --no_build_ref_alignment     Do not build a backbone; project references onto the master
+#   --ref_aln_min_insertion_support <n> References needed to keep an insertion column
+#                                in the built backbone        (default: 2)
 #   --start_step             <n> Resume from step N         (default: 1)
 #                                Steps: 1=FETCH_GENBANK 2=DOWNLOAD_GFF 3=GENBANK_PARSER
-#                                       4=FILTER_AND_EXTRACT 5=BLAST 6=NEXTALIGN
+#                                       4=FILTER_AND_EXTRACT 5=BLAST
+#                                       6=BUILD_REFERENCE_ALIGNMENT+NEXTALIGN
 #                                       7=COLLECT_FILTERED 8=PAD_ALIGNMENT 9=DEDUP
 #                                       10=MMSEQS/TREES 11=TREE_MANIFEST 12=CALC_ALN_CORD
 #                                       13=SOFTWARE_VERSION 14=HOST_TAXA 15=GENERATE_TABLES
@@ -74,6 +80,9 @@ MUTATION_CATALOG=""
 MUTATION_VIRUS=""
 MAX_ALN_GAP_PROPORTION="0.96"
 MIN_SEQ_LENGTH_RATIO="0.05"
+REF_SET_ALIGNED=""                  # curated backbone dir; empty => build one
+BUILD_REF_ALIGNMENT="true"          # mirrors params.build_ref_alignment
+REF_ALN_MIN_INSERTION_SUPPORT="2"   # mirrors params.ref_aln_min_insertion_support
 
 # ---------------------------------------------------------------------------
 # Parse CLI arguments
@@ -99,6 +108,9 @@ while [[ $# -gt 0 ]]; do
         --max_aln_gap_proportion) [[ $# -lt 2 ]] && { echo "[error] --max_aln_gap_proportion requires a value" >&2; exit 1; }; MAX_ALN_GAP_PROPORTION="$2"; shift 2 ;;
         --min_seq_length_ratio)   [[ $# -lt 2 ]] && { echo "[error] --min_seq_length_ratio requires a value" >&2; exit 1; }; MIN_SEQ_LENGTH_RATIO="$2";  shift 2 ;;
         --start_step)             [[ $# -lt 2 ]] && { echo "[error] --start_step requires a value" >&2; exit 1; }; START_STEP="$2";             shift 2 ;;
+        --ref_set_aligned)        [[ $# -lt 2 ]] && { echo "[error] --ref_set_aligned requires a value" >&2; exit 1; }; REF_SET_ALIGNED="$2";       shift 2 ;;
+        --no_build_ref_alignment) BUILD_REF_ALIGNMENT="false"; shift ;;
+        --ref_aln_min_insertion_support) [[ $# -lt 2 ]] && { echo "[error] --ref_aln_min_insertion_support requires a value" >&2; exit 1; }; REF_ALN_MIN_INSERTION_SUPPORT="$2"; shift 2 ;;
         -h|--help)
             sed -n '3,/^# ===/p' "${BASH_SOURCE[0]}"
             exit 0
@@ -147,6 +159,7 @@ _dep_ok=true
 _check_dep python    || _dep_ok=false
 _check_dep seqkit    || _dep_ok=false
 _check_dep mmseqs    || _dep_ok=false
+_check_dep mafft     || _dep_ok=false
 if ! command -v iqtree3 >/dev/null 2>&1; then
     echo "[error] Required tool not found in PATH: iqtree3" >&2; _dep_ok=false
 fi
@@ -199,6 +212,31 @@ HOST_TAXA="${WORK_DIR}/HostTaxa/Host_taxa.tsv"
 SEQ_ALN="${WORK_DIR}/Tables/sequence_alignment.tsv"
 INSERTIONS="${WORK_DIR}/Tables/insertions.tsv"
 SQLITE_DB="${WORK_DIR}/${DB_NAME}.db"
+
+# Backbone alignment PadAlignment projects through. Mirrors ref_backbone_ch in
+# vgtk-init.nf: a curated --ref_set_aligned wins; update mode derives the backbone
+# from the stored reference rows (so none is passed); otherwise one is built in
+# step 6. Empty means "project references onto the master".
+BUILT_REF_ALIGNMENT="false"
+# Mirrors VALIDATE_REF_LIST_DB: an update must use references already in the DB
+# and in its stored UShER tree, or clade assignment silently ignores the new ones.
+if [[ "$UPDATE_MODE" == "true" ]]; then
+    python "${SCRIPTS}/ValidateRefListAgainstDb.py" --ref_list "$REF_LIST" --db "$UPDATE_DB" || exit 1
+fi
+if [[ "$UPDATE_MODE" == "true" ]]; then
+    REF_BACKBONE_DIR=""
+elif [[ -n "$REF_SET_ALIGNED" ]]; then
+    [[ -d "$REF_SET_ALIGNED" ]] || { echo "[error] --ref_set_aligned must be an existing directory: $REF_SET_ALIGNED" >&2; exit 1; }
+    # Mirrors CHECK_REFERENCE_BACKBONE: a cached backbone must still match this run.
+    python "${SCRIPTS}/CheckReferenceBackbone.py" --backbone_dir "$REF_SET_ALIGNED" --ref_list "$REF_LIST" \
+        --min_insertion_support "$REF_ALN_MIN_INSERTION_SUPPORT" --is_segmented "$IS_SEGMENTED" || exit 1
+    REF_BACKBONE_DIR="$REF_SET_ALIGNED"
+elif [[ "$BUILD_REF_ALIGNMENT" == "true" ]]; then
+    REF_BACKBONE_DIR="${WORK_DIR}/ref_set_aligned"
+    BUILT_REF_ALIGNMENT="true"
+else
+    REF_BACKBONE_DIR=""
+fi
 
 # ---------------------------------------------------------------------------
 # REDISCOVER DYNAMIC INTERMEDIATES when skipping early steps
@@ -362,10 +400,32 @@ if (( STEP >= START_STEP )); then
 fi
 
 # ---------------------------------------------------------------------------
-# STEP 6 – NEXTALIGN_ALIGNMENT
+# STEP 6 – BUILD_REFERENCE_ALIGNMENT (fresh builds) + NEXTALIGN_ALIGNMENT
 # ---------------------------------------------------------------------------
 STEP=$(( STEP + 1 ))
 if (( STEP >= START_STEP )); then
+    if [[ "$BUILT_REF_ALIGNMENT" == "true" ]]; then
+        GFF_FILES=()
+        while IFS= read -r _line; do GFF_FILES+=("$_line"); done < <(
+            find "${WORK_DIR}" -maxdepth 1 -iname '*.gff3' | sort)
+        rm -rf "${REF_BACKBONE_DIR}"
+        run_step "BUILD_REFERENCE_ALIGNMENT" \
+            python "${SCRIPTS}/BuildReferenceAlignment.py" \
+                --ref_fasta "${REF_SEQ_FILTERED_FA}" \
+                --ref_list "${REF_LIST}" \
+                --gff "${GFF_FILES[@]+${GFF_FILES[@]}}" \
+                --output_dir "${REF_BACKBONE_DIR}" \
+                --threads "${MAX_THREADS}" \
+                --min_insertion_support "${REF_ALN_MIN_INSERTION_SUPPORT}" \
+                --is_segmented "${IS_SEGMENTED}"
+        # Mirrors CHECK_REFERENCE_BACKBONE on a built backbone: a reference that
+        # failed to download must stop the run, not go missing from the backbone.
+        run_step "CHECK_REFERENCE_BACKBONE" \
+            python "${SCRIPTS}/CheckReferenceBackbone.py" --backbone_dir "${REF_BACKBONE_DIR}" \
+                --ref_list "${REF_LIST}" --min_insertion_support "${REF_ALN_MIN_INSERTION_SUPPORT}" \
+                --is_segmented "${IS_SEGMENTED}"
+    fi
+
     NEXTALIGN_EXTRA=()
     [[ "$UPDATE_MODE" == "true" ]] && NEXTALIGN_EXTRA+=( --update_db "${UPDATE_DB}" )
     run_step "NEXTALIGN_ALIGNMENT" \
@@ -385,12 +445,17 @@ fi
 # ---------------------------------------------------------------------------
 STEP=$(( STEP + 1 ))
 if (( STEP >= START_STEP )); then
+    # Must see the same backbone PAD_ALIGNMENT projects through, or it filters
+    # queries PAD could have placed (see MISSING_H3_report.md).
+    COLLECT_EXTRA=()
+    [[ -n "$REF_BACKBONE_DIR" ]] && COLLECT_EXTRA+=( --precomputed_ref_dir "${REF_BACKBONE_DIR}" --ref_list "${REF_LIST}" )
     run_step "COLLECT_FILTERED_SEQUENCES" \
         python "${SCRIPTS}/CollectFilteredSequences.py" \
             -n "${NEXTALIGN_DIR}" \
             -o filtered_sequences.tsv \
             -b . \
-            --max_gap_proportion "${MAX_ALN_GAP_PROPORTION}"
+            --max_gap_proportion "${MAX_ALN_GAP_PROPORTION}" \
+            "${COLLECT_EXTRA[@]+${COLLECT_EXTRA[@]}}"
 fi
 # Guarantee files exist (CollectFilteredSequences may not create them if nothing is filtered)
 touch "${FILTERED_IDS}" "${FILTERED_TSV}"
@@ -407,6 +472,7 @@ if (( STEP >= START_STEP )); then
             -o . -d . \
             -i "${NEXTALIGN_DIR}/query_aln" \
             --keep_intermediate_files \
+            --precomputed_ref_dir "${REF_BACKBONE_DIR:-UNSET}" \
             --update_db "${UPDATE_DB:-null}" \
             --segment_manifest_out pad_alignment_manifest.tsv \
             --skip_ids "${FILTERED_IDS}"
@@ -471,6 +537,7 @@ if (( STEP >= START_STEP )); then
                     --iqtree_dir "UNSET" \
                     --output_dir "${usher_out_dir}" \
                     --update_db "${UPDATE_DB}" \
+                    --ref_list "${REF_LIST}" \
                     --threads "${MAX_THREADS}" \
                     --test_mode "${TEST_MODE}"
             USHER_DIRS+=("${usher_out_dir}")
@@ -496,6 +563,7 @@ if (( STEP >= START_STEP )); then
                     -i "${mmseq_input_dir}" \
                     -o "${mmseq_dir}" \
                     --min-seq-id "${MMSEQS_MIN_SEQ_ID}" \
+                    --ref_list "${REF_LIST}" \
                     --threads "${MAX_THREADS}"
             MMSEQ_DIRS+=("${mmseq_dir}")
 
@@ -546,6 +614,7 @@ if (( STEP >= START_STEP )); then
                     --iqtree_dir "${iqtree_dir}" \
                     --output_dir "${usher_out_dir}" \
                     --update_db "${UPDATE_DB:-null}" \
+                    --ref_list "${REF_LIST}" \
                     --threads "${MAX_THREADS}" \
                     --test_mode "${TEST_MODE}"
             USHER_DIRS+=("${usher_out_dir}")
@@ -638,6 +707,10 @@ STEP=$(( STEP + 1 ))
 if (( STEP >= START_STEP )); then
     EXTRA_TABLE_ARGS=()
     [[ -f "$REF_LIST" ]] && EXTRA_TABLE_ARGS+=( -r "${REF_LIST}" )
+    # A built backbone keeps shared reference insertions as columns; only the
+    # reference bases it dropped belong in the insertions table.
+    [[ "$BUILT_REF_ALIGNMENT" == "true" && -f "${REF_BACKBONE_DIR}/dropped_insertions.tsv" ]] && \
+        EXTRA_TABLE_ARGS+=( --reference_insertions "${REF_BACKBONE_DIR}/dropped_insertions.tsv" )
 
     # Build -p flags: GenerateTables.py expects the padded MSA FASTA file(s),
     # not the work directory.  Mirrors PAD_ALIGNMENT.out.merged_msa.collect() in Nextflow.

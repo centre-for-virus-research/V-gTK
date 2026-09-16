@@ -1,6 +1,6 @@
 """Genotype scoping, per-genotype wild-type suppression and residue spelling.
 
-Lens: scripts/AnnotateMutations.py, scripts/NormalizeHcvMutationCatalog.py and
+Lens: scripts/AnnotateMutations.py, scripts/NormaliseHcvMutationCatalog.py and
 the curated PHDR catalogue at
 generic/hcv/Tables/generalized_mutation_catalog_with_extra_info.tsv.
 
@@ -32,12 +32,12 @@ import pytest
 
 import AnnotateMutations as AM
 import BuildCatalogGenotypeColumns as BCG
-import NormalizeHcvMutationCatalog as NM
+import NormaliseHcvMutationCatalog as NM
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HCV_TABLES = REPO_ROOT / "generic" / "hcv" / "Tables"
-CATALOG_TSV = HCV_TABLES / "generalized_mutation_catalog_with_extra_info.tsv"
+CATALOG_TSV = HCV_TABLES / "generalized_mutation_catalog_evidence_linked.tsv"
 GENE_INFO_TSV = HCV_TABLES / "gene_info.tsv"
 HCV_DB = REPO_ROOT / "test_out" / "HCV_OM_test" / "HCV_OM_test.db"
 
@@ -163,7 +163,7 @@ REFERENCE_30MER = "ATGAAACCCGGGTTTAGATAGCATGCATGC"
 def test_codon_table_spells_stop_as_a_star():
     """Stop is '*' in the genetic code table, not the private '_' spelling.
 
-    The normalizer's token grammar already admits '*' (``[A-Z*]|del``), so the
+    The normaliser's token grammar already admits '*' (``[A-Z*]|del``), so the
     day PHDR publishes a nonsense variant the two halves of the pipeline have to
     agree on how it is written.  '_' met nothing on the catalog side, so such a
     row could only ever match zero sequences, silently.
@@ -302,7 +302,7 @@ def test_scope_gate_matches_at_genotype_level_not_subtype_level():
 def test_an_entry_with_no_genotype_scope_applies_to_any_genotype():
     """The 63 signatures with no alignment bucket are anchors, not genotype-1 findings.
 
-    They exist because the normalizer promotes conjunction components with an
+    They exist because the normaliser promotes conjunction components with an
     empty phdr_ras_id to standalone signatures.  Gating them to nothing would
     hide them; gating them to a genotype would invent one.  Rule B is what
     filters them, not the scope gate.
@@ -443,15 +443,11 @@ def test_catalog_carries_relevant_genotypes_as_a_per_signature_union():
     catalog = _read_catalog().fillna("")
     assert "relevant_genotypes" in catalog.columns
     # The generic columns are appended; order between them is not contractual.
-    assert {"relevant_genotypes", "wild_type_residues", "clinical_trials"} <= set(catalog.columns)
+    assert {"genotype", "relevant_genotypes", "wild_type_residues", "evidence_id"} <= set(catalog.columns)
 
     expected = {}
     for signature_id, group in catalog.groupby("signature_id"):
-        codes = {
-            BCG.alignment_to_genotype_code(value)
-            for value in group["alignment_name"]
-            if BCG.alignment_to_genotype_code(value)
-        }
+        codes = {value for value in group["genotype"] if value}
         expected[signature_id] = set(codes)
 
     for _, row in catalog.iterrows():
@@ -468,7 +464,7 @@ def test_catalog_carries_relevant_genotypes_as_a_per_signature_union():
 
 
 @requires_hcv_assets
-def test_normalizer_emits_relevant_genotypes_and_phenotype(tmp_path):
+def test_normaliser_emits_relevant_genotypes_and_phenotype(tmp_path):
     """A regenerated catalogue must not lose the two columns downstream requires.
 
     output_fields is the only thing write_tsv looks at, so a key
@@ -510,14 +506,14 @@ def test_normalizer_emits_relevant_genotypes_and_phenotype(tmp_path):
                  "in_vivo_baseline", "in_vivo_treatment_emergent"])
 
     output = tmp_path / "regenerated.tsv"
-    NM.HcvMutationCatalogNormalizer(
+    NM.HcvMutationCatalogNormaliser(
         variation_path=variation,
         variation_metatag_path=metatag,
         phdr_alignment_ras_path=alignment,
         phdr_alignment_ras_drug_path=drug,
         gene_info_path=GENE_INFO_TSV,
         output_path=output,
-    ).normalize()
+    ).normalise()
 
     regenerated = pd.read_csv(output, sep="\t", dtype=str).fillna("")
     assert "relevant_genotypes" in regenerated.columns
@@ -627,7 +623,7 @@ def test_master_reference_h77_keeps_no_calls_at_all():
     """Zero, not near-zero: H77 should come out of annotation completely clean.
 
     NS5B:293L and NS5B:479P are manufactured anchors - conjunction components
-    with an empty phdr_ras_id that the normalizer promoted to standalone
+    with an empty phdr_ras_id that the normaliser promoted to standalone
     signatures with no drug, no resistance category and no alignment bucket.
     Rule A lets them through because an empty scope means "any genotype", and
     rule B cannot suppress them because the catalogue only ever scores NS5B 293

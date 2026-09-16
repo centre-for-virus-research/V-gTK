@@ -143,20 +143,34 @@ produces exactly the dangerous outcome. This is why the wild-type source is
 
 ## 4. Where the data comes from
 
-The pipeline reads **only** the generalized catalogue TSV. It never opens the
-PHDR CSVs, and it never reads `alignment_name`.
+The pipeline reads **only** the catalogue TSV,
+`generalized_mutation_catalog_evidence_linked.tsv`. It never opens the PHDR CSVs,
+and the catalogue has no `alignment_name` column to read.
+
+The catalogue is rebuilt from the PHDR export in two deterministic steps. Nothing
+is added by hand:
 
 ```
-phdr_alignment_typical_aa.csv  ─┐
-var_almt_note.csv              ─┼─► BuildCatalogGenotypeColumns.py ─► catalog TSV ─► AnnotateMutations.py
-phdr_alignment_ras.csv         ─┘        (HCV-specific)              (generic)        (generic)
+variation*.csv, phdr_alignment_ras*.csv, gene_info.tsv
+    └─► NormaliseHcvMutationCatalog.py ─► generalized_mutation_catalog.tsv
+                                              (one row per component × genotype × drug)
+phdr_alignment_typical_aa.csv ─┐
+phdr_drug.csv                  ├─► BuildHcvEvidenceCatalog.py ─► generalized_mutation_catalog_evidence_linked.tsv ─► AnnotateMutations.py
+phdr_resistance_finding.csv,   │     (uses BuildCatalogGenotypeColumns.py        (one row per entry × evidence reference)
+phdr_publication.csv,          │      for relevant_genotypes / wild_type_residues)
+phdr_result_trial.csv,         │
+phdr_clinical_trial.csv       ─┘
 ```
+
+`generic/hcv/Tables/audit_catalog_linkage.py` re-derives every value and link in
+the result from the PHDR tables and exits non-zero on any disagreement.
 
 **Why the split.** `AL_1a`, `AL_6xd` and the rest are PHDR/HCV artefacts. A
 rabies or influenza catalogue will never have them. Anything genotype-related is
-therefore resolved once, at catalogue build time, into two generic columns that
-any virus can supply by any means it likes. No pipeline code depends on an
-alignment column.
+therefore resolved once, at catalogue build time, into generic columns that any
+virus can supply by any means it likes: `genotype` for the row's own genotype,
+`relevant_genotypes` for the signature's scope, `wild_type_residues` for the
+wild type. No pipeline code depends on an alignment column.
 
 ### Why two source tables are needed
 
@@ -188,60 +202,83 @@ columns are empty, including the entire epitope block.
 
 ---
 
-## 4b. Clinical trial evidence
+## 4b. Publication and clinical trial evidence
 
-Each catalogue row carries the registered trials supporting it **for that row's
-genotype and drug**, in a `clinical_trials` column of semicolon-separated NCT
-identifiers. The column reaches the database intact as
-`mutation_catalog.clinical_trials`, and is the only thing in the database that
-refers to the `clinical_trials` registry table.
+Each catalogue row carries **one evidence reference**: `evidence_id`, with
+`data_source` saying what it is (`pubmed`, `conference_abstract` or
+`clinical_trial`). A catalogue entry, meaning a (signature, genotype, drug), has one row
+per reference, and every non-evidence column is identical across those rows.
 
-The chain PHDR ships:
+### Why one reference per row
+
+The catalogue used to hold `pubmed_id`, `DOI` and `clinical_trials` as three
+independent semicolon lists. PHDR does not model publications and trials as
+alternative sources, and flat lists lost what it does model:
 
 ```
-resistance_finding.phdr_alignment_ras_drug_id    NS3:107I:AL_1a:grazoprevir
-    -> resistance_finding.phdr_in_vivo_result_id
-    -> result_trial.phdr_clinical_trial_id
-    -> clinical_trial.nct_id                     NCT01717326
+alignment_ras_drug.id  (RAS : alignment : drug)       NS3:107I:AL_1a:grazoprevir
+  <- resistance_finding                                 GZR_107
+       .phdr_publication_id      -> publication         27773808   (exactly one per finding)
+       .phdr_in_vitro_result_id                         (no trial behind it)
+       .phdr_in_vivo_result_id
+           <- result_trial.phdr_clinical_trial_id -> clinical_trial.nct_id   NCT01717326
 ```
 
-Note that the first key already contains the RAS, the genotype **and** the drug,
-so the linkage is genotype-scoped at source. That is not a formality: trial
-support really does vary by genotype.
+A trial only ever appears behind an in-vivo result that a publication reports.
+With two separate lists, 206 entries could not say which paper reported which
+trial, and 208 mixed papers backing the in-vitro columns with papers backing the
+in-vivo ones. The long layout keeps both links:
+
+| column | holds |
+|---|---|
+| `evidence_id` | PMID, conference abstract code, or trial registry id |
+| `data_source` | `pubmed` · `conference_abstract` · `clinical_trial` |
+| `evidence_url` | DOI for publications; ClinicalTrials.gov URL for NCT trials; blank for other registries |
+| `evidence_label` | `Komatsu et al. 2017, Gastroenterology`, or every curator name for the trial (arms kept) |
+| `evidence_type` | `in_vitro`, `in_vivo` or `in_vitro;in_vivo`: which result columns this reference supports for this entry |
+| `linked_evidence_ids` | for a paper, the trials it reported for this entry; for a trial, the papers that reported it |
+| `finding_ids` | the PHDR `resistance_finding` ids behind the link |
+
+NS3:V107I against grazoprevir in 1a shows why: Guo 2017 is the only in-vitro
+source, all six trials came from the Komatsu 2017 pooled analysis, and C-EDGE TE
+is also in Kwo 2017. The flat lists showed three papers and six trials with
+nothing connecting them.
+
+### Evidence is genotype-scoped at source
+
+The entry id already contains the genotype, and support really varies by it:
 
 | `NS5A:31M` vs daclatasvir | trials |
 |---|---|
 | genotype 1a | 1 |
-| genotype 1b | **9** |
+| genotype 1b | **10** (9 NCT + UMIN000015627) |
 | genotype 2a | 5 |
 | genotype 3a | 0 |
 
-49 of the 64 (RAS, drug) pairs curated in more than one genotype have different
-trial sets, so a row takes **its own** genotype's trials rather than the union
-across the signature's scope. Unioning would attach 1b's evidence to a 1a call.
+A row takes **its own** genotype's evidence, never the union across the
+signature's scope. The row's genotype is in the `genotype` column. Without it
+the database could not attribute 113 genotype-specific resistance categories:
+NS3:V107I against grazoprevir is `category_I` in 1a and `category_II` in 1b.
 
-Only in-vivo findings carry a trial — an in-vitro EC50 has none, and rows without
-a drug get nothing. 746 of the catalogue's 1,869 rows are populated, drawing on
-all 97 distinct trials the registry contains.
+### Trial registry ids
 
-The registry CSV has 103 rows for those 97 trials. It is keyed on PHDR's own
-`id`, a curator label, so five NCT numbers appear twice — under two ids, under a
-trial name and a sponsor code, or split into two arms — and one row
-(`UMIN000015627`) is a Japanese UMIN-CTR registration with no NCT number at all.
-The loader merges the five and reports the one, so the database table is one row
-per `nct_id` and the join from `mutation_catalog` cannot double-count.
+The registry CSV has 103 rows for 98 trials. It is keyed on PHDR's own `id`, a
+curator label, so five NCT numbers appear twice: under two ids, under a trial name
+and a sponsor code, or split into arms. Trials are therefore keyed on the
+**registry id** (`evidence_sources.trial_registry_id`), meaning the NCT number or, when
+there is none, the registry's own id. `UMIN000015627` is a Japanese UMIN-CTR
+registration that two daclatasvir entries cite. It used to be dropped because it
+had no NCT number.
+
+Conference abstracts (8 of 128 publications, e.g. `AASLD_2017_Abs_1176`) are
+labelled by `data_source`, so nothing needs to parse an id as an integer to find
+out what it is.
 
 **A note on what was nearly built instead.** Before the trial tables arrived
-there was no registry identifier anywhere in the PHDR export — `publication.id`
-is a PubMed ID and `url` is a DOI — so trial status could only have been guessed
-from whether a publication's title contained the word "trial". That heuristic was
-written, then deleted when the real data landed. It is worth recording only
-because a heuristic that looks like a curated fact is worse than no field at all.
-
-**A related data-shape fact.** The column named `pubmed_id` is really
-"publication reference": 8 of its 128 values are conference abstracts with no
-PMID (`AASLD_2015_Abs_718`, `EASL_2017_Abs_THU-257`). Anything parsing that
-column as an integer will break on them.
+there was no registry identifier anywhere in the PHDR export, so trial status
+could only have been guessed from whether a publication's title contained the
+word "trial". That heuristic was written, then deleted when the real data landed.
+A heuristic that looks like a curated fact is worse than no field at all.
 
 ---
 
@@ -249,9 +286,9 @@ column as an integer will break on them.
 
 | table | contents |
 |---|---|
-| `mutation_catalog` | **not** the catalogue as loaded: one row per distinct combination of the columns the virus profile selects. For HCV that is the 12 required columns plus 14 more, including `relevant_genotypes`, `wild_type_residues` and `clinical_trials`. The PHDR join keys `alignment_name` and `display_structure` are dropped and the survivors de-duplicated — 1,869 TSV rows to 1,828. |
-| `publications` | one row per publication cited by `mutation_catalog.pubmed_id` (128). Written only with `--publications`. |
-| `clinical_trials` | one row per NCT number cited by `mutation_catalog.clinical_trials` (97). Written only with `--clinical_trials`. |
+| `mutation_catalog` | one row per distinct combination of the columns the virus profile selects. For HCV that is the 12 required columns plus `genotype`, the resistance and drug columns, the 7 evidence columns, `relevant_genotypes` and `wild_type_residues`. `display_structure` and the PHDR ids are dropped. Every row differs in genotype or evidence, so all 4,780 TSV rows survive. |
+| `publications` | one row per `evidence_id` (128), with `data_source`, title, authors, year, journal, url. Join `ON p.evidence_id = mutation_catalog.evidence_id`. Written only with `--publications`. |
+| `clinical_trials` | one row per registry id (98): `evidence_id`, `nct_id` (blank for non-NCT registries), curator `trial_id`s and `trial_name`s, `url`. Join `ON ct.evidence_id = mutation_catalog.evidence_id`. Written only with `--clinical_trials`. |
 | `sequence_relevant_mutation_summary` | per sequence, the mutations present and their count |
 | `completed_signatures_only` | per sequence, the signatures fully satisfied |
 | `sequence_mutation_calls` | **every evaluated call**, emitted or suppressed, with the reason |

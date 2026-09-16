@@ -3,6 +3,7 @@ import re
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from CreateSqliteDB import CreateSqliteDB
 
@@ -1604,3 +1605,146 @@ def test_nearest_reference_prefers_tree_over_blast_hit(tmp_path: Path):
         ("seqTree", "1", "a"),
     ]
 
+
+
+def test_create_sqlite_db_midpoint_roots_trees_and_adds_reference_only_tree(tmp_path: Path):
+    from io import StringIO
+    from Bio import Phylo
+
+    meta = tmp_path / "meta.tsv"
+    features = tmp_path / "features.tsv"
+    aln = tmp_path / "sequence_alignment.tsv"
+    gene = tmp_path / "gene.tsv"
+    m49_country = tmp_path / "m49_country.csv"
+    m49_inter = tmp_path / "m49_inter.csv"
+    m49_region = tmp_path / "m49_region.csv"
+    m49_sub = tmp_path / "m49_sub.csv"
+    proj = tmp_path / "software.tsv"
+    insertions = tmp_path / "insertions.tsv"
+    host_taxa = tmp_path / "host.tsv"
+    fasta = tmp_path / "seqs.fa"
+    iqtree = tmp_path / "iqtree.treefile"
+    ref_list = tmp_path / "ref_list.txt"
+
+    write_tsv(meta, [["A", ""], ["PV547761", ""], ["C", ""], ["D", ""], ["Q", ""]], ["primary_accession", "exclusion"])
+    write_tsv(features, [["A", "P"]], ["primary_accession", "feature"])
+    write_tsv(aln, [["A", "ATGC"]], ["primary_accession", "aligned_seq"])
+    write_tsv(gene, [["geneA", "Gene A"]], ["name", "description"])
+    write_csv(m49_country, [["001", "World"]], ["m49_code", "name"])
+    write_csv(m49_inter, [["X", "Inter"]], ["code", "name"])
+    write_csv(m49_region, [["Y", "Region"]], ["code", "name"])
+    write_csv(m49_sub, [["Z", "SubRegion"]], ["code", "name"])
+    write_tsv(proj, [["Python", "3.11"]], ["Software", "Version"])
+    write_tsv(insertions, [["A", "none"]], ["primary_accession", "insertions"])
+    write_tsv(host_taxa, [["A", "host1"]], ["primary_accession", "host"])
+    fasta.write_text(">A\nATGC\n", encoding="utf-8")
+
+    # IQ-TREE style: unrooted, three children under the root. B carries a
+    # version suffix the reference list does not, and Q/C are not references.
+    iqtree.write_text("(A:0.1,(PV547761.1:0.2,Q:0.05)90:0.3,(C:0.4,D:0.6)80:0.2);\n", encoding="utf-8")
+    ref_list.write_text("A\tmaster\t1\nPV547761\treference\t1\nD\treference\t1\n", encoding="utf-8")
+
+    db = CreateSqliteDB(
+        meta_data=str(meta), features=str(features), pad_aln=str(aln), gene_info=str(gene),
+        m49_countries=str(m49_country), m49_interm_region=str(m49_inter),
+        m49_regions=str(m49_region), m49_sub_regions=str(m49_sub),
+        proj_settings=str(proj), fasta_sequence_file=str(fasta),
+        insertions=str(insertions), host_taxa_file=str(host_taxa),
+        base_dir=str(tmp_path), output_dir="SqliteDB", db_name="rooted",
+        db_status="new db", iqtree_file=str(iqtree), reference_tsv=str(ref_list),
+    )
+    db.create_db()
+
+    conn = sqlite3.connect(tmp_path / "SqliteDB" / "rooted.db")
+    rows = {name: (source, newick) for name, source, newick in conn.execute("SELECT name, source, newick FROM trees")}
+    conn.close()
+
+    assert set(rows) == {"iqtree", "iqtree_reference_only"}
+    assert rows["iqtree_reference_only"][0] == "iqtree_reference_only"
+
+    def parse(newick):
+        return Phylo.read(StringIO(newick), "newick")
+
+    def pairwise(tree):
+        lookup = {t.name: t for t in tree.get_terminals()}
+        names = sorted(lookup)
+        return {(a, b): round(tree.distance(lookup[a], lookup[b]), 9) for i, a in enumerate(names) for b in names[i + 1:]}
+
+    raw = parse(iqtree.read_text())
+    full = parse(rows["iqtree"][1])
+    assert len(full.root.clades) == 2
+    assert pairwise(full) == pairwise(raw)
+    # Diameter is PV547761.1..D = 0.2 + 0.3 + 0.2 + 0.6 = 1.3, so the deepest tip is 0.65 from the root.
+    assert max(full.distance(full.root, t) for t in full.get_terminals()) == pytest.approx(0.65)
+
+    ref_only = parse(rows["iqtree_reference_only"][1])
+    assert {t.name for t in ref_only.get_terminals()} == {"A", "PV547761.1", "D"}
+    assert len(ref_only.root.clades) == 2
+    expected = {pair: d for pair, d in pairwise(raw).items() if set(pair) <= {"A", "PV547761.1", "D"}}
+    assert pairwise(ref_only) == expected
+
+
+def test_create_sqlite_db_stores_one_iqtree_when_manifest_repeats_the_file(tmp_path: Path):
+    """Both callers pass the first treefile as -it AND list it in the manifest.
+
+    That used to store it twice, once as an unlabelled "iqtree" row. The
+    segment-labelled manifest row is the one that should survive.
+    """
+    meta = tmp_path / "meta.tsv"
+    features = tmp_path / "features.tsv"
+    aln = tmp_path / "sequence_alignment.tsv"
+    gene = tmp_path / "gene.tsv"
+    m49_country = tmp_path / "m49_country.csv"
+    m49_inter = tmp_path / "m49_inter.csv"
+    m49_region = tmp_path / "m49_region.csv"
+    m49_sub = tmp_path / "m49_sub.csv"
+    proj = tmp_path / "software.tsv"
+    insertions = tmp_path / "insertions.tsv"
+    host_taxa = tmp_path / "host.tsv"
+    fasta = tmp_path / "seqs.fa"
+    tree_manifest = tmp_path / "tree_manifest.tsv"
+    tree_dir = tmp_path / "iqtree_inputs" / "IQTree_MMseqClusters_refset_1"
+    tree_dir.mkdir(parents=True)
+    treefile = tree_dir / "iqtree.treefile"
+
+    write_tsv(meta, [["A", "", "1"], ["B", "", "1"], ["C", "", "1"]], ["primary_accession", "exclusion", "segment"])
+    write_tsv(features, [["A", "P"]], ["primary_accession", "feature"])
+    write_tsv(aln, [["A", "ATGC"]], ["primary_accession", "aligned_seq"])
+    write_tsv(gene, [["geneA", "Gene A"]], ["name", "description"])
+    write_csv(m49_country, [["001", "World"]], ["m49_code", "name"])
+    write_csv(m49_inter, [["X", "Inter"]], ["code", "name"])
+    write_csv(m49_region, [["Y", "Region"]], ["code", "name"])
+    write_csv(m49_sub, [["Z", "SubRegion"]], ["code", "name"])
+    write_tsv(proj, [["Python", "3.11"]], ["Software", "Version"])
+    write_tsv(insertions, [["A", "none"]], ["primary_accession", "insertions"])
+    write_tsv(host_taxa, [["A", "host1"]], ["primary_accession", "host"])
+    fasta.write_text(">A\nATGC\n", encoding="utf-8")
+
+    treefile.write_text("(A:0.1,B:0.2,C:0.3);\n", encoding="utf-8")
+    # Relative in the manifest, absolute as -it: still the same file.
+    write_tsv(
+        tree_manifest,
+        [["iqtree", "iqtree_refset_1", "refset_1", str(treefile.relative_to(tmp_path))]],
+        ["source", "name", "segment_key", "path"],
+    )
+
+    import os
+    cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        CreateSqliteDB(
+            meta_data=str(meta), features=str(features), pad_aln=str(aln), gene_info=str(gene),
+            m49_countries=str(m49_country), m49_interm_region=str(m49_inter),
+            m49_regions=str(m49_region), m49_sub_regions=str(m49_sub),
+            proj_settings=str(proj), fasta_sequence_file=str(fasta),
+            insertions=str(insertions), host_taxa_file=str(host_taxa),
+            base_dir=str(tmp_path), output_dir="SqliteDB", db_name="one_iqtree",
+            db_status="new db", iqtree_file=str(treefile), tree_manifest=str(tree_manifest),
+        ).create_db()
+    finally:
+        os.chdir(cwd)
+
+    conn = sqlite3.connect(tmp_path / "SqliteDB" / "one_iqtree.db")
+    rows = conn.execute("SELECT name, source, segment FROM trees WHERE source='iqtree'").fetchall()
+    conn.close()
+    assert rows == [("iqtree_refset_1", "iqtree", "1")]

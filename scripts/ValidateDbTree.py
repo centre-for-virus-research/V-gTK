@@ -1,4 +1,5 @@
 import argparse
+import bisect
 import os
 import sqlite3
 from io import StringIO
@@ -812,6 +813,36 @@ def _try_parse_int(value):
         return None
 
 
+def _master_residue_columns(conn, masters):
+    """``{master accession: sorted 1-based alignment columns holding a master base}``.
+
+    A features row's span is clamped by CalcAlignmentCord to the master bases the
+    row covers, so the columns a row can start or end on are master-residue
+    columns. When the master row carries gaps (a guide or built backbone), a row
+    whose first or last base falls in an insertion column has an aligned span
+    wider than any master base it covers, and comparing against the raw span
+    misreports a correct projection. Empty when the table is absent.
+    """
+    masters = sorted({m for m in masters if m})
+    if not masters or not table_exists(conn, "sequence_alignment"):
+        return {}
+    columns = get_table_columns(conn, "sequence_alignment")
+    if "primary_accession" not in columns or "alignment" not in columns:
+        return {}
+    out = {}
+    for start in range(0, len(masters), 500):
+        chunk = masters[start:start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        for accession, alignment in conn.execute(
+            f"SELECT primary_accession, alignment FROM sequence_alignment WHERE primary_accession IN ({placeholders})",
+            chunk,
+        ):
+            if accession in out or not alignment:
+                continue
+            out[accession] = [i for i, char in enumerate(str(alignment), start=1) if char not in "-."]
+    return out
+
+
 def validate_feature_projection_integrity(conn):
     title = "feature projection integrity"
     if not table_exists(conn, "features"):
@@ -852,6 +883,10 @@ def validate_feature_projection_integrity(conn):
             continue
         master_spans.setdefault((accession_text, product_text), []).append((start, end))
 
+    master_columns = _master_residue_columns(
+        conn, {str(row[1]).strip() for row in feature_rows if row[1] is not None}
+    )
+
     offending_rows = []
     unresolved_master_rows = 0
     invalid_aln_rows = 0
@@ -881,9 +916,18 @@ def validate_feature_projection_integrity(conn):
             cds_end_int = min(cds_end_int, aln_end_int)
         
         expected_matches = False
+        residue_columns = master_columns.get(master_text)
         for master_start, master_end in master_product_spans:
             expected_start = max(master_start, aln_start_int)
             expected_end = min(master_end, aln_end_int)
+            if residue_columns:
+                # Snap to the master bases the row actually covers (see
+                # _master_residue_columns); a no-op for an ungapped master.
+                first = bisect.bisect_left(residue_columns, expected_start)
+                last = bisect.bisect_right(residue_columns, expected_end) - 1
+                if first < len(residue_columns) and last >= 0:
+                    expected_start = residue_columns[first]
+                    expected_end = residue_columns[last]
             if expected_start <= expected_end:
                 if cds_start_int == expected_start and cds_end_int == expected_end:
                     expected_matches = True

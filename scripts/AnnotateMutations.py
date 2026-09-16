@@ -16,6 +16,11 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 from ExploreMutationStorageLayouts import build_completed_signatures_only, build_sequence_relevant_mutation_summary
+import reading_frame
+from evidence_sources import (
+    EVIDENCE_COLUMNS, VALUE_SEP, publication_source,
+    trial_registry_id, trial_url,
+)
 
 REQUIRED_MUTATION_CATALOG_COLUMNS = [
     'mutation_id',
@@ -68,18 +73,21 @@ VIRUS_PROFILES = {
     },
     'hcv': {
         'columns': [
-            'resistance_category', 'drug', 'drug_category', 'drug_producer', 'pubmed_id',
-            'DOI', 'any_in_vitro_evidence', 'in_vitro_max_ec50_midpoint',
+            'genotype',
+            'resistance_category', 'drug', 'drug_category', 'drug_producer',
+            'any_in_vitro_evidence', 'in_vitro_max_ec50_midpoint',
             'any_in_vivo_evidence', 'in_vivo_baseline', 'in_vivo_treatment_emergent',
-            # The three generic columns BuildCatalogGenotypeColumns.py appends.
-            # They are what makes a catalogue row self-describing in the
-            # database: the genotypes it was curated in, the wild type it was
-            # judged against, and the trials behind it.  clinical_trials has no
-            # other route in - without it the clinical_trials registry table is
-            # written on every HCV build and joined to by nothing.  Listed last
-            # because they are last in the catalogue TSV, so this profile and
-            # 'all_columns' agree on their order.
-            'relevant_genotypes', 'wild_type_residues', 'clinical_trials',
+            # One evidence reference per row (scripts/BuildHcvEvidenceCatalog.py).
+            # evidence_id joins to publications.evidence_id or
+            # clinical_trials.evidence_id, as data_source says; linked_evidence_ids
+            # keeps which paper reported which trial.
+            *EVIDENCE_COLUMNS,
+            # genotype is the ROW's genotype - the one its resistance category,
+            # evidence and trials belong to.  relevant_genotypes is the
+            # SIGNATURE's whole scope, which is what the genotype gate needs.
+            # Without genotype the 1a and 1b rows of one finding reach the
+            # database indistinguishable, their categories unattributable.
+            'relevant_genotypes', 'wild_type_residues',
         ],
         # The ten HCV mature peptides. 'core' and 'E1'/'E2' are the reason this
         # list must not be applied to another virus: they are ordinary English
@@ -1294,6 +1302,12 @@ def resolve_master_coordinate_space(seq_aln, coord_candidates, db_gff_maps, alia
     return None, None, None
 
 
+#: The catalogue fields a call record is built from. Rows agreeing on all of
+#: them yield identical calls.
+CALL_ROW_IDENTITY_COLUMNS = ('mutation_id', '_segment_norm', '_alt_residue_norm',
+                             'combination_id', 'signature_id', 'signature_kind')
+
+
 def build_segment_position_index(catalog, master_coord_map, master_feature_map, diagnostics,
                                  protein_miss_counts, proteins_resolved):
     """``{(protein, aa_pos, alignment_indices): {alt_residue: [rows]}}`` for one segment.
@@ -1304,6 +1318,7 @@ def build_segment_position_index(catalog, master_coord_map, master_feature_map, 
     coordinate the master's alignment does not carry.
     """
     grouped_positions = {}
+    seen_identities = set()
     mappable_catalog_rows = 0
 
     for _, row in catalog.iterrows():
@@ -1343,16 +1358,24 @@ def build_segment_position_index(catalog, master_coord_map, master_feature_map, 
             diagnostics['reference_coordinate_missing_in_alignment'] += 1
             continue
 
-        position_catalog = grouped_positions.setdefault(
-            (protein_name, aa_pos, tuple(alignment_indices)), {}
-        )
-        position_catalog.setdefault(row['_alt_residue_norm'], []).append(row)
+        position_key = (protein_name, aa_pos, tuple(alignment_indices))
+        position_catalog = grouped_positions.setdefault(position_key, {})
         mappable_catalog_rows += 1
+        # A catalogue entry spans one row per genotype, drug and evidence
+        # reference, but a call is made from its identity alone. Matching every
+        # copy produced identical records, de-duplicated only after the whole
+        # build had been scanned.
+        identity = tuple(clean_cell(row.get(column, '')) for column in CALL_ROW_IDENTITY_COLUMNS)
+        if (position_key, identity) in seen_identities:
+            continue
+        seen_identities.add((position_key, identity))
+        position_catalog.setdefault(row['_alt_residue_norm'], []).append(row)
 
     return grouped_positions, mappable_catalog_rows
 
 
-def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_lookup, db_gff_maps, allow_genbank_reference_gff, call_evidence=None):
+def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_lookup, db_gff_maps, allow_genbank_reference_gff, call_evidence=None,
+                                        record_lookup=None, frame_scan=None):
     """Annotate every sequence, gated by genotype scope and per-genotype wild type.
 
     ``call_evidence``, when a list is supplied, is filled with one record per
@@ -1360,6 +1383,15 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
     scope tier it matched on and whether the residue was a change, an anchor
     (equal to the wild type) or wild-type-unknown.  The returned mutation list
     contains only the emitted calls.
+
+    ``record_lookup(accession, segment)`` returns a sequence's submitted record.
+    With it, every catalogue codon is read from the record in the protein's own
+    reading frame (reading_frame.ProteinFrame) instead of trusting the three
+    alignment columns, which nextalign can fill with bases from a misaligned,
+    out-of-frame stretch.  Without it - a database with no ``sequences`` table,
+    or a unit test handing over alignments alone - codons are read from the
+    columns exactly as before.  ``frame_scan``, when a list is supplied, gets one
+    row per (sequence, protein) whose frame needed attention.
     """
     master_candidates = []
     if meta_data is not None and not meta_data.empty and {'primary_accession', 'accession_type'}.issubset(meta_data.columns):
@@ -1525,6 +1557,24 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
         if not grouped_positions:
             continue
 
+        # A record's frame is judged across the whole protein, not from the one
+        # codon a catalogue row asks about, so each catalogued protein gets its
+        # full codon grid in the master's columns.
+        protein_grids = {}
+        master_alignment = None
+        if record_lookup is not None:
+            master_rows = segment_aln[segment_aln['sequence_id'].astype(str).str.strip() == str(coord_ref_acc)]
+            if not master_rows.empty:
+                master_alignment = master_rows.iloc[0]['alignment']
+            for protein_name in {key[0] for key in grouped_positions}:
+                gene_entry = feature_map[protein_name]
+                feature_end = gene_entry.get('cds_end')
+                if feature_end is None:
+                    last_position = max(pos for name, pos, _ in grouped_positions if name == protein_name)
+                    feature_end = gene_entry['cds_start'] + last_position * 3 - 1
+                protein_grids[protein_name] = reading_frame.codon_grid(
+                    coord_map, gene_entry['cds_start'], feature_end)
+
         for _, seq_row in segment_aln.iterrows():
             alignment = seq_row['alignment']
             primary_accession = seq_row['sequence_id']
@@ -1542,16 +1592,50 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
                 # whatsoever.
                 diagnostics['sequences_without_sequenced_bases'] += 1
                 continue
+
+            mapping = None
+            frames = {}
+            corrected_codons, guarded_codons = Counter(), Counter()
+            if protein_grids:
+                record = record_lookup(primary_accession, seq_row['_segment_norm'])
+                if not record:
+                    diagnostics['sequences_without_record'] += 1
+                else:
+                    mapping = reading_frame.RecordMapping(alignment, record)
+                    if not mapping.mapped:
+                        # The row's bases are not a subsequence of its own record,
+                        # so nothing can be placed; the columns are all there is.
+                        diagnostics['sequences_record_not_placeable'] += 1
+
             for (protein_name, aa_pos, alignment_indices), alt_lookup in grouped_positions.items():
                 codon = extract_aligned_codon(alignment, alignment_indices)
                 if codon is None:
                     diagnostics['codon_out_of_bounds'] += 1
                     continue
                 aa = residue_from_aligned_codon(codon, covered_span, alignment_indices)
+                codon_read = 'alignment'
+                if mapping is not None and mapping.mapped and protein_name in protein_grids:
+                    frame = frames.get(protein_name)
+                    if frame is None:
+                        frame = frames[protein_name] = reading_frame.ProteinFrame(
+                            mapping, protein_grids[protein_name], translate_codon,
+                            UNKNOWN_RESIDUE, master_alignment)
+                    record_aa, verdict = frame.read(alignment_indices)
+                    if verdict in reading_frame.GUARDS:
+                        diagnostics[f'codon_{verdict}'] += 1
+                        guarded_codons[protein_name] += 1
+                        aa = record_aa
+                    elif verdict != reading_frame.DEFER:
+                        codon_read = 'record'
+                        if record_aa != aa:
+                            diagnostics['codon_corrected_from_record'] += 1
+                            corrected_codons[protein_name] += 1
+                            codon_read = 'record_corrected'
+                        aa = record_aa
                 if aa == UNKNOWN_RESIDUE:
                     # 'X' is the absence of a reading, not a residue.  Letting it
                     # match meant any catalogue row spelled 'X' - a shape the
-                    # normalizer's [A-Z*] token grammar admits - fired on every
+                    # normaliser's [A-Z*] token grammar admits - fired on every
                     # unsequenced or ambiguous codon, flagging the worst-covered
                     # records the hardest.
                     diagnostics['codon_residue_unresolved'] += 1
@@ -1601,6 +1685,7 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
                         'wild_type_scope_tier': wild_type_tier,
                         'residue_status': residue_status,
                         'call_status': call_status,
+                        'codon_read': codon_read,
                     }
                     if call_evidence is not None:
                         call_evidence.append(record)
@@ -1621,6 +1706,21 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
                     diagnostics[f'emitted_{residue_status}'] += 1
                     if aa == DELETION_RESIDUE:
                         diagnostics['emitted_deletions'] += 1
+
+            if frame_scan is not None:
+                for protein_name, frame in frames.items():
+                    if not (frame.has_issue or corrected_codons[protein_name] or guarded_codons[protein_name]):
+                        continue
+                    diagnostics['frame_scan_rows'] += 1
+                    frame_scan.append({
+                        'primary_accession': primary_accession,
+                        'segment': seq_row['_segment_norm'],
+                        'protein_name': protein_name,
+                        'master_accession': coord_ref_acc,
+                        **frame.scan_row(),
+                        'catalogue_codons_corrected': corrected_codons[protein_name],
+                        'catalogue_codons_guarded': guarded_codons[protein_name],
+                    })
 
     if not resolved_maps:
         message = (
@@ -1697,9 +1797,26 @@ MUTATION_CALL_PROVENANCE_COLUMNS = [
     'wild_type_scope_tier',
     'residue_status',
     'call_status',
+    # Where the residue came from: 'alignment' (no record to check against),
+    # 'record' (the submitted record agrees with the alignment columns) or
+    # 'record_corrected' (the columns held bases from a misaligned stretch and
+    # the record's own in-frame codon was read instead). See reading_frame.py.
+    'codon_read',
 ]
 
 MUTATION_CALL_COLUMNS = MUTATION_CALL_IDENTITY_COLUMNS + MUTATION_CALL_PROVENANCE_COLUMNS
+
+#: One row per (sequence, catalogued protein) whose reading frame needed
+#: attention: codons split or shifted by the alignment, frame-shifting indels,
+#: a broken record ORF, or a catalogue codon that was corrected or guarded.
+FRAME_SCAN_COLUMNS = [
+    'primary_accession', 'segment', 'protein_name', 'master_accession',
+    'frame_status', 'record_orientation', 'record_frame_phase', 'frame_tie_broken_by_orf',
+    'off_frame_codons', 'off_frame_codon_runs', 'split_codons', 'split_codon_list',
+    'displaced_codons', 'unresolved_codons',
+    'gapped_codons', 'ambiguous_codons', 'insertions', 'deletions', 'frameshift_indels',
+    'record_internal_stops', 'catalogue_codons_corrected', 'catalogue_codons_guarded',
+]
 
 
 def build_mutation_call_table(records):
@@ -1721,7 +1838,7 @@ def build_mutation_call_table(records):
 
 
 def write_mutation_tables(conn, catalog, mutations_found, catalog_column_profile, call_evidence=None,
-                          publications=None, clinical_trials=None):
+                          publications=None, clinical_trials=None, frame_scan=None):
     # The compact layout tables are keyed on the identity columns alone, so the
     # provenance columns are kept out of them and land in
     # sequence_mutation_calls instead - joining on a wider frame would change
@@ -1743,35 +1860,31 @@ def write_mutation_tables(conn, catalog, mutations_found, catalog_column_profile
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_mut_catalog_seg_prot ON mutation_catalog(segment, protein_name)')
     if 'combination_id' in df_catalog.columns:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_mut_catalog_comb ON mutation_catalog(combination_id)')
+    if 'evidence_id' in df_catalog.columns:
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_mut_catalog_evidence ON mutation_catalog(evidence_id)')
 
-    if publications is not None and not publications.empty:
-        print(f'Writing publications table ({len(publications)} rows)...')
-        cursor.execute('DROP TABLE IF EXISTS publications')
-        publications.to_sql('publications', conn, if_exists='replace', index=False)
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_publications_pmid ON publications(pubmed_id)')
+    # Both lookup tables are keyed on evidence_id, the value mutation_catalog
+    # carries, so each resolves with a plain equality join and one row per key.
+    for name, table in (('publications', publications), ('clinical_trials', clinical_trials)):
+        if table is None or table.empty:
+            continue
+        print(f'Writing {name} table ({len(table)} rows)...')
+        duplicates = table.loc[table['evidence_id'].duplicated(), 'evidence_id'].tolist()
+        if duplicates:
+            # A repeated key would fan the join out and double-count the
+            # evidence behind every row citing it.
+            raise ValueError(f'{name} must be one row per evidence_id before it is written; '
+                             f'repeated: {", ".join(sorted(set(duplicates)))}')
+        cursor.execute(f'DROP TABLE IF EXISTS {name}')
+        table.to_sql(name, conn, if_exists='replace', index=False)
+        cursor.execute(f'CREATE UNIQUE INDEX IF NOT EXISTS idx_{name}_evidence ON {name}(evidence_id)')
 
-    if clinical_trials is not None and not clinical_trials.empty:
-        print(f'Writing clinical_trials table ({len(clinical_trials)} rows)...')
-        duplicate_ncts = clinical_trials.loc[clinical_trials['nct_id'].duplicated(), 'nct_id'].tolist()
-        if duplicate_ncts:
-            # The unique index below would catch this, but only after to_sql has
-            # written the rows and before conn.commit() - an IntegrityError
-            # naming nothing, over a half-written database.  Say which ids.
-            raise ValueError(
-                'clinical_trials must be one row per nct_id before it is written; '
-                f'{len(duplicate_ncts)} duplicate(s): {sorted(set(duplicate_ncts))[:5]}'
-            )
-        cursor.execute('DROP TABLE IF EXISTS clinical_trials')
-        clinical_trials.to_sql('clinical_trials', conn, if_exists='replace', index=False)
-        # UNIQUE, not merely indexed: one row per nct_id is the property that
-        # makes the join from mutation_catalog.clinical_trials safe, and a
-        # constraint states it to anyone reading the schema.  A loader that
-        # regresses then fails at build time instead of silently doubling the
-        # trial evidence in every downstream query.
-        cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_clinical_trials_nct ON clinical_trials(nct_id)')
 
     print('Writing compact mutation summary tables...')
-    df_catalog_for_layouts = catalog.fillna('').copy()
+    # The layout builders join calls to catalogue entries; the per-reference
+    # evidence rows would only multiply that join.
+    df_catalog_for_layouts = catalog.fillna('').drop(
+        columns=[c for c in EVIDENCE_COLUMNS if c in catalog.columns]).drop_duplicates()
     df_relevant_summary = build_sequence_relevant_mutation_summary(df_mut)
     df_completed_signatures = build_completed_signatures_only(df_mut, df_catalog_for_layouts)
 
@@ -1806,119 +1919,135 @@ def write_mutation_tables(conn, catalog, mutations_found, catalog_column_profile
     else:
         cursor.execute('CREATE TABLE completed_signatures_only (primary_accession TEXT, signature_id TEXT, signature_kind TEXT)')
 
+    if frame_scan is not None:
+        # Rebuilt whole every run, like the call tables: it describes the
+        # alignment the calls above were read from, and nothing else.
+        print(f'Writing reading-frame scan ({len(frame_scan)} rows)...')
+        cursor.execute('DROP TABLE IF EXISTS sequence_reading_frame_scan')
+        pd.DataFrame(frame_scan, columns=FRAME_SCAN_COLUMNS).to_sql(
+            'sequence_reading_frame_scan', conn, if_exists='replace', index=False)
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_frame_scan_acc ON sequence_reading_frame_scan(primary_accession)')
+
     conn.commit()
 
-#: Separator for a multi-valued string field, as everywhere else in this
-#: catalogue: pubmed_id, clinical_trials and relevant_genotypes all use it, and
-#: no trial id or display name in the registry contains one.  A comma would have
-#: been ambiguous - 'Magellan-1, Part 1' is a single trial name.
-TRIAL_VALUE_SEP = ';'
-
-
 def load_clinical_trials_table(clinical_trial_path):
-    """The trial registry, merged to one row per NCT identifier.
+    """The trial registry, one row per ``evidence_id``.
 
-    ``mutation_catalog.clinical_trials`` holds semicolon-separated NCT numbers,
-    scoped per (mutation, genotype, drug) - trial support genuinely varies by
-    genotype, so NS5A:31M against daclatasvir cites one trial in genotype 1a and
-    nine in 1b. This loads the registry rows so an NCT resolves to the trial's
-    name rather than staying an opaque accession.
+    ``mutation_catalog.evidence_id`` holds a trial's registry number on rows
+    whose ``data_source`` is ``clinical_trial``.  This loads the registry so
+    that number resolves to the trial's name.
 
-    PHDR keys the registry on its own ``id``, a curator label, not on the
-    registry number, so five NCT numbers arrive twice: the same registration
-    curated under two ids (ALLY-2 / NCT02032888, M12-536 / NCT01672983), one
-    carrying a sponsor code beside its name (ASTRAL-1 / GS-US-342-1138), and two
-    split into arms (C-WORTHy Part D, Magellan-1 Parts 1 and 2).  Loaded verbatim
-    those five fan the join out: the catalogue's 2,290 (row, trial) pairs become
-    2,597, inflating the visible evidence by 13% on exactly the rows citing the
-    most widely used trials.
+    PHDR keys the registry on its own ``id``, a curator label, so five NCT
+    numbers arrive twice: the same registration under two ids (ALLY-2 /
+    NCT02032888, M12-536 / NCT01672983), a sponsor code beside a name (ASTRAL-1
+    / GS-US-342-1138), and trials split into arms (C-WORTHy Part D, Magellan-1
+    Parts 1 and 2).  Loaded verbatim those fan the join out.  So one row per
+    registry id, keeping every DISTINCT curator id and name, joined.
 
-    So one row per nct_id, keeping every DISTINCT id and every DISTINCT name,
-    joined; a group agreeing on both fields collapses to one value.  Nothing a
-    curator wrote is lost and nothing is duplicated.
+    A trial with no NCT number is keyed on its own id (evidence_sources.
+    trial_registry_id): UMIN000015627, a Japanese UMIN-CTR registration, is a
+    real trial that two daclatasvir entries cite, and used to be dropped here.
 
-    A registry row with no NCT number cannot be keyed and is not loaded, but it
-    is reported rather than vanishing: PHDR carries one, UMIN000015627, a
-    Japanese UMIN-CTR registration with no ClinicalTrials.gov entry.  Nothing in
-    the catalogue cites it.
-
-    Optional. Without it the NCT identifiers are still present and still
-    correct, just not resolvable inside the database.
+    Optional.  Without it the registry ids are still present and correct, just
+    not resolvable inside the database.
     """
     if not clinical_trial_path or not os.path.isfile(clinical_trial_path):
         return None
 
     # dicts, not sets, for the group members: dicts preserve insertion order, so
-    # a merged value is the curator's own order and is byte-identical run to
-    # run.  Set order follows hash order, which would show up as unexplainable
-    # churn in every checksum diff.
-    merged = defaultdict(lambda: ({}, {}))
+    # a merged value is the curator's own order and byte-identical run to run.
+    merged = defaultdict(lambda: ({}, {}, {}))
     source_rows = 0
-    without_nct = []
     with open(clinical_trial_path, newline='', encoding='utf-8', errors='replace') as handle:
         for row in csv.DictReader(handle):
             source_rows += 1
-            nct = (row.get('nct_id') or '').strip()
             trial_id = (row.get('id') or '').strip()
             trial_name = (row.get('display_name') or '').strip()
-            if not nct:
-                without_nct.append(trial_id or trial_name or '<unnamed>')
+            nct = (row.get('nct_id') or '').strip()
+            registry_id = trial_registry_id(nct, trial_id)
+            if not registry_id:
                 continue
-            ids, names = merged[nct]
-            if trial_id:
-                ids[trial_id] = None
-            if trial_name:
-                names[trial_name] = None
-
-    if without_nct:
-        print(
-            f'[AnnotateMutations][warn] {len(without_nct)} trial registry row(s) carry no '
-            f'nct_id and are not loaded: {", ".join(without_nct)}'
-        )
+            ncts, ids, names = merged[registry_id]
+            for bucket, value in ((ncts, nct), (ids, trial_id), (names, trial_name)):
+                if value:
+                    bucket[value] = None
     if not merged:
         return None
 
     rows = [
         {
-            'nct_id': nct,
-            'trial_id': TRIAL_VALUE_SEP.join(ids),
-            'trial_name': TRIAL_VALUE_SEP.join(names),
+            'evidence_id': registry_id,
+            'nct_id': VALUE_SEP.join(ncts),
+            'trial_id': VALUE_SEP.join(ids),
+            'trial_name': VALUE_SEP.join(names),
+            'url': trial_url(registry_id),
         }
-        for nct, (ids, names) in merged.items()
+        for registry_id, (ncts, ids, names) in merged.items()
     ]
-    fanned = sum(1 for ids, names in merged.values() if len(ids) > 1 or len(names) > 1)
+    fanned = sum(1 for _, ids, names in merged.values() if len(ids) > 1 or len(names) > 1)
+    without_nct = sum(1 for ncts, _, _ in merged.values() if not ncts)
     print(
         f'[AnnotateMutations] Trial registry: {source_rows} rows -> {len(rows)} trials '
-        f'({fanned} merged from duplicate nct_id, {len(without_nct)} without an nct_id)'
+        f'({fanned} merged from a shared registry id, {without_nct} registered without an NCT number)'
     )
-    return pd.DataFrame(rows, columns=['nct_id', 'trial_id', 'trial_name'])
+    return pd.DataFrame(rows, columns=['evidence_id', 'nct_id', 'trial_id', 'trial_name', 'url'])
+
+
+def load_record_lookup(conn):
+    """``lookup(accession, segment) -> submitted record``, or None without one.
+
+    One indexed query per sequence rather than the table in memory: the full
+    HCV build's records are ~1.4 GB of text on top of the alignments already
+    loaded.  A header stored under several segments (influenza) is resolved by
+    segment; a single row is taken as is, because the shipped HCV build spells
+    the same segment both '1' and '1.0'.
+    """
+    try:
+        columns = {row[1] for row in conn.execute('PRAGMA table_info(sequences)')}
+    except sqlite3.DatabaseError:
+        columns = set()
+    if not {'header', 'sequence'} <= columns:
+        print('[AnnotateMutations][warn] No sequences table: codons are read from alignment '
+              'columns alone, with no reading-frame check against the submitted records')
+        return None
+    select = 'SELECT sequence, segment FROM sequences WHERE header = ?' if 'segment' in columns \
+        else 'SELECT sequence, NULL FROM sequences WHERE header = ?'
+
+    def lookup(accession, segment):
+        rows = conn.execute(select, (str(accession).strip(),)).fetchall()
+        if len(rows) > 1:
+            rows = [row for row in rows if normalize_segment(row[1]) == normalize_segment(segment)]
+        return str(rows[0][0]) if len(rows) == 1 and rows[0][0] else None
+
+    return lookup
 
 
 def load_publications_table(publications_path):
-    """Read the publication metadata that PMIDs in the catalogue refer to.
+    """Publication metadata, one row per ``evidence_id``.
 
-    ``mutation_catalog.pubmed_id`` holds semicolon-separated PubMed IDs and is
-    already genotype-scoped - the same signature and drug cites different
-    publications in different genotypes, which survived the catalogue build
-    intact. But a bare PMID is not usable evidence on its own: nothing in the
-    database says what 27773808 is.
+    ``mutation_catalog.evidence_id`` holds a publication reference on rows whose
+    ``data_source`` is ``pubmed`` or ``conference_abstract``.  A bare reference
+    is not usable evidence on its own - nothing in the database says what
+    27773808 is - so this loads title / authors / year / journal / url.
 
-    This loads the 128 rows of title / authors / year / journal / url so a PMID
-    resolves to something a reader can act on, and flags the ones whose titles
-    identify them as clinical trials.
+    8 of PHDR's 128 references are conference abstracts with no PMID
+    (AASLD_2017_Abs_1176); ``data_source`` says which is which, so nothing has
+    to parse the id as an integer to find out.
 
-    Optional. Without it the database is exactly as it was - PMIDs present,
-    unresolvable.
+    Optional.  Without it the references are present but unresolvable.
     """
     if not publications_path or not os.path.isfile(publications_path):
         return None
     rows = []
     with open(publications_path, newline='', encoding='utf-8', errors='replace') as handle:
         for row in csv.DictReader(handle):
-            title = (row.get('title') or '').strip()
+            evidence_id = (row.get('id') or '').strip()
+            if not evidence_id:
+                continue
             rows.append({
-                'pubmed_id': (row.get('id') or '').strip(),
-                'title': title,
+                'evidence_id': evidence_id,
+                'data_source': publication_source(evidence_id),
+                'title': (row.get('title') or '').strip(),
                 'authors': (row.get('authors_short') or '').strip(),
                 'year': (row.get('year') or '').strip(),
                 'journal': (row.get('journal') or '').strip(),
@@ -1941,11 +2070,12 @@ def main():
     )
     parser.add_argument("--publications", default=None,
         help="Optional publication metadata CSV (id/title/authors_short/year/journal/url). "
-             "Loaded into a publications table so the PMIDs already in mutation_catalog.pubmed_id "
-             "resolve to something readable. Without it those PMIDs stay bare numbers.")
+             "Loaded into a publications table keyed on evidence_id, so publication references in "
+             "mutation_catalog.evidence_id resolve to something readable.")
     parser.add_argument("--clinical_trials", default=None,
         help="Optional clinical trial registry CSV (id/display_name/nct_id). Loaded into a "
-             "clinical_trials table so the NCT ids in mutation_catalog.clinical_trials resolve "
+             "clinical_trials table keyed on evidence_id (the NCT number, or the registry's own id "
+             "when there is none), so trial references in mutation_catalog.evidence_id resolve "
              "to trial names.")
     parser.add_argument(
         "--catalog_column_profile",
@@ -2019,9 +2149,11 @@ def main():
             print(f'[AnnotateMutations][warn] Skipping {invalid_positions} catalog rows with invalid aa_position values')
 
         db_gff_maps = load_db_gff_feature_maps(conn, gene_alias_lookup)
+        record_lookup = load_record_lookup(conn)
 
         print('Extracting mutations...')
         call_evidence = []
+        frame_scan = [] if record_lookup is not None else None
         mutations_found, diagnostics, resolved_maps = annotate_from_reference_coordinates(
             catalog,
             # `segment` travels with the alignment: dropping it here was what
@@ -2033,6 +2165,8 @@ def main():
             db_gff_maps,
             args.allow_genbank_reference_gff,
             call_evidence=call_evidence,
+            record_lookup=record_lookup,
+            frame_scan=frame_scan,
         )
         print(
             '[AnnotateMutations] Resolved reference coordinate maps for: '
@@ -2052,7 +2186,8 @@ def main():
         write_mutation_tables(conn, catalog, mutations_found, catalog_column_profile,
                               call_evidence=call_evidence,
                               publications=load_publications_table(args.publications),
-                              clinical_trials=load_clinical_trials_table(args.clinical_trials))
+                              clinical_trials=load_clinical_trials_table(args.clinical_trials),
+                              frame_scan=frame_scan)
     except AnnotationMappingError as exc:
         print(f'Error: {exc}', file=sys.stderr)
         conn.close()

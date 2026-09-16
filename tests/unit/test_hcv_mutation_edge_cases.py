@@ -1,7 +1,7 @@
 """Edge cases in the HCV mutation pipeline where data is silently mishandled.
 
 Lens: scripts/AnnotateMutations.py, scripts/VerifyMutations.py,
-scripts/NormalizeHcvMutationCatalog.py and the curated PHDR assets under
+scripts/NormaliseHcvMutationCatalog.py and the curated PHDR assets under
 generic/hcv/Tables/.
 
 The recurring shape hunted here is the one that already bit the influenza
@@ -26,13 +26,13 @@ import pandas as pd
 import pytest
 
 import AnnotateMutations as AM
-import NormalizeHcvMutationCatalog as NM
+import NormaliseHcvMutationCatalog as NM
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 HCV_TABLES = REPO_ROOT / "generic" / "hcv" / "Tables"
-CATALOG_TSV = HCV_TABLES / "generalized_mutation_catalog_with_extra_info.tsv"
+CATALOG_TSV = HCV_TABLES / "generalized_mutation_catalog_evidence_linked.tsv"
 NORMALIZED_TSV = HCV_TABLES / "generalized_mutation_catalog.tsv"
 VARIATION_CSV = HCV_TABLES / "variation.csv"
 VARIATION_METATAG_CSV = HCV_TABLES / "variation_metatag.csv"
@@ -112,9 +112,9 @@ def _annotate(catalog_rows, alignments, feature_map, master="REF1"):
     return found, dict(diagnostics)
 
 
-def _write_normalizer_inputs(tmp_path, variation_rows, metatag_rows,
+def _write_normaliser_inputs(tmp_path, variation_rows, metatag_rows,
                              alignment_rows=None, drug_rows=None):
-    """Materialise the four PHDR source tables the normalizer consumes."""
+    """Materialise the four PHDR source tables the normaliser consumes."""
     def dump(name, rows, fields):
         path = tmp_path / name
         with path.open("w", newline="", encoding="utf-8") as handle:
@@ -145,14 +145,14 @@ def _write_normalizer_inputs(tmp_path, variation_rows, metatag_rows,
          "any_in_vivo_evidence", "in_vivo_baseline", "in_vivo_treatment_emergent"],
     )
     output = tmp_path / "generalized_mutation_catalog.tsv"
-    NM.HcvMutationCatalogNormalizer(
+    NM.HcvMutationCatalogNormaliser(
         variation_path=variation,
         variation_metatag_path=metatag,
         phdr_alignment_ras_path=alignment,
         phdr_alignment_ras_drug_path=drug,
         gene_info_path=GENE_INFO_TSV,
         output_path=output,
-    ).normalize()
+    ).normalise()
     return pd.read_csv(output, sep="\t", dtype=str).fillna("")
 
 
@@ -294,7 +294,7 @@ def test_relevant_mutations_summary_only_contains_drug_annotated_signatures():
 
     Real-world trigger: 55 of the 232 non-conjunction rows in variation.csv have
     an empty `phdr_ras_id`, i.e. PHDR is saying 'this residue is a combination
-    component, not a resistance-associated substitution'.  The normalizer's
+    component, not a resistance-associated substitution'.  The normaliser's
     `row.get("phdr_ras_id") or row.get("name")` treats empty as missing and
     substitutes the variation name, so they become standalone signatures with no
     drug, no resistance category and no genotype - and they then dominate the
@@ -332,33 +332,22 @@ def test_relevant_mutations_summary_only_contains_drug_annotated_signatures():
 
 @requires_hcv_db
 @requires_hcv_assets
-@pytest.mark.xfail(
-    reason="alignment_name and display_structure are PHDR join artefacts, "
-           "deliberately left out of the HCV column profile. The genotype scope "
-           "they encoded now reaches the DB as relevant_genotypes / "
-           "wild_type_residues, so this test's premise is superseded, not unmet",
-    strict=False,
-)
 def test_db_mutation_catalog_retains_the_catalog_genotype_scope():
-    """The genotype a mutation was curated for must survive into the database.
+    """The genotype a finding was curated for must survive into the database.
 
-    Every catalogue row carries `alignment_name` - AL_1a, AL_1b, AL_3a and so on
-    - which is the genotype/subtype bucket the PHDR curators scored the mutation
-    in, and 110 of the 232 mutations differ in scope between buckets.  The HCV
-    column profile in AnnotateMutations does not list `alignment_name` (nor
-    `display_structure`, which holds the wild-type letter), so
-    build_catalog_reference_table drops both and then de-duplicates the
-    survivors.
-
-    The scope itself is no longer lost - `relevant_genotypes` and
-    `wild_type_residues` now reach the DB - so this remains an xfail only for
-    the two PHDR join keys themselves, which nothing downstream reads.
+    PHDR scores each finding per genotype bucket (AL_1a, AL_1b, AL_3a ...), and
+    the same mutation can carry a different resistance category in each.  The
+    catalogue carries that as the generic ``genotype`` column; ``alignment_name``
+    is gone, and the HCV column profile must keep ``genotype`` or the rows for
+    1a and 1b reach the database indistinguishable.
     """
-    source = pd.read_csv(CATALOG_TSV, sep="\t", dtype=str)
-    assert source["alignment_name"].notna().any()
-    columns = set(_read_hcv_db("SELECT * FROM mutation_catalog LIMIT 1").columns)
-    assert "alignment_name" in columns
-    assert "display_structure" in columns
+    source = pd.read_csv(CATALOG_TSV, sep="\t", dtype=str, keep_default_na=False)
+    assert "alignment_name" not in source.columns
+    db = _read_hcv_db("SELECT signature_id, drug, mutation_id, genotype, resistance_category FROM mutation_catalog")
+    assert set(db["genotype"]) == set(source["genotype"])
+    per_genotype = db[db["drug"] != ""].groupby(
+        ["signature_id", "drug", "mutation_id", "genotype"])["resistance_category"].nunique()
+    assert (per_genotype == 1).all()
 
 
 @requires_hcv_db
@@ -390,8 +379,8 @@ def test_mutation_calls_respect_the_genotype_they_were_curated_for():
     scope_tier != 'out_of_scope' on sequence_mutation_calls instead.
     """
     catalog = pd.read_csv(CATALOG_TSV, sep="\t", dtype=str)
-    scope = catalog.groupby("mutation_id")["alignment_name"].apply(
-        lambda values: {value for value in values.dropna()}
+    scope = catalog.groupby("mutation_id")["genotype"].apply(
+        lambda values: {f"AL_{value}" for value in values.dropna() if value}
     )
     meta = _read_hcv_db(
         "SELECT primary_accession, nearest_reference_genotype, "
@@ -466,9 +455,9 @@ def test_catalogued_deletions_are_annotated_when_the_codon_is_deleted():
 def test_stop_codon_catalog_entry_matches_a_real_stop_codon():
     """A '*' stop entry must match a TAG/TAA/TGA codon.
 
-    Real-world trigger: NormalizeHcvMutationCatalog's MUTATION_TOKEN_RE is
+    Real-world trigger: NormaliseHcvMutationCatalog's MUTATION_TOKEN_RE is
     ``^(\\d+)([A-Z*]|del)$`` - it explicitly admits '*' - so the day PHDR adds a
-    nonsense variant the normalizer will happily emit it.  AnnotateMutations'
+    nonsense variant the normaliser will happily emit it.  AnnotateMutations'
     CODON_TABLE spells stop as '_', so the row silently matches nothing forever.
     The two spellings of the same concept never meet.
     """
@@ -519,7 +508,7 @@ def test_ambiguous_or_missing_codon_does_not_satisfy_an_x_catalog_row():
     translate_codon collapses three very different situations onto 'X': a
     deleted codon ('---'), an unsequenced codon ('NNN') and a genuine IUPAC
     ambiguity ('RGA').  Any catalogue row with alt_residue 'X' - a shape the
-    normalizer's [A-Z*] token grammar admits - therefore fires on every
+    normaliser's [A-Z*] token grammar admits - therefore fires on every
     truncated or low-coverage sequence.  GenBank HCV records are routinely
     partial, so this would flag the worst-covered sequences the hardest.
     """
@@ -588,22 +577,22 @@ def test_non_integer_or_non_positive_positions_are_flagged_as_invalid(aa_positio
 
 
 # --------------------------------------------------------------------------
-# 6. Normalizer: catalogue generation
+# 6. Normaliser: catalogue generation
 # --------------------------------------------------------------------------
 
 @requires_hcv_assets
-def test_normalizer_regenerates_the_shipped_catalog_byte_for_byte(tmp_path):
+def test_normaliser_regenerates_the_shipped_catalog_byte_for_byte(tmp_path):
     """Regenerating the catalogue from the PHDR tables must be reproducible.
 
     The catalogue is a checked-in build product; if regeneration is not stable
     (dict iteration order, unsorted groupby) then a rebuild silently reshuffles
     rows and every downstream diff becomes unreadable, hiding real curation
-    changes.  This pins the whole normalizer end to end against the committed
+    changes.  This pins the whole normaliser end to end against the committed
     output for the columns it declares.
     """
     output = tmp_path / "regenerated.tsv"
     result = subprocess.run(
-        [sys.executable, str(SCRIPTS_DIR / "NormalizeHcvMutationCatalog.py"),
+        [sys.executable, str(SCRIPTS_DIR / "NormaliseHcvMutationCatalog.py"),
          "--variation", str(VARIATION_CSV),
          "--variation_metatag", str(VARIATION_METATAG_CSV),
          "--phdr_alignment_ras", str(PHDR_ALIGNMENT_RAS_CSV),
@@ -632,10 +621,10 @@ def test_normalizer_regenerates_the_shipped_catalog_byte_for_byte(tmp_path):
            "it, so regeneration drops a column AnnotateMutations requires",
     strict=False,
 )
-def test_normalizer_writes_every_column_annotate_mutations_requires(tmp_path):
+def test_normaliser_writes_every_column_annotate_mutations_requires(tmp_path):
     """A regenerated catalogue must still satisfy AnnotateMutations' schema check.
 
-    Real-world trigger: someone re-runs NormalizeHcvMutationCatalog.py after a
+    Real-world trigger: someone re-runs NormaliseHcvMutationCatalog.py after a
     PHDR data refresh.  `_build_output_row` computes a "phenotype" key, but
     `output_fields` does not list it and write_tsv rebuilds each row from
     fieldnames only - so the column vanishes with no warning.  The committed
@@ -645,7 +634,7 @@ def test_normalizer_writes_every_column_annotate_mutations_requires(tmp_path):
     """
     output = tmp_path / "regenerated.tsv"
     subprocess.run(
-        [sys.executable, str(SCRIPTS_DIR / "NormalizeHcvMutationCatalog.py"),
+        [sys.executable, str(SCRIPTS_DIR / "NormaliseHcvMutationCatalog.py"),
          "--variation", str(VARIATION_CSV),
          "--variation_metatag", str(VARIATION_METATAG_CSV),
          "--phdr_alignment_ras", str(PHDR_ALIGNMENT_RAS_CSV),
@@ -680,7 +669,7 @@ def test_variation_without_a_phdr_ras_id_is_not_promoted_to_a_single_signature(t
     ``signature_kind="single"`` row with empty drug, empty resistance_category
     and empty alignment_name - and then gets called on nearly every sequence.
     """
-    rows = _write_normalizer_inputs(
+    rows = _write_normaliser_inputs(
         tmp_path,
         variation_rows=[
             # conjunction anchor only: PHDR left phdr_ras_id blank on purpose
@@ -730,7 +719,7 @@ def test_only_conjunct_name_metatags_become_combination_components(tmp_path):
     as a mutation token silently gains a required component - inflating
     combination_size and making the signature impossible to complete.
     """
-    rows = _write_normalizer_inputs(
+    rows = _write_normaliser_inputs(
         tmp_path,
         variation_rows=[
             {"feature_name": "NS3", "name": "phdr_ras:NS3:155R",
@@ -778,7 +767,7 @@ def test_blank_segment_is_not_defaulted_to_segment_one():
     anything it cannot place (whole_genome, or a gene_info row whose parent is
     NULL), and ``mutation_row.get("segment", "") or "1"`` turns that into the
     literal segment '1'.  For HCV every value is genuinely 1 so nothing shows;
-    the moment this normalizer is pointed at a segmented virus, every
+    the moment this normaliser is pointed at a segmented virus, every
     unresolved mutation is filed under segment 1 (PB2 for influenza) and the
     error is invisible because '1' is a legitimate value.
     """
@@ -791,7 +780,7 @@ def test_blank_segment_is_not_defaulted_to_segment_one():
         "mutation_id": "whole_genome:5A",
         "mutation_type": "aminoAcidSimplePolymorphism",
     }
-    row = NM.HcvMutationCatalogNormalizer._build_output_row(
+    row = NM.HcvMutationCatalogNormaliser._build_output_row(
         mutation_row=mutation_row,
         signature_id="whole_genome:5A",
         signature_kind="single",

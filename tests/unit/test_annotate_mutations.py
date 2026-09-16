@@ -59,10 +59,12 @@ HCV_CATALOG_HEADER = [
 HCV_DB_COLUMNS = [
     'mutation_id', 'protein_name', 'segment', 'aa_position', 'alt_residue', 'reference_accession',
     'mutation_type', 'signature_id', 'signature_kind', 'combination_id', 'combination_size',
-    'phenotype', 'resistance_category', 'drug', 'drug_category', 'drug_producer', 'pubmed_id',
-    'DOI', 'any_in_vitro_evidence', 'in_vitro_max_ec50_midpoint', 'any_in_vivo_evidence',
+    'phenotype', 'genotype', 'resistance_category', 'drug', 'drug_category', 'drug_producer',
+    'any_in_vitro_evidence', 'in_vitro_max_ec50_midpoint', 'any_in_vivo_evidence',
     'in_vivo_baseline', 'in_vivo_treatment_emergent',
-    'relevant_genotypes', 'wild_type_residues', 'clinical_trials',
+    'evidence_id', 'data_source', 'evidence_url', 'evidence_label', 'evidence_type',
+    'linked_evidence_ids', 'finding_ids',
+    'relevant_genotypes', 'wild_type_residues',
 ]
 
 
@@ -825,8 +827,10 @@ def test_build_catalog_reference_table_hcv_profile_keeps_required_and_hcv_column
     assert result.iloc[0]['drug'] == 'drugA'
     # A catalogue that does not supply the generic columns gets them empty, not
     # missing: the profile is a request, not a requirement on the curator.
-    assert result.iloc[0]['clinical_trials'] == ''
+    assert result.iloc[0]['evidence_id'] == ''
+    assert result.iloc[0]['genotype'] == ''
     assert result.iloc[0]['relevant_genotypes'] == ''
+    assert 'alignment_name' not in result.columns
 
 
 def test_hcv_profile_stops_two_findings_collapsing_into_one():
@@ -834,9 +838,10 @@ def test_hcv_profile_stops_two_findings_collapsing_into_one():
 
     build_catalog_reference_table selects columns and THEN de-duplicates, so a
     column left out of the profile does not merely fail to be stored - it erases
-    the distinction it carried.  In the shipped HCV catalogue exactly one pair
-    was affected: NS5A:93H against velpatasvir, supported by NCT02639247 in one
-    row and NCT02607735 in another, arrived as a single row citing neither.
+    the distinction it carried.  Two cases matter for HCV: two trials behind one
+    finding (NS5A:93H against velpatasvir, NCT02639247 and NCT02607735), and the
+    same finding scored in two genotypes with different resistance categories,
+    which only the row-level genotype column tells apart.
     """
     base = {
         'mutation_id': 'NS5A:93H', 'protein_name': 'NS5A', 'segment': '1',
@@ -847,15 +852,19 @@ def test_hcv_profile_stops_two_findings_collapsing_into_one():
         'relevant_genotypes': '1a;1b', 'wild_type_residues': '1a:Y:88.93;1b:Y:94.62',
     }
     catalog = pd.DataFrame([
-        dict(base, clinical_trials='NCT02639247'),
-        dict(base, clinical_trials='NCT02607735'),
+        dict(base, genotype='1a', evidence_id='NCT02639247', data_source='clinical_trial'),
+        dict(base, genotype='1a', evidence_id='NCT02607735', data_source='clinical_trial'),
+        dict(base, genotype='1b', resistance_category='category_III',
+             evidence_id='NCT02607735', data_source='clinical_trial'),
     ])
 
     result = AnnotateMutations.build_catalog_reference_table(catalog, 'HCV')
 
-    assert len(result) == 2
-    assert set(result['clinical_trials']) == {'NCT02639247', 'NCT02607735'}
+    assert len(result) == 3
+    assert set(result['evidence_id']) == {'NCT02639247', 'NCT02607735'}
     assert set(result['relevant_genotypes']) == {'1a;1b'}
+    by_genotype = result.groupby('genotype')['resistance_category'].agg(set).to_dict()
+    assert by_genotype == {'1a': {'category_II'}, '1b': {'category_III'}}
 
 
 def test_build_catalog_reference_table_all_columns_preserves_input_columns():
