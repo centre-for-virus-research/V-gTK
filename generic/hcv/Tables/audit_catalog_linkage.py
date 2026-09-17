@@ -54,7 +54,7 @@ ARD_VALUE_COLUMNS = ['resistance_category', 'display_resistance_category', 'nume
 NUMERIC_COLUMNS = ARD_VALUE_COLUMNS[2:] + ['combination_size', 'component_order']
 
 EVIDENCE_COLUMNS = ['evidence_id', 'data_source', 'evidence_url', 'evidence_label',
-                    'evidence_type', 'linked_evidence_ids', 'finding_ids']
+                    'evidence_type', 'regimens', 'linked_evidence_ids', 'finding_ids']
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +137,7 @@ class Source:
         _, self.findings = read_rows(t / 'phdr_resistance_finding.csv')
         _, self.pubs = read_rows(t / 'phdr_publication.csv')
         _, self.result_trial = read_rows(t / 'phdr_result_trial.csv')
+        _, self.result_regimen = read_rows(t / 'phdr_result_regimen.csv')
         _, self.trials = read_rows(t / 'phdr_clinical_trial.csv')
         _, self.typical = read_rows(t / 'phdr_alignment_typical_aa.csv')
 
@@ -148,6 +149,9 @@ class Source:
         self.trials_by_result = collections.defaultdict(set)
         for r in self.result_trial:
             self.trials_by_result[r['phdr_in_vivo_result_id']].add(r['phdr_clinical_trial_id'])
+        self.regimens_by_result = collections.defaultdict(set)
+        for r in self.result_regimen:
+            self.regimens_by_result[r['phdr_in_vivo_result_id']].add(r['phdr_regimen_id'])
 
         # Expected evidence per catalogue id, at finding resolution.
         self.pubs_for = collections.defaultdict(set)
@@ -156,6 +160,7 @@ class Source:
         self.pub_trials = collections.defaultdict(set)       # (id, pub) -> {registry}
         self.trial_pubs = collections.defaultdict(set)       # (id, registry) -> {pub}
         self.link_findings = collections.defaultdict(set)    # (id, evidence) -> {finding}
+        self.link_regimens = collections.defaultdict(set)    # (id, evidence) -> {regimen}
         for f in self.findings:
             key, pub = f['phdr_alignment_ras_drug_id'], f['phdr_publication_id']
             self.pubs_for[key].add(pub)
@@ -164,12 +169,15 @@ class Source:
                 self.pub_types[(key, pub)].add('in_vitro')
             if f['phdr_in_vivo_result_id']:
                 self.pub_types[(key, pub)].add('in_vivo')
+                regimens = self.regimens_by_result.get(f['phdr_in_vivo_result_id'], set())
+                self.link_regimens[(key, pub)] |= regimens
                 for curator in self.trials_by_result.get(f['phdr_in_vivo_result_id'], ()):
                     reg = self.registry_of.get(curator, curator)
                     self.trials_for[key].add(reg)
                     self.pub_trials[(key, pub)].add(reg)
                     self.trial_pubs[(key, reg)].add(pub)
                     self.link_findings[(key, reg)].add(f['id'])
+                    self.link_regimens[(key, reg)] |= regimens
 
         # Dominant residue per (genotype code, feature, codon).
         self.dominant = {}
@@ -433,7 +441,7 @@ def audit_evidence_long(a, s, rows):
     a.check(g, 'catalogue entries with PHDR evidence but a blank evidence row',
             [r['id'] for r in rows if r['id'] and not r['evidence_id'] and s.pubs_for.get(r['id'])], total=len(rows))
 
-    src_bad, type_bad, link_bad, find_bad, url_bad = [], [], [], [], []
+    src_bad, type_bad, link_bad, find_bad, url_bad, regimen_bad = [], [], [], [], [], []
     for r in rows:
         if not r['evidence_id']:
             if any(r[c] for c in EVIDENCE_COLUMNS):
@@ -459,12 +467,16 @@ def audit_evidence_long(a, s, rows):
             find_bad.append(f'{key} {ev}')
         if r['evidence_url'] != want_url:
             url_bad.append(f"{key} {ev}: {r['evidence_url']!r} vs {want_url!r}")
+        if set(split(r.get('regimens', ''))) != s.link_regimens.get((key, ev), set()):
+            regimen_bad.append(f"{key} {ev}: {r.get('regimens', '')!r} vs "
+                               f"{sorted(s.link_regimens.get((key, ev), set()))}")
     n = sum(1 for r in rows if r['evidence_id'])
     a.check(g, 'data_source does not match the evidence id', src_bad, total=n)
     a.check(g, 'evidence_type differs from the findings', type_bad, total=n)
     a.check(g, 'linked_evidence_ids differs from finding-level pairing', link_bad, total=n)
     a.check(g, 'finding_ids differ from resistance_finding', find_bad, total=n)
     a.check(g, 'evidence_url differs from publication / registry', url_bad, total=n)
+    a.check(g, 'regimens differ from result_regimen', regimen_bad, total=n)
 
     # The fan-out must not change the entry's own values.
     fixed = [c for c in rows[0] if c not in EVIDENCE_COLUMNS]

@@ -86,6 +86,7 @@ trials has five rows, identical in every other column.
 | `evidence_url` | DOI for a publication; registry URL for an NCT trial; blank otherwise |
 | `evidence_label` | human-readable: `Komatsu et al. 2017, Gastroenterology`, or the trial name(s) |
 | `evidence_type` | `in_vitro`, `in_vivo` or `in_vitro;in_vivo`: which result columns the reference supports for this row |
+| `regimens` | the treatment regimen(s) behind the row's in-vivo evidence, semicolon separated; blank for in-vitro-only evidence |
 | `linked_evidence_ids` | a paper's trials for this row, or a trial's papers; semicolon separated |
 | `finding_ids` | the source findings behind the link (PHDR `resistance_finding` ids for HCV) |
 

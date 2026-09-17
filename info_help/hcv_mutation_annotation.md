@@ -236,6 +236,7 @@ in-vivo ones. The long layout keeps both links:
 | `evidence_url` | DOI for publications; ClinicalTrials.gov URL for NCT trials; blank for other registries |
 | `evidence_label` | `Komatsu et al. 2017, Gastroenterology`, or every curator name for the trial (arms kept) |
 | `evidence_type` | `in_vitro`, `in_vivo` or `in_vitro;in_vivo`: which result columns this reference supports for this entry |
+| `regimens` | the treatment regimen(s) the in-vivo evidence behind this reference used, as PHDR ids (`EBR_GZR`, `SOF_VEL`, `PTV_r_OBV_DSV_RBV`); blank on an in-vitro-only reference. PHDR ships no regimen name table, so an id stays an id: the tokens are drug abbreviations, 12 of which resolve in `phdr_drug.csv` and 9 of which (`ASV`, `BCV`, `SIM`, `IFN`, `PEG`, `RBV`, `PR`, `r`, `mono`) do not |
 | `linked_evidence_ids` | for a paper, the trials it reported for this entry; for a trial, the papers that reported it |
 | `finding_ids` | the PHDR `resistance_finding` ids behind the link |
 

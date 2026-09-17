@@ -101,8 +101,9 @@ Step 2 of the HCV catalogue build. Turns the normaliser's output into
 `generalized_mutation_catalog_evidence_linked.tsv`, the file the pipeline reads:
 
 - one row per catalogue entry × evidence reference (`evidence_id`, `data_source`,
-  `evidence_url`, `evidence_label`, `evidence_type`, `linked_evidence_ids`,
-  `finding_ids`), following PHDR's finding → publication / in-vivo result → trial
+  `evidence_url`, `evidence_label`, `evidence_type`, `regimens`,
+  `linked_evidence_ids`, `finding_ids`), following PHDR's finding → publication /
+  in-vivo result → trial and → regimen
   chain;
 - `genotype` in place of `alignment_name`;
 - `drug_producer` and `drug_category` from `phdr_drug.csv`;

@@ -183,3 +183,56 @@ def test_output_fields_are_the_same_for_normalised_and_wide_input():
                 + ES.EVIDENCE_COLUMNS + ["relevant_genotypes", "wild_type_residues"])
     assert builder.output_fields(normalised) == expected
     assert builder.output_fields(wide) == expected
+
+
+@requires_tables
+def test_regimens_come_from_result_regimen(fresh_build):
+    """Every in-vivo evidence row carries the regimen its findings were treated with.
+
+    Re-derived here straight from the PHDR tables rather than from the audit's
+    own index, so builder and audit cannot agree on a shared mistake.
+    """
+    import collections
+    import csv as _csv
+
+    def read(name):
+        with (TABLES / name).open(newline="", encoding="utf-8") as handle:
+            return list(_csv.DictReader(handle))
+
+    regimens_by_result = collections.defaultdict(set)
+    for row in read("phdr_result_regimen.csv"):
+        regimens_by_result[row["phdr_in_vivo_result_id"]].add(row["phdr_regimen_id"])
+    regimens_by_finding = {
+        f["id"]: regimens_by_result.get(f["phdr_in_vivo_result_id"], set())
+        for f in read("phdr_resistance_finding.csv")
+    }
+
+    _, rows = _rows(fresh_build)
+    assert "regimens" in rows[0], "the evidence block has no regimens column"
+    with_regimen = 0
+    for row in rows:
+        expected = set()
+        for finding in filter(None, row["finding_ids"].split(";")):
+            expected |= regimens_by_finding.get(finding, set())
+        assert set(filter(None, row["regimens"].split(";"))) == expected, row["id"]
+        # An in-vitro-only reference has no treatment, and every in-vivo finding
+        # in PHDR has a regimen, so the column tracks evidence_type exactly.
+        assert bool(row["regimens"]) == ("in_vivo" in row["evidence_type"]), row["id"]
+        with_regimen += bool(row["regimens"])
+    assert with_regimen > 3000, f"only {with_regimen} rows carry a regimen"
+
+
+@requires_tables
+def test_a_known_entry_names_its_regimen(fresh_build):
+    _, rows = _rows(fresh_build)
+    # NS5A:31M emerged on treatment in genotype 1b under daclatasvir+asunaprevir
+    # (DCV_ASV). It is catalogued only inside combination signatures, so the row
+    # is found by mutation and evidence rather than by a single-mutation id.
+    dcv = [r for r in rows if r["mutation_id"] == "NS5A:31M"
+           and r["evidence_id"] == "28078469" and r["genotype"] == "1b"]
+    assert dcv, "the daclatasvir 1b entry for NS5A:31M is missing"
+    assert {r["regimens"] for r in dcv} == {"DCV_ASV"}
+    assert {r["in_vivo_treatment_emergent"] for r in dcv} == {"1"}
+    # A trial row carries a regimen the same way: C-EDGE TE, elbasvir+grazoprevir.
+    edge = [r for r in rows if r["evidence_id"] == "NCT02105701" and r["regimens"]]
+    assert edge and all(set(r["regimens"].split(";")) <= {"EBR_GZR", "EBR_GZR_RBV"} for r in edge)

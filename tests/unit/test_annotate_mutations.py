@@ -63,7 +63,7 @@ HCV_DB_COLUMNS = [
     'any_in_vitro_evidence', 'in_vitro_max_ec50_midpoint', 'any_in_vivo_evidence',
     'in_vivo_baseline', 'in_vivo_treatment_emergent',
     'evidence_id', 'data_source', 'evidence_url', 'evidence_label', 'evidence_type',
-    'linked_evidence_ids', 'finding_ids',
+    'regimens', 'linked_evidence_ids', 'finding_ids',
     'relevant_genotypes', 'wild_type_residues',
 ]
 

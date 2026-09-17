@@ -45,6 +45,9 @@ unchanged, except:
       evidence_url         DOI for publications, registry URL for NCT trials
       evidence_label       "Komatsu et al. 2017, Gastroenterology" or trial name(s)
       evidence_type        in_vitro | in_vivo | in_vitro;in_vivo
+      regimens             the treatment regimen(s) the in-vivo evidence behind
+                           this reference used (PHDR ids: EBR_GZR, SOF_VEL...);
+                           blank for in-vitro-only references
       linked_evidence_ids  paper -> the trials it reported for this entry;
                            trial -> the papers that reported it
       finding_ids          the PHDR resistance_finding ids behind the link
@@ -64,6 +67,9 @@ THE PHDR CHAIN
            .phdr_in_vivo_result_id
                <- result_trial.phdr_in_vivo_result_id
                     .phdr_clinical_trial_id            -> clinical_trial
+               <- result_regimen.phdr_in_vivo_result_id
+                    .phdr_regimen_id                   -> regimen (an id only;
+                       PHDR ships no regimen table, so EBR_GZR stays EBR_GZR)
 
 Check the output with generic/hcv/Tables/audit_catalog_linkage.py.
 """
@@ -122,6 +128,7 @@ def load_evidence(tables):
     _, publications = read_rows(tables / 'phdr_publication.csv')
     _, trials = read_rows(tables / 'phdr_clinical_trial.csv')
     _, result_trials = read_rows(tables / 'phdr_result_trial.csv')
+    _, result_regimens = read_rows(tables / 'phdr_result_regimen.csv')
     _, findings = read_rows(tables / 'phdr_resistance_finding.csv')
 
     pub_by_id = {p['id']: p for p in publications}
@@ -130,10 +137,16 @@ def load_evidence(tables):
     trials_by_result = collections.defaultdict(set)
     for rt in result_trials:
         trials_by_result[rt['phdr_in_vivo_result_id']].add(rt['phdr_clinical_trial_id'])
+    # A regimen hangs off the same in-vivo result a trial does, and every one of
+    # PHDR's 826 in-vivo findings has one (only 648 have a trial). Without it a
+    # row says a mutation emerged on treatment but not on which treatment.
+    regimens_by_result = collections.defaultdict(set)
+    for rr in result_regimens:
+        regimens_by_result[rr['phdr_in_vivo_result_id']].add(rr['phdr_regimen_id'])
 
     def blank(evidence_id, source):
         return {'evidence_id': evidence_id, 'data_source': source, 'types': set(),
-                'linked': set(), 'findings': set(), 'labels': set()}
+                'linked': set(), 'findings': set(), 'labels': set(), 'regimens': set()}
 
     per_key = collections.defaultdict(dict)
     for f in findings:
@@ -148,12 +161,15 @@ def load_evidence(tables):
         if not in_vivo:
             continue
         pub['types'].add('in_vivo')
+        result_regimen_ids = regimens_by_result.get(in_vivo, set())
+        pub['regimens'].update(result_regimen_ids)
         for curator_id in trials_by_result.get(in_vivo, ()):
             registry_id = registry_of.get(curator_id, curator_id)
             trial = bucket.setdefault(('trial', registry_id), blank(registry_id, CLINICAL_TRIAL))
             trial['findings'].add(f['id'])
             trial['types'].add('in_vivo')
             trial['labels'].add(name_of.get(curator_id, curator_id))
+            trial['regimens'].update(result_regimen_ids)
             trial['linked'].add(pub_id)
             pub['linked'].add(registry_id)
 
@@ -183,6 +199,7 @@ def _record(v, url, label):
         'evidence_url': url,
         'evidence_label': label,
         'evidence_type': VALUE_SEP.join(sorted(v['types'])),
+        'regimens': VALUE_SEP.join(sorted(v['regimens'])),
         'linked_evidence_ids': VALUE_SEP.join(sorted(v['linked'])),
         'finding_ids': VALUE_SEP.join(sorted(v['findings'], key=_natural)),
     }

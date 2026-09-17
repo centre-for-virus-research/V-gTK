@@ -22,7 +22,7 @@ PUBLICATION_SOURCES = (PUBMED, CONFERENCE_ABSTRACT)
 #: the entry itself.
 EVIDENCE_COLUMNS = [
     'evidence_id', 'data_source', 'evidence_url', 'evidence_label',
-    'evidence_type', 'linked_evidence_ids', 'finding_ids',
+    'evidence_type', 'regimens', 'linked_evidence_ids', 'finding_ids',
 ]
 
 #: Separator for multi-valued cells, as everywhere else in the catalogue. A
