@@ -508,11 +508,22 @@ def build_alleles(conn, args, cohort):
 	if args.positions:
 		positions = sorted({int(value) for value in args.positions.split(',') if value.strip()})
 	else:
-		catalogued = pal.catalog_alleles(conn, args.protein)
-		if catalogued.empty:
-			raise SystemExit('no --positions given and no catalogued sites to fall back on')
-		positions = sorted({int(value) for value in catalogued['aa_position']})
-		say('genotyping the %d catalogued sites of %s' % (len(positions), args.protein))
+		try:
+			catalogued = pal.catalog_alleles(conn, args.protein)
+		except Exception:
+			catalogued = pd.DataFrame()
+		if not catalogued.empty:
+			positions = sorted({int(value) for value in catalogued['aa_position']})
+			say('genotyping the %d catalogued sites of %s' % (len(positions), args.protein))
+		else:
+			master = pal.master_accession(conn, segment=args.segment)
+			master_aln = pal._fetch_alignment(conn, master, segment=args.segment) if master else None
+			if master_aln:
+				n_sites = max(0, (len(master_aln) - start + 1) // 3)
+				positions = list(range(1, n_sites + 1))
+				say('genotyping all %d codon sites from start %d of %s' % (n_sites, start, args.protein))
+			else:
+				raise SystemExit('no --positions given and no catalogued sites to fall back on')
 	allele_set = alleles_from_alignment(conn, args.protein, accessions, start, positions,
 										segment=args.segment,
 										coord_space=(args.coord_space
@@ -1338,7 +1349,7 @@ def parse_args(argv=None):
 	output.add_argument('--report-rows', type=int, default=20)
 	output.add_argument('--report-q', type=float, default=0.05)
 	output.add_argument('--plots', action='store_true')
-	output.add_argument('--write_db', action='store_true',
+	output.add_argument('--write-db', '--write_db', dest='write_db', action='store_true',
 						help='append the results into the database (it is opened read-only '
 							 'for everything else)')
 	return parser.parse_args(argv)

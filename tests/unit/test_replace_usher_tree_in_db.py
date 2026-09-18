@@ -91,3 +91,28 @@ def test_replace_tree_raises_when_selected_row_is_missing(tmp_path: Path):
 		raise AssertionError("Expected replace_tree to raise when no matching row exists")
 	except ValueError as exc:
 		assert "Expected exactly one matching tree row" in str(exc)
+
+def test_replace_tree_allows_insert_when_row_missing(tmp_path: Path):
+	db_path = tmp_path / "test.db"
+	tree_file = tmp_path / "new_tree.nwk"
+	tree_file.write_text("(A:0.1,B:0.2);\n")
+
+	conn = sqlite3.connect(str(db_path))
+	try:
+		conn.execute(
+			"CREATE TABLE trees (name TEXT, source TEXT, segment_key TEXT, segment TEXT, newick TEXT, created_at TEXT)"
+		)
+		conn.commit()
+	finally:
+		conn.close()
+
+	action = replace_tree(db_path=db_path, tree_path=tree_file, source="usher", name="usher_seg4", segment_key="seg4_key", segment="4", allow_insert=True)
+	assert action == "inserted"
+
+	conn = sqlite3.connect(str(db_path))
+	try:
+		rows = conn.execute("SELECT name, source, segment_key, segment, newick FROM trees").fetchall()
+	finally:
+		conn.close()
+
+	assert rows == [("usher_seg4", "usher", "seg4_key", "4", "(A:0.1,B:0.2);")]

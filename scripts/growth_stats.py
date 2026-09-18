@@ -24,6 +24,22 @@ The module is split into three layers:
 Nothing here knows about trees, databases or viruses.
 """
 
+from growth_core import (
+    GenerationInterval,
+    H3N2_GENERATION_INTERVAL,
+    RABV_GENERATION_INTERVAL,
+    LogisticGrowthFit,
+    fit_logistic_growth,
+    StratifiedGrowthFit,
+    fit_logistic_growth_stratified,
+    fit_multinomial_logistic_growth,
+    design_identifiability,
+    correlation_with_ci,
+    weighted_pearson,
+    parse_collection_date,
+    plausible_date_mask,
+    meta_analyse,
+)
 import math
 
 import numpy as np

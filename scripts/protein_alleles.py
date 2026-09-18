@@ -335,11 +335,13 @@ def list_proteins(conn):
 def catalog_alleles(conn, protein):
 	"""Recorded residue calls for one protein, de-duplicated.
 
-	`sequence_mutations` carries one row per (sequence, mutation, combination),
+	 carries one row per (sequence, mutation, combination),
 	so a sequence appearing in sixty drug combinations has sixty identical rows
 	for the same residue. Counting those as sixty carriers would weight a
 	sequence by how many combinations its catalogue happens to list.
 	"""
+	if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sequence_mutations'").fetchone():
+		return pd.DataFrame(columns=['primary_accession', 'mutation_id', 'protein_name', 'aa_position', 'alt_residue'])
 	frame = pd.read_sql_query(
 		'SELECT DISTINCT primary_accession, mutation_id, protein_name, aa_position, '
 		'alt_residue FROM sequence_mutations WHERE protein_name = ?', conn, params=(protein,))

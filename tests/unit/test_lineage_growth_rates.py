@@ -380,3 +380,11 @@ def test_excluded_sequences_are_dropped_by_default_and_kept_on_request(database,
 			  '--allele-source', 'features', '--no-tree', '--include-excluded'])
 	report = open(os.path.join(str(out), 'report.md'), encoding='utf-8').read()
 	assert 'Cohort:' in report
+
+
+def test_alignment_route_defaults_to_all_sites_when_no_catalog(database, tmp_path):
+	out = tmp_path / 'aln_auto_sites'
+	lgr.main(['--db', database, '--protein', 'G', '--out', str(out),
+			  '--allele-source', 'alignment', '--protein-start', '1', '--no-tree'])
+	report = open(os.path.join(str(out), 'report.md'), encoding='utf-8').read()
+	assert 'Cohort:' in report
