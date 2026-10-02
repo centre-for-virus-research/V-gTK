@@ -40,7 +40,16 @@ class UsherPlacement:
 	_TREE_RECURSION_PER_LEVEL = 30
 	_TREE_RECURSION_BASE = 2000
 
-	def __init__(self, padded_aln, output_dir, mmseq_cluster_dir=None, iqtree_dir=None, update_db=None, threads=1, test_mode=False, chunk_size=50000, chunk_threshold=100000, starter_tree=None, existing_ids_file=None, placement_order="quality", segment=None, min_informative_bases=1, reference_ids=None):
+	#: Placement binaries. usher-sampled is run with its tree optimisation switched
+	#: off, so like usher it only adds samples and never rearranges the tree.
+	PLACERS = ("usher", "usher-sampled")
+	_USHER_SAMPLED_NO_OPTIMISATION = [
+		"--optimization_radius", "0",
+		"--optimization_minutes", "0",
+		"--last_optimization_minutes", "0",
+	]
+
+	def __init__(self, padded_aln, output_dir, mmseq_cluster_dir=None, iqtree_dir=None, update_db=None, threads=1, test_mode=False, chunk_size=50000, chunk_threshold=100000, starter_tree=None, existing_ids_file=None, placement_order="quality", segment=None, min_informative_bases=1, reference_ids=None, collapse_output_tree=True, placer="usher"):
 		self.padded_aln = padded_aln
 		self.output_dir = output_dir
 		self.mmseq_cluster_dir = self._normalize_optional_path(mmseq_cluster_dir)
@@ -68,6 +77,16 @@ class UsherPlacement:
 		# gapped, so a fixed reference keeps positions in master coordinates instead
 		# of whichever cluster representative happens to come first.
 		self.reference_ids = [str(r).strip() for r in (reference_ids or []) if str(r).strip()]
+		# usher -C collapses every zero-mutation internal node of the output tree,
+		# including the starter tree's own. Right for a fresh build, wrong when the
+		# starter's topology must survive: re-placing onto a tree whose identical
+		# sequences were attached after a previous run lets usher condense and then
+		# flatten those groups, and it re-resolves some of them in conflict with the
+		# starter.
+		self.collapse_output_tree = bool(collapse_output_tree)
+		self.placer = str(placer or "usher").strip()
+		if self.placer not in self.PLACERS:
+			raise ValueError(f"placer must be one of {self.PLACERS}, got {placer!r}")
 
 	@staticmethod
 	def _normalize_optional_path(path_value):
@@ -994,7 +1013,17 @@ class UsherPlacement:
 			ref_id=ref_id, alignment_fasta=alignment_fasta,
 			vcf_path=vcf_path, exclude_ids_file=exclude_ids_file,
 		)
-		base_cmd = ["faToVcf", f"-ref={ref_id}"]
+		# -includeNoAltN: usher reads a site absent from the VCF as the REFERENCE
+		# base for every sample, and faToVcf drops any site with no ALT allele in
+		# this batch. So a batch of short fragments lost most sites, and each
+		# fragment was scored as the reference over everything it does not cover -
+		# which drags it toward the root. With the flag, a site where any sample is
+		# N or '-' is written, and its missing calls are '.', which usher ignores.
+		# On the treepatch HA rebuild, 43 H1 fragments (median 180 of ~1,660 bases)
+		# went from placement parsimony 728 (next to the H5 reference) to 15, back
+		# inside H1. 86% of that run's 164,618 placements had at least one missing
+		# base at a site their batch's VCF had dropped.
+		base_cmd = ["faToVcf", "-includeNoAltN", f"-ref={ref_id}"]
 		if exclude_ids_file:
 			# No unfiltered fallback. -excludeFile is what keeps backbone tips out
 			# of the placement VCF, so retrying without it silently re-submitted
@@ -1161,13 +1190,17 @@ class UsherPlacement:
 			if os.path.isfile(stale_path):
 				os.remove(stale_path)
 		cmd = [
-			"usher",
+			self.placer,
 			"-i", input_pb,
 			"-v", vcf_path,
 			"-d", output_dir,
 			"-o", output_pb,
-			"-C", "-u",
 		]
+		if self.collapse_output_tree:
+			cmd.append("-C")
+		cmd.append("-u")
+		if self.placer == "usher-sampled":
+			cmd.extend(self._USHER_SAMPLED_NO_OPTIMISATION)
 		self._append_threads(cmd)
 		self._run_usher_cmd(cmd, output_dir)
 		self._resolve_usher_tree_output(output_dir)
@@ -1271,6 +1304,46 @@ class UsherPlacement:
 			# +2 levels: every expanded anchor gains an internal node above it.
 			self._write_newick(tree, tree_path, depth + 2)
 
+	def assert_tree_covers_alignment(self, collapse_plan):
+		"""Every sequence the alignment holds must be a tip of the published tree.
+
+		Nothing checked this before, and a segment-1 influenza tree shipped with
+		214,911 tips against 463,009 alignment records: UShER's raw final-tree.nh,
+		published before expand_identical_sequence_tree_outputs() reattached the
+		identical-sequence groups. All 248,098 absent sequences were byte-identical
+		duplicates of a tip that WAS present, so nothing downstream looked wrong -
+		the tree parsed, it was rooted, and every tip it carried was placed
+		correctly. It was invisible until someone counted.
+
+		Only the sequences that were deliberately not placed are exempt, and they
+		are the ones already named in excluded_sequences.tsv.
+		"""
+		expected = set(collapse_plan["alignment_ids"]) - set(collapse_plan["uninformative_ids"])
+		for name in ["uncondensed-final-tree.nh", "final-tree.nh"]:
+			tree_path = os.path.join(self.output_dir, name)
+			if not os.path.isfile(tree_path):
+				continue
+			tips = self._read_tree_terminals(tree_path)
+			missing = expected - tips
+			if missing:
+				sample = ", ".join(sorted(missing)[:10])
+				raise ValueError(
+					f"{tree_path} has {len(tips)} tip(s) but the alignment holds "
+					f"{len(expected)} placeable sequence(s); {len(missing)} are absent "
+					f"from the tree (e.g. {sample}). A tree is not publishable until "
+					f"every alignment record is in it - see excluded_sequences.tsv for "
+					f"the only sequences allowed to be missing."
+				)
+			# Not fatal: a starter tree may legitimately carry tips the alignment
+			# subset does not, and callers that pass one know it. Still worth saying.
+			extra = tips - expected
+			if extra:
+				print(
+					f"[warn] {tree_path} has {len(extra)} tip(s) with no alignment record "
+					f"(e.g. {', '.join(sorted(extra)[:10])}).",
+					flush=True,
+				)
+
 	def run(self):
 		os.makedirs(self.output_dir, exist_ok=True)
 
@@ -1335,6 +1408,7 @@ class UsherPlacement:
 			print("[info] No sequences require UShER placement after collapsing identical sequences and checking the current tree; reusing existing tree.")
 			self.copy_tree_outputs(tree_file)
 			self.expand_identical_sequence_tree_outputs(collapse_plan["anchor_to_members"])
+			self.assert_tree_covers_alignment(collapse_plan)
 			return
 
 		# Build a mutation-annotated backbone protobuf ONCE. This is the fix:
@@ -1372,6 +1446,7 @@ class UsherPlacement:
 			print("[info] Nothing left to place after checking the alignment; reusing existing tree.")
 			self.copy_tree_outputs(tree_file)
 			self.expand_identical_sequence_tree_outputs(collapse_plan["anchor_to_members"])
+			self.assert_tree_covers_alignment(collapse_plan)
 			return
 		print(
 			f"[info] Placing {len(placeable_ids)} sequence(s) in {len(chunk_fastas)} batch(es) "
@@ -1397,6 +1472,7 @@ class UsherPlacement:
 		if final_chunk_dir:
 			self.promote_final_usher_outputs(final_chunk_dir)
 			self.expand_identical_sequence_tree_outputs(collapse_plan["anchor_to_members"])
+			self.assert_tree_covers_alignment(collapse_plan)
 
 	@classmethod
 	def _read_text_lines(cls, path):
@@ -1442,6 +1518,21 @@ if __name__ == "__main__":
 			 "contains their full-length relatives. 'input' keeps alignment order.",
 	)
 	parser.add_argument(
+		"--no_collapse_output_tree",
+		action="store_true",
+		help="Do not pass -C to usher. By default zero-mutation internal nodes of the output "
+			 "tree are collapsed, which also collapses the starter tree's own; use this when "
+			 "--starter_tree carries a topology that must come through unchanged.",
+	)
+	parser.add_argument(
+		"--placer",
+		default="usher",
+		choices=list(UsherPlacement.PLACERS),
+		help="Placement binary. usher-sampled is much faster on large, divergent trees and is "
+			 "run with its tree optimisation off, but it always drops zero-mutation internal "
+			 "nodes, so pair it with a check of any topology that must survive.",
+	)
+	parser.add_argument(
 		"--ref_list",
 		default=None,
 		help="Reference list. Its master accessions are preferred as the faToVcf reference when they "
@@ -1473,4 +1564,6 @@ if __name__ == "__main__":
 		segment=args.segment,
 		min_informative_bases=args.min_informative_bases,
 		reference_ids=reference_ids,
+		collapse_output_tree=not args.no_collapse_output_tree,
+		placer=args.placer,
 	).run()

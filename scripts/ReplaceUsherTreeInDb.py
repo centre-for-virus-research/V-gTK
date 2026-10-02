@@ -59,8 +59,17 @@ def replace_tree(db_path, tree_path, source="usher", name="usher", segment_key="
 			conn.commit()
 			return "inserted"
 		elif match_count != 1:
+			selector = (
+				f"source={source.strip()!r}, name={name.strip()!r}, "
+				f"segment_key={segment_key.strip()!r}, segment={segment.strip()!r}"
+			)
+			hint = (
+				" Pass --allow-insert to create it."
+				if match_count == 0
+				else " Narrow the selector so it matches one row."
+			)
 			raise ValueError(
-				"Expected exactly one matching tree row, "
+				f"Expected exactly one matching tree row, found {match_count} for {selector}.{hint}"
 			)
 
 		cursor.execute(
@@ -99,6 +108,9 @@ def main():
 		allow_insert=args.allow_insert,
 	)
 	print(
+		f"{action} tree row: source={args.source!r}, name={args.name!r}, "
+		f"segment={args.segment!r}, segment_key={args.segment_key!r} "
+		f"<- {args.tree}"
 	)
 
 

@@ -26,7 +26,13 @@ class GenotypePipeline:
         print("[INFO] Step completed.")
 
     def convert_fasta_to_vcf(self):
-        cmd = f"faToVcf -ref={self.ref_accession} {self.reference_fasta} {self.vcf_output}"
+        # -includeNoAltN: faToVcf drops any column with no ALT allele, and usher
+        # reads an absent column as the reference base for every sample instead
+        # of as missing data. A reference with an N or a gap there is scored as
+        # matching the master, which biases the clade it anchors. Curated
+        # references are usually complete so the exposure is smaller here than
+        # in UsherPlacement, but the defect is the same one.
+        cmd = f"faToVcf -includeNoAltN -ref={self.ref_accession} {self.reference_fasta} {self.vcf_output}"
         self.run_command(cmd, "Converting aligned FASTA to VCF")
 
     def build_usher_tree(self):

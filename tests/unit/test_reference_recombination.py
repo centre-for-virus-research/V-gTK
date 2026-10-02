@@ -248,7 +248,16 @@ class TestDefaults:
             assert flag in cmd
 
     def test_fatovcf_command(self):
-        assert SRR.build_fatovcf_command("a.fa", "b.vcf") == ["faToVcf", "a.fa", "b.vcf"]
+        assert SRR.build_fatovcf_command("a.fa", "b.vcf") == [
+            "faToVcf", "-includeNoAltN", "a.fa", "b.vcf",
+        ]
+
+    def test_fatovcf_marks_missing_sites_instead_of_assuming_the_reference(self):
+        """Without -includeNoAltN, faToVcf omits every column with no ALT in the
+        batch and usher reads an omitted column as the reference base for every
+        sample. A sequence with N or a gap there is then scored as matching the
+        reference, which biases its placement toward the reference."""
+        assert "-includeNoAltN" in SRR.build_fatovcf_command("a.fa", "b.vcf")
 
 
 # --------------------------------------------------------------------------

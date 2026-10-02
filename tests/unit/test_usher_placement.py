@@ -764,6 +764,62 @@ def test_place_onto_pb_writes_verbose_log_and_returns_updated_pb(tmp_path: Path,
 	assert run_calls[1][1]["stderr"] == subprocess.STDOUT
 
 
+def _placement_command(tmp_path: Path, monkeypatch, **kwargs):
+	"""The usher command place_onto_pb builds, with the run itself faked."""
+	chunk_dir = tmp_path / "out" / "chunk_0001"
+	processor = UsherPlacement(
+		padded_aln=str(tmp_path / "input.fasta"), output_dir=str(tmp_path / "out"),
+		threads=4, **kwargs)
+	# In place, as the real one is: place_onto_pb ignores its return value.
+	monkeypatch.setattr(processor, "_append_threads", lambda cmd: cmd.extend(["-T", "4"]) or cmd)
+	seen = []
+
+	def fake_run_usher(cmd, output_dir, log_name="usher.verbose.log"):
+		seen.append(cmd)
+		(chunk_dir / "uncondensed-final-tree.nh").write_text("(A:1,B:1);\n", encoding="utf-8")
+		(chunk_dir / "usher.pb").write_text("pb", encoding="utf-8")
+
+	monkeypatch.setattr(processor, "_run_usher_cmd", fake_run_usher)
+	processor.place_onto_pb(str(tmp_path / "in.pb"), str(tmp_path / "in.vcf"), str(chunk_dir))
+	return seen[0]
+
+
+def test_place_onto_pb_collapses_the_output_tree_by_default(tmp_path: Path, monkeypatch):
+	"""The pipeline's own callers rely on -C; the new switches must not change it."""
+	cmd = _placement_command(tmp_path, monkeypatch)
+	assert cmd[0] == "usher"
+	assert cmd.index("-C") < cmd.index("-u")
+	assert cmd[-2:] == ["-T", "4"]
+	assert "--optimization_radius" not in cmd
+
+
+def test_place_onto_pb_can_leave_the_starter_topology_alone(tmp_path: Path, monkeypatch):
+	"""-C collapsed 38,622 of 71,252 splits of a starter tree's carried-over block in
+	the treepatch HA rebuild, and re-grouped 209 in conflict with it. Resuming onto a
+	topology that must survive needs a way to switch it off."""
+	cmd = _placement_command(tmp_path, monkeypatch, collapse_output_tree=False)
+	assert "-C" not in cmd
+	assert "-u" in cmd
+
+
+def test_place_onto_pb_runs_usher_sampled_without_optimisation(tmp_path: Path, monkeypatch):
+	"""usher-sampled optimises the tree by default, which rearranges existing nodes.
+	All three optimisation knobs must be zeroed so it only adds samples."""
+	cmd = _placement_command(tmp_path, monkeypatch, placer="usher-sampled",
+							 collapse_output_tree=False)
+	assert cmd[0] == "usher-sampled"
+	for flag in ("--optimization_radius", "--optimization_minutes", "--last_optimization_minutes"):
+		assert cmd[cmd.index(flag) + 1] == "0"
+	assert "-C" not in cmd
+	assert cmd[-2:] == ["-T", "4"]
+
+
+def test_unknown_placer_is_refused(tmp_path: Path):
+	with pytest.raises(ValueError, match="placer"):
+		UsherPlacement(padded_aln=str(tmp_path / "a.fasta"), output_dir=str(tmp_path / "o"),
+					   placer="matOptimize")
+
+
 def test_place_onto_pb_raises_when_usher_produces_no_tree(tmp_path: Path, monkeypatch):
 	output_dir = tmp_path / "usher_out"
 	output_dir.mkdir(parents=True, exist_ok=True)
@@ -1002,6 +1058,40 @@ def test_fetch_db_alignments_returns_empty_without_db(tmp_path: Path):
 		output_dir=str(tmp_path / "out"),
 	)
 	assert processor._fetch_db_alignments(["A", "B"]) == {}
+
+
+def test_build_vcf_writes_sites_where_a_sample_is_missing(tmp_path: Path, monkeypatch):
+	"""usher reads a site that is absent from the VCF as the reference base, and
+	faToVcf drops sites with no ALT in the batch. Without -includeNoAltN a batch
+	of short fragments was scored as the reference over everything it did not
+	cover: 43 treepatch H1 fragments were placed next to the H5 reference."""
+	processor = UsherPlacement(padded_aln=str(tmp_path / "aln.fasta"), output_dir=str(tmp_path / "out"))
+	cmds = []
+	monkeypatch.setattr(processor, "run_command", lambda cmd, retry_message=None: cmds.append(cmd) or True)
+	processor.build_vcf("REF1", alignment_fasta=str(tmp_path / "aln.fasta"), vcf_path=str(tmp_path / "a.vcf"))
+	processor.build_vcf("REF1", exclude_ids_file=str(tmp_path / "ex.txt"),
+						alignment_fasta=str(tmp_path / "aln.fasta"), vcf_path=str(tmp_path / "b.vcf"))
+	assert len(cmds) == 2
+	for cmd in cmds:
+		assert cmd[0] == "faToVcf"
+		assert "-includeNoAltN" in cmd
+
+
+@pytest.mark.skipif(not __import__("shutil").which("faToVcf"), reason="faToVcf not installed")
+def test_faToVcf_marks_a_fragments_uncovered_sites_missing(tmp_path: Path):
+	"""The real binary: a site where the batch has no ALT but the fragment is N
+	must be written, with the fragment's call as '.'."""
+	aln = tmp_path / "aln.fasta"
+	aln.write_text(">REF\nACGTACGT\n>FULL\nACGTACGA\n>FRAG\nNNNNACGA\n", encoding="utf-8")
+	processor = UsherPlacement(padded_aln=str(aln), output_dir=str(tmp_path / "out"))
+	os.makedirs(processor.output_dir, exist_ok=True)
+	vcf = processor.build_vcf("REF", alignment_fasta=str(aln), vcf_path=str(tmp_path / "x.vcf"))
+	rows = [l.split("\t") for l in Path(vcf).read_text().splitlines() if not l.startswith("#")]
+	header = [l for l in Path(vcf).read_text().splitlines() if l.startswith("#CHROM")][0].split("\t")
+	frag = header.index("FRAG")
+	positions = {int(r[1]): r[frag] for r in rows}
+	assert positions[8] == "1"                       # the shared ALT
+	assert all(positions.get(p) == "." for p in (1, 2, 3, 4))   # uncovered, not assumed REF
 
 
 def test_build_vcf_refuses_to_drop_the_exclude_filter_when_faToVcf_fails(tmp_path: Path, monkeypatch):
@@ -2775,3 +2865,91 @@ def test_resume_into_the_previous_output_directory_reuses_the_tree(tmp_path: Pat
 
 	terminals = UsherPlacement._read_tree_terminals(str(output_dir / "final-tree.nh"))
 	assert terminals == {"REF1", "PLACED1", "DUP1"}
+
+
+# --------------------------------------------------------------------------
+# The tree/alignment coverage guard
+#
+# Segment 1 of the influenza build shipped with 214,911 tips against 463,009
+# alignment records: UShER's raw final-tree.nh, published before
+# expand_identical_sequence_tree_outputs() reattached the identical-sequence
+# groups. Every absent sequence was a byte-identical duplicate of a tip that
+# WAS present, so the tree parsed, was rooted, and every tip it carried was
+# correctly placed. Nothing in the pipeline counted, so nothing went red.
+# --------------------------------------------------------------------------
+
+def _plan(alignment_ids, uninformative_ids=()):
+	return {"alignment_ids": list(alignment_ids), "uninformative_ids": list(uninformative_ids)}
+
+
+def test_coverage_guard_accepts_a_tree_holding_every_alignment_record(tmp_path: Path):
+	processor = make(tmp_path)
+	(Path(processor.output_dir) / "final-tree.nh").write_text(
+		"(REF1:0.1,(PLACED1:0.2,DUP1:0.0):0.1);\n", encoding="utf-8")
+	processor.assert_tree_covers_alignment(_plan(["REF1", "PLACED1", "DUP1"]))
+
+
+def test_coverage_guard_catches_the_segment_1_defect(tmp_path: Path):
+	"""The pre-expansion tree: the duplicates never got reattached."""
+	processor = make(tmp_path)
+	(Path(processor.output_dir) / "final-tree.nh").write_text(
+		"(REF1:0.1,PLACED1:0.2);\n", encoding="utf-8")
+	with pytest.raises(ValueError) as excinfo:
+		processor.assert_tree_covers_alignment(_plan(["REF1", "PLACED1", "DUP1", "DUP2"]))
+	message = str(excinfo.value)
+	assert "2 are absent" in message
+	assert "DUP1" in message and "DUP2" in message
+
+
+def test_coverage_guard_exempts_only_the_sequences_deliberately_not_placed(tmp_path: Path):
+	"""An all-N record carries no placement signal and is reported in
+	excluded_sequences.tsv rather than placed, so its absence is not a defect."""
+	processor = make(tmp_path)
+	(Path(processor.output_dir) / "final-tree.nh").write_text(
+		"(REF1:0.1,PLACED1:0.2);\n", encoding="utf-8")
+	processor.assert_tree_covers_alignment(_plan(["REF1", "PLACED1", "ALLN"], ["ALLN"]))
+
+
+def test_coverage_guard_checks_the_uncondensed_tree_too(tmp_path: Path):
+	"""Both trees are published, so a defect in either one has to fail."""
+	processor = make(tmp_path)
+	(Path(processor.output_dir) / "final-tree.nh").write_text(
+		"(REF1:0.1,(PLACED1:0.2,DUP1:0.0):0.1);\n", encoding="utf-8")
+	(Path(processor.output_dir) / "uncondensed-final-tree.nh").write_text(
+		"(REF1:0.1,PLACED1:0.2);\n", encoding="utf-8")
+	with pytest.raises(ValueError, match="uncondensed-final-tree"):
+		processor.assert_tree_covers_alignment(_plan(["REF1", "PLACED1", "DUP1"]))
+
+
+def test_coverage_guard_warns_but_passes_on_a_tip_with_no_alignment_record(tmp_path: Path, capsys):
+	"""A starter tree may legitimately carry tips the alignment subset does not -
+	the rescue path passes exactly that. Worth saying, not worth failing."""
+	processor = make(tmp_path)
+	(Path(processor.output_dir) / "final-tree.nh").write_text(
+		"(REF1:0.1,(PLACED1:0.2,STRANGER:0.1):0.1);\n", encoding="utf-8")
+	processor.assert_tree_covers_alignment(_plan(["REF1", "PLACED1"]))
+	assert "STRANGER" in capsys.readouterr().out
+
+
+def test_run_publishes_nothing_that_fails_the_coverage_guard(tmp_path: Path, monkeypatch):
+	"""End to end: run() must not return a tree that is missing a record. This is
+	the assertion segment 1 never had."""
+	output_dir = tmp_path / "out"
+	output_dir.mkdir(parents=True, exist_ok=True)
+	starter = output_dir / "final-tree.nh"
+	starter.write_text("(REF1:0.1,PLACED1:0.2);\n", encoding="utf-8")
+	(output_dir / "uncondensed-final-tree.nh").write_text(
+		"(REF1:0.1,PLACED1:0.2);\n", encoding="utf-8")
+	existing = tmp_path / "existing.txt"
+	existing.write_text("REF1\nPLACED1\n", encoding="utf-8")
+	aln = tmp_path / "aln.fasta"
+	write_fasta(aln, [("REF1", "ACGT"), ("PLACED1", "ACGA"), ("DUP1", "ACGA")])
+
+	processor = UsherPlacement(
+		padded_aln=str(aln), output_dir=str(output_dir),
+		starter_tree=str(starter), existing_ids_file=str(existing),
+	)
+	# Simulate the segment-1 failure: the expansion silently does nothing.
+	monkeypatch.setattr(processor, "expand_identical_sequence_tree_outputs", lambda *a, **k: None)
+	with pytest.raises(ValueError, match="DUP1"):
+		processor.run()

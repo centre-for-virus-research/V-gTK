@@ -220,7 +220,18 @@ def clamp_threads(requested, maximum=MAX_THREADS):
 
 
 def build_fatovcf_command(fasta_path, vcf_path, binary="faToVcf"):
-	return [binary, fasta_path, vcf_path]
+	"""Assemble the faToVcf invocation.
+
+	-includeNoAltN is not optional. faToVcf drops any column where no sample
+	differs from the reference, and usher then reads an absent column as the
+	REFERENCE base for every sample rather than as missing data. So wherever a
+	sequence had N or a gap at such a column it was scored as matching the
+	reference, which drags it toward the reference-like part of the tree. The
+	flag keeps a column that has no ALT but at least one no-call and writes the
+	missing calls as '.', which usher ignores. Same defect, and same fix, as
+	UsherPlacement.build_vcf.
+	"""
+	return [binary, "-includeNoAltN", fasta_path, vcf_path]
 
 
 def build_usher_command(tree_path, vcf_path, output_mat, outdir, threads, binary="usher"):
