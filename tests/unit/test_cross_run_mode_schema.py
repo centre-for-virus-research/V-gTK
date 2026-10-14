@@ -63,6 +63,9 @@ UNIVERSAL_META_COLUMNS = frozenset({
 #: the rabv and IAV builds, which predate the genotype-provenance work.
 RECENTLY_ADDED_META_COLUMNS = frozenset({
     "genotype_origin", "subtype_origin",
+    # Segmented builds only: the submitter's own segment label, kept when BLAST
+    # overrode it (ValidateSegment). Absent from every DB built before that.
+    "segment_submitted",
 })
 
 #: Columns only a segmented (influenza) build produces, because the processes
@@ -305,6 +308,11 @@ class TestNoColumnIsWhollyEmpty:
         # build and 0/78 in rabv_tree_free, 1/228 in rabv_update, 22/518 in IAV.
         # An empty column here means "nothing was excluded", not a broken write.
         "exclusion_criteria",
+        # Same shape: ValidateSegment writes it only on 'blast_overrode_declared',
+        # so it is empty whenever no submitter label was contradicted. Measured
+        # 0/518 in the iav_segmented build, where segment_source is
+        # source_declared for all 508 rows that have one.
+        "segment_submitted",
     })
 
     @pytest.mark.parametrize("mode", sorted(RUN_MODE_DBS))

@@ -22,7 +22,7 @@ import pytest
 import gisaid_tidy
 import segment_utils
 from CreateSqliteDB import CreateSqliteDB
-from ValidateSegment import annotate_matrix, build_reference_map, build_segment_map
+from ValidateSegment import annotate_matrix, build_identity_map, build_reference_map, build_segment_map
 from merge_into_gB_matrix import NormalizeAndMerge
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -220,7 +220,7 @@ class TestWritePathCollisionGuard:
 # Segment resolution policy
 # --------------------------------------------------------------------------
 
-def _resolve_rows(tmp_path, matrix_rows, matrix_cols, blast_rows, valid_segments=None):
+def _resolve_rows(tmp_path, matrix_rows, matrix_cols, blast_rows, valid_segments=None, **kwargs):
     matrix = tmp_path / "m.tsv"
     pd.DataFrame(matrix_rows, columns=matrix_cols).to_csv(matrix, sep="\t", index=False)
     blast = tmp_path / "b.tsv"
@@ -231,6 +231,7 @@ def _resolve_rows(tmp_path, matrix_rows, matrix_cols, blast_rows, valid_segments
         str(matrix), build_segment_map(str(blast)), build_reference_map(str(blast)),
         str(out), overwrite=False, valid_segments=valid_segments,
         segment_names_path=str(SEGMENT_NAMES),
+        identity_map=build_identity_map(str(blast)), **kwargs,
     )
     rows = {r["primary_accession"]: r
             for r in csv.DictReader(open(out, encoding="utf-8"), delimiter="\t")}
@@ -240,13 +241,76 @@ def _resolve_rows(tmp_path, matrix_rows, matrix_cols, blast_rows, valid_segments
 class TestResolutionPolicy:
     FLU = {"1", "2", "3", "4", "5", "6", "7", "8"}
 
-    def test_an_existing_declaration_is_not_overwritten_by_blast(self, tmp_path):
-        """The documented precedence. Swapping the streams was invisible."""
+    def test_a_confident_blast_call_overrides_a_contradicting_declaration(self, tmp_path):
+        """The old policy let the submitter's label win and only counted the
+        conflict. The alignment is built from BLAST, so the key column has to
+        follow it or the row sits in one segment's table and another's tree."""
         rows, _ = _resolve_rows(
-            tmp_path, [["Q1", "4"]], ["primary_accession", "segment"],
+            tmp_path, [["Q1", "4", "1500"]], ["primary_accession", "segment", "length"],
             [["Q1", "REF", "99", "+", "6"]], valid_segments=self.FLU)
-        assert rows["Q1"]["segment"] == "4"
+        assert rows["Q1"]["segment"] == "6"
+        assert rows["Q1"]["segment_validated"] == "6"
+        assert rows["Q1"]["segment_source"] == "blast_overrode_declared"
+        assert rows["Q1"]["segment_submitted"] == "4"
+        assert rows["Q1"]["exclusion"] == ""
+
+    def test_a_low_identity_conflict_is_excluded_not_relabelled(self, tmp_path):
+        rows, stats = _resolve_rows(
+            tmp_path, [["Q1", "4", "1500"]], ["primary_accession", "segment", "length"],
+            [["Q1", "REF", "70.5", "+", "6"]], valid_segments=self.FLU)
+        assert rows["Q1"]["segment_source"] == "conflict_unresolved"
+        assert rows["Q1"]["segment_submitted"] == ""
+        assert rows["Q1"]["exclusion"].startswith("segment conflict: submitter declares 4, BLAST says 6")
+        assert stats["conflict_outcome:conflict_unresolved"] == 1
+
+    def test_a_short_fragment_conflict_is_excluded(self, tmp_path):
+        rows, _ = _resolve_rows(
+            tmp_path, [["Q1", "3", "164"]], ["primary_accession", "segment", "length"],
+            [["Q1", "REF", "99", "+", "4"]], valid_segments=self.FLU)
+        assert rows["Q1"]["segment_source"] == "conflict_unresolved"
+        assert rows["Q1"]["exclusion"].startswith("segment conflict")
+
+    def test_an_unresolved_conflict_does_not_replace_an_existing_exclusion(self, tmp_path):
+        rows, _ = _resolve_rows(
+            tmp_path, [["Q1", "4", "1500", "already excluded"]],
+            ["primary_accession", "segment", "length", "exclusion"],
+            [["Q1", "REF", "70", "+", "6"]], valid_segments=self.FLU)
+        assert rows["Q1"]["exclusion"] == "already excluded"
+
+    def test_agreement_leaves_the_submitted_column_empty(self, tmp_path):
+        rows, _ = _resolve_rows(
+            tmp_path, [["Q1", "4", "1500"]], ["primary_accession", "segment", "length"],
+            [["Q1", "REF", "99", "+", "4"]], valid_segments=self.FLU)
         assert rows["Q1"]["segment_source"] == "source_declared"
+        assert rows["Q1"]["segment_submitted"] == ""
+
+    def test_every_kept_row_has_segment_equal_to_segment_validated(self, tmp_path):
+        """The invariant ValidateDbTree enforces, checked at the source: whatever
+        the mix of declarations, BLAST calls, identities and lengths, a row that
+        is not excluded never carries one segment in `segment` and another in
+        `segment_validated`."""
+        import itertools
+        combos = list(itertools.product(["", "1", "4", "6"], ["1", "4", "6"],
+                                        ["99", "70"], ["1500", "150"]))
+        matrix = [[f"Q{i}", d, n] for i, (d, b, p, n) in enumerate(combos)]
+        blast = [[f"Q{i}", "REF", p, "+", b] for i, (d, b, p, n) in enumerate(combos)]
+        rows, _ = _resolve_rows(tmp_path, matrix, ["primary_accession", "segment", "length"],
+                                blast, valid_segments=self.FLU)
+        assert len(rows) == len(combos)
+        for acc, row in rows.items():
+            if not row["exclusion"]:
+                assert row["segment"] == row["segment_validated"], (acc, row)
+
+    def test_conflicts_are_written_to_the_audit_file(self, tmp_path):
+        audit = tmp_path / "conflicts.tsv"
+        _resolve_rows(
+            tmp_path, [["Q1", "4", "1500"], ["Q2", "4", "1500"]],
+            ["primary_accession", "segment", "length"],
+            [["Q1", "REF", "99", "+", "6"], ["Q2", "REF", "99", "+", "4"]],
+            valid_segments=self.FLU, conflicts_out=str(audit))
+        lines = audit.read_text().strip().splitlines()
+        assert lines[0].split("\t") == ["primary_accession", "declared", "blast", "blast_pident", "length", "outcome"]
+        assert len(lines) == 2 and lines[1].split("\t")[0] == "Q1"
 
     def test_blast_fills_a_gap(self, tmp_path):
         rows, _ = _resolve_rows(

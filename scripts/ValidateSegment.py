@@ -9,7 +9,28 @@ import segment_utils
 '''Annotate gB_matrix with BLAST results. Includes overwrite input file (default) and overwrite exclusion options'''
 
 
-def _finalise_segment(row, blast_call, by_segment, by_name, stats, valid_segments=None):
+#: A submitter-declared segment that BLAST contradicts is only overridden when
+#: BLAST is clearly right. Below either floor the call is not trusted, so the row
+#: is excluded rather than labelled one way and aligned another. The floors come
+#: from the 301 influenza rows that disagreed in the 2026 DB: every one of the 234
+#: kept rows had >= 83% identity, and the 3 that failed these floors were 164-340
+#: bp fragments or 83% hits.
+MIN_CONFLICT_PIDENT = 85.0
+MIN_CONFLICT_LENGTH = 300
+
+
+def _row_length(row):
+    for key in ('real_length', 'length'):
+        try:
+            return int(float(row.get(key)))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _finalise_segment(row, blast_call, by_segment, by_name, stats, valid_segments=None,
+                      blast_identity=None, min_pident=MIN_CONFLICT_PIDENT,
+                      min_length=MIN_CONFLICT_LENGTH, conflicts=None):
     """Write the canonical ``segment``, its display name, and its provenance.
 
     ``segment`` stays the single definitive key: normalised, and numeric wherever
@@ -19,8 +40,13 @@ def _finalise_segment(row, blast_call, by_segment, by_name, stats, valid_segment
     an identifier. Keeping them apart matters: SegmentPivotTable treats the
     literal 'na' as "no segment assigned", so a gene name used as an identifier
     would silently drop every neuraminidase row.
+
+    Returns the exclusion reason when a submitter/BLAST conflict could not be
+    resolved, else ''.
     """
     resolved, source, candidates = resolve_segment(row, blast_call, by_name, valid_segments)
+    row.setdefault('segment_submitted', '')
+    unresolved = ''
 
     # Compare the STREAMS against each other. The previous version re-derived the
     # prior value from the same field stream 1 had already used, so it compared a
@@ -32,10 +58,39 @@ def _finalise_segment(row, blast_call, by_segment, by_name, stats, valid_segment
         stats['segment_disagreement'] += 1
         stats[f'conflict:{"|".join(f"{k}={v}" for k, v in sorted(candidates.items()))}'] += 1
 
+    # The alignment is built from the BLAST call, never from the submitter's
+    # label, so when the two disagree the column the database is keyed on has to
+    # follow BLAST or the row sits in one segment's table and another's tree.
+    # GenBank genome assemblies (OX/OY/OZ) are the usual source: their
+    # "segment: N" is the contig order, not the gene, and BLAST is a clean 1-8
+    # permutation across each assembly. The old rule let the declaration win and
+    # counted the conflict without acting on it.
+    declared, blasted = candidates.get('source_declared'), candidates.get('blast_inferred')
+    if source == 'source_declared' and blasted and blasted != declared \
+            and (valid_segments is None or blasted.casefold() in valid_segments):
+        length = _row_length(row)
+        confident = ((blast_identity is None or blast_identity >= min_pident)
+                     and (length is None or length >= min_length))
+        outcome = 'blast_overrode_declared' if confident else 'conflict_unresolved'
+        stats[f'conflict_outcome:{outcome}'] += 1
+        if conflicts is not None:
+            conflicts.append((row.get('primary_accession', ''), declared, blasted,
+                              '' if blast_identity is None else blast_identity,
+                              '' if length is None else length, outcome))
+        if confident:
+            row['segment_submitted'] = declared
+            resolved, source = blasted, 'blast_overrode_declared'
+        else:
+            source = 'conflict_unresolved'
+            unresolved = (f"segment conflict: submitter declares {declared}, BLAST says {blasted} "
+                          f"but not confidently enough to relabel "
+                          f"(identity {blast_identity}, length {length})")
+
     row['segment'] = resolved
     row['segment_name'] = segment_utils.segment_to_name(resolved, by_segment)
     row['segment_source'] = source
     stats[f'source:{source or "unresolved"}'] += 1
+    return unresolved
 
 def build_segment_map(file_path):
     segment_map = {}
@@ -44,6 +99,18 @@ def build_segment_map(file_path):
         for row in reader:
             segment_map[row[0]] = row[4]
     return segment_map
+
+def build_identity_map(file_path):
+    """{accession: BLAST percent identity} from the annotated top-hit file."""
+    identity_map = {}
+    with open(file_path, 'r') as ann_file:
+        for row in csv.reader(ann_file, delimiter='\t'):
+            try:
+                identity_map[row[0]] = float(row[2])
+            except (IndexError, ValueError):
+                continue
+    return identity_map
+
 
 def build_reference_map(file_path):
     reference_map = {}
@@ -149,10 +216,12 @@ def resolve_segment(row, blast_call, by_name, valid_segments=None):
     return '', '', candidates
 
 
-def annotate_matrix(matrix_file, segment_map, reference_map, output_file, overwrite=False, overwrite_exclusions=False, valid_segments=None, segment_names_path=None):
+def annotate_matrix(matrix_file, segment_map, reference_map, output_file, overwrite=False, overwrite_exclusions=False, valid_segments=None, segment_names_path=None, identity_map=None, min_pident=MIN_CONFLICT_PIDENT, min_length=MIN_CONFLICT_LENGTH, conflicts_out=None):
     tmp_output = output_file if not overwrite else output_file + ".tmp"
     by_segment, by_name = segment_utils.load_segment_names(segment_names_path)
     stats = Counter()
+    conflicts = []
+    identity_map = identity_map or {}
 
     with open(matrix_file, 'r') as matrix, open(tmp_output, 'w', newline='') as output:
         reader = csv.DictReader(matrix, delimiter='\t')
@@ -162,7 +231,7 @@ def annotate_matrix(matrix_file, segment_map, reference_map, output_file, overwr
         # it (non-segmented builds, and the minimal fixtures in the test suite).
         # _finalise_segment always writes it, so it must always be declared.
         for added in ('segment', 'segment_validated', 'closest_reference', 'exclusion',
-                      'segment_name', 'segment_source'):
+                      'segment_name', 'segment_source', 'segment_submitted'):
             if added not in fieldnames:
                 fieldnames.append(added)
 
@@ -180,7 +249,10 @@ def annotate_matrix(matrix_file, segment_map, reference_map, output_file, overwr
                 continue
 
             row['segment_validated'] = segment_map.get(primary_accession, 'not found')
-            _finalise_segment(row, segment_map.get(primary_accession), by_segment, by_name, stats, valid_segments)
+            unresolved = _finalise_segment(
+                row, segment_map.get(primary_accession), by_segment, by_name, stats, valid_segments,
+                blast_identity=identity_map.get(primary_accession), min_pident=min_pident,
+                min_length=min_length, conflicts=conflicts)
             row['closest_reference'] = reference_map.get(primary_accession, 'not found')
 
             if overwrite_exclusions or not row.get('exclusion'):
@@ -207,10 +279,21 @@ def annotate_matrix(matrix_file, segment_map, reference_map, output_file, overwr
                     except ValueError:
                         row['exclusion'] = 'non IAV genomic sequence'
 
+            # A conflict that could not be resolved is excluded, but never over
+            # an exclusion the row already carries.
+            if unresolved and not row.get('exclusion'):
+                row['exclusion'] = unresolved
+
             writer.writerow(row)
 
     if overwrite:
         shutil.move(tmp_output, output_file)
+
+    if conflicts_out:
+        with open(conflicts_out, 'w', newline='') as handle:
+            writer = csv.writer(handle, delimiter='\t')
+            writer.writerow(['primary_accession', 'declared', 'blast', 'blast_pident', 'length', 'outcome'])
+            writer.writerows(conflicts)
 
     print(f"Annotated file written to {output_file}")
     resolved_total = sum(v for k, v in stats.items() if k.startswith('source:') and k != 'source:unresolved')
@@ -219,8 +302,10 @@ def annotate_matrix(matrix_file, segment_map, reference_map, output_file, overwr
     for key in sorted(k for k in stats if k.startswith('source:')):
         print(f"  - {key.split(':', 1)[1]}: {stats[key]}")
     if stats.get('segment_disagreement'):
-        print(f"  [warn] {stats['segment_disagreement']} row(s) where the pre-existing "
-              f"segment disagreed with the resolved one (kept the pre-existing value)")
+        print(f"  [warn] {stats['segment_disagreement']} row(s) where the submitter's segment "
+              f"disagreed with BLAST: "
+              f"{stats.get('conflict_outcome:blast_overrode_declared', 0)} relabelled from BLAST, "
+              f"{stats.get('conflict_outcome:conflict_unresolved', 0)} excluded as unresolved")
     return stats
 
 if __name__ == '__main__':
@@ -234,6 +319,13 @@ if __name__ == '__main__':
                         help='Segment-name asset TSV (segment/segment_name/aliases). Populates the derived '
                              'segment_name column and lets a submitter-declared segment name (GISAID ships HA/NA/PB1) '
                              'be translated to the canonical segment number.')
+    parser.add_argument('--min_conflict_pident', type=float, default=MIN_CONFLICT_PIDENT,
+                        help='When the submitter\'s segment disagrees with BLAST, BLAST wins only at or above this '
+                             'percent identity; below it the row is excluded (default %(default)s)')
+    parser.add_argument('--min_conflict_length', type=int, default=MIN_CONFLICT_LENGTH,
+                        help='...and only for sequences at least this long (default %(default)s)')
+    parser.add_argument('--conflicts_out', default=None,
+                        help='Write every submitter-vs-BLAST disagreement and its outcome to this TSV')
     args = parser.parse_args()
 
     matrix_file = args.gb_matrix
@@ -249,4 +341,7 @@ if __name__ == '__main__':
 
     annotate_matrix(matrix_file, segment_map, reference_map, output_file, overwrite=overwrite,
                     overwrite_exclusions=args.overwrite_exclusions, valid_segments=valid_segments,
-                    segment_names_path=args.segment_names)
+                    segment_names_path=args.segment_names,
+                    identity_map=build_identity_map(annotated_file),
+                    min_pident=args.min_conflict_pident, min_length=args.min_conflict_length,
+                    conflicts_out=args.conflicts_out)

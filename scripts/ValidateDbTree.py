@@ -1222,6 +1222,36 @@ def validate_segment_labels(conn, meta_cols, exclusion_column="exclusion_status"
         "non-excluded meta_data rows carry no segment label",
     )
 
+    # `segment` and `segment_validated` must agree for every row that is kept.
+    # The alignment and the per-segment trees follow segment_validated (BLAST),
+    # so a kept row whose `segment` says otherwise sits in one segment's tree and
+    # another's metadata. ValidateSegment now relabels or excludes every conflict;
+    # this is the check that it did, because the failure is otherwise silent
+    # until the per-segment tree comparison trips on it (301 rows in the 2026
+    # influenza build, almost all GenBank genome assemblies whose "segment: N" is
+    # the contig order).
+    if "segment_validated" in meta_cols:
+        cursor.execute(
+            f"SELECT COUNT(*) FROM meta_data WHERE {_blank_sql('segment')} = 0 "
+            f"AND COALESCE(segment_validated, '') NOT IN ('', 'not found') "
+            f"AND segment != segment_validated{suffix}", params)
+        disagree = int(cursor.fetchone()[0])
+        examples = []
+        if disagree:
+            cursor.execute(
+                f"SELECT primary_accession || ':' || segment || '>' || segment_validated FROM meta_data "
+                f"WHERE {_blank_sql('segment')} = 0 "
+                f"AND COALESCE(segment_validated, '') NOT IN ('', 'not found') "
+                f"AND segment != segment_validated{suffix} LIMIT 5", params)
+            examples = [row[0] for row in cursor.fetchall()]
+        add_finding(
+            findings,
+            "segment_disagrees_with_segment_validated",
+            disagree,
+            "non-excluded meta_data rows whose segment differs from the BLAST-validated segment",
+            examples,
+        )
+
     meta_segments = fetch_distinct_values(conn, "meta_data", "segment")
 
     if len(meta_segments) == 1:

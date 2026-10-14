@@ -270,6 +270,42 @@ def test_blank_segment_on_non_excluded_rows_is_flagged(tmp_path):
     assert finding(result, "blank_segment_in_meta_data")["count"] == 2
 
 
+def _with_segment_validated(db, mapping):
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute("ALTER TABLE meta_data ADD COLUMN segment_validated TEXT")
+        for acc, value in mapping.items():
+            conn.execute("UPDATE meta_data SET segment_validated=? WHERE primary_accession=?", (value, acc))
+
+
+def test_kept_row_whose_segment_disagrees_with_blast_is_flagged(tmp_path):
+    """The alignment and the per-segment trees follow segment_validated, so a kept
+    row labelled otherwise sits in one segment's tree and another's metadata. 301
+    such rows - mostly GenBank genome assemblies whose "segment: N" is contig
+    order - sat in the 2026 influenza build until the per-segment comparison
+    tripped on them."""
+    rows = [_meta_row("ACC1", "ACGTACGT", segment="7"), _meta_row("ACC2", "ACGTACGA", segment="1")]
+    db = build_db(tmp_path, meta_rows=rows)
+    _with_segment_validated(db, {"ACC1": "6", "ACC2": "1"})
+    with sqlite3.connect(str(db)) as conn:
+        meta_cols = vdt.get_table_columns(conn, "meta_data")
+        result = vdt.validate_segment_labels(conn, meta_cols)
+    item = finding(result, "segment_disagrees_with_segment_validated")
+    assert item is not None and item["count"] == 1 and item["examples"] == ["ACC1:7>6"]
+
+
+def test_excluded_or_unvalidated_segment_disagreement_is_not_flagged(tmp_path):
+    rows = [
+        _meta_row("ACC1", "ACGTACGT", segment="7", exclusion_status="1"),
+        _meta_row("ACC2", "ACGTACGA", segment="1"),
+    ]
+    db = build_db(tmp_path, meta_rows=rows)
+    _with_segment_validated(db, {"ACC1": "6", "ACC2": "not found"})
+    with sqlite3.connect(str(db)) as conn:
+        meta_cols = vdt.get_table_columns(conn, "meta_data")
+        result = vdt.validate_segment_labels(conn, meta_cols)
+    assert finding(result, "segment_disagrees_with_segment_validated") is None
+
+
 def test_segment_holding_a_gene_name_is_flagged(tmp_path):
     """Ten divergent segment normalisers inverted PB2/PB1 by scraping digits out
     of gene names. A segment that IS a gene name is the same accident one step

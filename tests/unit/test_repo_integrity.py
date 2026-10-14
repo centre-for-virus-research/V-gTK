@@ -69,11 +69,42 @@ def _declared_channels(text: str):
     return channels
 
 
+_IMPORT_ERRORS = {"ImportError", "ModuleNotFoundError", "Exception", "BaseException"}
+
+
+def _catches_import_error(handler: ast.ExceptHandler) -> bool:
+    if handler.type is None:            # bare `except:`
+        return True
+    types = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    return any(isinstance(t, ast.Name) and t.id in _IMPORT_ERRORS for t in types)
+
+
+def _optional_import_nodes(tree):
+    """Imports inside a `try` whose handler catches ImportError.
+
+    These are deliberate optional dependencies with a fallback (growth_core
+    uses scipy's L-BFGS-B when present, a NumPy one otherwise), so a missing
+    module there is not a broken script.
+    """
+    guarded = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Try) and any(_catches_import_error(h) for h in node.handlers):
+            for stmt in node.body:
+                for inner in ast.walk(stmt):
+                    if isinstance(inner, (ast.Import, ast.ImportFrom)):
+                        guarded.add(id(inner))
+    return guarded
+
+
 def _imported_top_level_names(path: Path):
-    """Top-level module names a file imports, ignoring relative imports."""
+    """Top-level module names a file imports unconditionally, ignoring
+    relative imports and optional imports guarded by `except ImportError`."""
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    optional = _optional_import_nodes(tree)
     names = set()
     for node in ast.walk(tree):
+        if id(node) in optional:
+            continue
         if isinstance(node, ast.Import):
             for alias in node.names:
                 names.add(alias.name.split(".")[0])

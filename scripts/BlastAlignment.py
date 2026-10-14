@@ -3,6 +3,7 @@
 import os
 import csv
 import sys
+import shlex
 import sqlite3
 import shutil
 import subprocess
@@ -31,6 +32,10 @@ class BlastAlignment:
 		self.update_db = update_db
 		self.threads = max(1, int(threads))
 		self.db_file_name = os.path.basename(db_fasta)
+		# Queries that had a BLAST hit but no usable sequence by the time the
+		# grouped FASTAs were written. update_gB_matrix turns these into
+		# exclusions so they cannot survive as rows with no alignment or tip.
+		self.missing_query_accs = set()
 
 	@staticmethod
 	def normalize_query_id(header):
@@ -183,6 +188,85 @@ class BlastAlignment:
 			print(f"{command} is not found on the system.")
 			return False
 	
+	@staticmethod
+	def check_tool_exists(command):
+		"""Presence check for tools without a uniform version flag (seqkit)."""
+		if shutil.which(command) is None:
+			print(f"{command} is not found on the system.")
+			return False
+		print(f"{command} is working.")
+		return True
+
+	@staticmethod
+	def _count_fasta_records(path):
+		if not os.path.isfile(path):
+			return 0
+		count = 0
+		with open(path) as handle:
+			for line in handle:
+				if line.startswith('>'):
+					count += 1
+		return count
+
+	def _reverse_complement_fasta(self, in_path, out_path):
+		"""Reverse-complement a FASTA with seqkit, failing loudly.
+
+		This used to run through ``os.system(" ".join(command))`` inside an
+		``except subprocess.CalledProcessError`` block. os.system never raises
+		that exception, so a seqkit failure printed "ran successfully", left the
+		redirected output file empty, and silently dropped every minus-strand
+		query from the run. The argv list now goes to subprocess unchanged and
+		the record count is checked, because seqkit can also exit 0 after
+		writing short output.
+		"""
+		command = ["seqkit", "seq", "-j", str(self.threads), "-r", "-p", "-v", "-t", "dna", in_path]
+		print(f"{shlex.join(command)} > {out_path}")
+		try:
+			with open(out_path, 'wb') as out_handle:
+				subprocess.run(command, check=True, stdout=out_handle, stderr=subprocess.PIPE)
+		except subprocess.CalledProcessError as e:
+			stderr = (e.stderr or b'').decode(errors='replace').strip()
+			raise RuntimeError(
+				f"seqkit failed to reverse-complement '{in_path}': {stderr or e}"
+			) from e
+		except FileNotFoundError as e:
+			raise RuntimeError(
+				f"seqkit is not on PATH; cannot reverse-complement '{in_path}'"
+			) from e
+
+		expected = self._count_fasta_records(in_path)
+		produced = self._count_fasta_records(out_path)
+		if produced != expected:
+			raise RuntimeError(
+				f"seqkit reverse-complement lost sequences for '{in_path}': "
+				f"{expected} in, {produced} out"
+			)
+		print(f"seqkit reverse-complemented {produced} sequences into {os.path.basename(out_path)}")
+
+	@staticmethod
+	def _concat_fasta_files(file_list, out_path):
+		"""Concatenate FASTAs in Python, replacing a shell `cat` redirect.
+
+		The shell form joined every path into one string, so a path containing
+		a space became two arguments, and its failures were caught with the
+		same exception os.system cannot raise.
+		"""
+		with open(out_path, 'wb') as out_handle:
+			for each_file in file_list:
+				last_byte = b''
+				with open(each_file, 'rb') as in_handle:
+					while True:
+						chunk = in_handle.read(1024 * 1024)
+						if not chunk:
+							break
+						out_handle.write(chunk)
+						last_byte = chunk[-1:]
+				# A source file with no trailing newline would otherwise glue
+				# its last sequence line onto the next file's header.
+				if last_byte and last_byte != b'\n':
+					out_handle.write(b'\n')
+		print(f"concatenated {len(file_list)} file(s) into {out_path}")
+
 	@staticmethod
 	def delete_directory(dir_path):
 		if os.path.exists(dir_path):
@@ -342,6 +426,7 @@ class BlastAlignment:
 			query_acc, ref_acc, identity, strand = each_line.strip().split('\t')
 			if query_acc not in seq_dicts:
 				print(f"[warn] Missing query sequence for accession: {query_acc}")
+				self.missing_query_accs.add(query_acc)
 				continue
 			if strand == "plus":
 				with open(join(sorted_fasta, "plus.fa"), 'a') as file_plus:
@@ -352,29 +437,16 @@ class BlastAlignment:
 
 		for each_file in os.listdir(sorted_fasta):
 			if "minus" in each_file:
-				command = ["seqkit", "seq", "-j", str(self.threads), "-r", "-p", "-v", "-t", "dna", join(sorted_fasta, each_file), ">", join(merged_fasta, each_file)]
+				self._reverse_complement_fasta(join(sorted_fasta, each_file), join(merged_fasta, each_file))
 			else:
-				command = ["cp", join(sorted_fasta, each_file), join(merged_fasta, each_file)]
-
-			try:
-				print(' '.join(command))
-				os.system(' '.join(command))
-				print(f"seqkit ran successfully for {each_file}")
-			except subprocess.CalledProcessError as e:
-				print(f"Error running seqkit: {e}")
+				shutil.copyfile(join(sorted_fasta, each_file), join(merged_fasta, each_file))
 
 		file_list = []
 		for each_file in os.listdir(merged_fasta):
 			prefix = merged_fasta + "/"
 			file_list.append(prefix + each_file)
-		
-		command = ["cat", " ".join(file_list), ">", join(sorted_all, "query_seq.fa")]
-		print(' '.join(command))
-		try:
-			os.system(' '.join(command))
-			print(f"concatenation successful")
-		except subprocess.CalledProcessError as e:
-			print(f"Error in concatenation: {e}")
+
+		self._concat_fasta_files(file_list, join(sorted_all, "query_seq.fa"))
 
 		grouped_dict = {}
 		for each_line in open(query_tophit_uniq, 'r'):
@@ -396,6 +468,9 @@ class BlastAlignment:
 				continue
 			with open(join(grouped_fasta, each_ref_acc + '.fasta'), 'a') as write_file:
 				for each_query_acc in list_of_query_acc:
+					if each_query_acc not in seq_dicts:
+						self.missing_query_accs.add(each_query_acc)
+						continue
 					seqs = seq_dicts[each_query_acc]
 					write_file.write(">" + each_query_acc + '\n')
 					for i in range(0, len(seqs), 80):
@@ -518,16 +593,9 @@ class BlastAlignment:
 			name, seg_num, strand = each_seg.split('.')[0].split('_')
 			print(f"Processing {name}-{strand}")
 			if strand == "minus":
-				command = ["seqkit", "seq", "-j", str(self.threads), "-r", "-p", "-v", "-t", "dna", join(segment_sorted, each_seg), ">", join(segment_merged, each_seg)]
+				self._reverse_complement_fasta(join(segment_sorted, each_seg), join(segment_merged, each_seg))
 			else:
-				command = ["cp", join(segment_sorted, each_seg), join(segment_merged, each_seg)]
-
-			try:
-				print(' '.join(command))
-				os.system(' '.join(command))
-				print(f"seqkit ran successfully for {each_seg}")
-			except subprocess.CalledProcessError as e:
-				print(f"Error running seqkit: {e}")
+				shutil.copyfile(join(segment_sorted, each_seg), join(segment_merged, each_seg))
 
 		for each_seg in os.listdir(segment_merged):
 			name, seg_num, strand = each_seg.split('.')[0].split('_')
@@ -540,13 +608,7 @@ class BlastAlignment:
 			prefix = segment_merged + "/"
 			output_file = join(segment_sorted_all, each_segment + ".fa")
 			file_list = [prefix + item for item in files]
-			command = ["cat", " ".join(file_list), ">", output_file]
-			print(' '.join(command))
-			try:
-				os.system(' '.join(command))
-				print(f"{each_segment} concatenated sucessfully")
-			except subprocess.CalledProcessError as e:
-				print(f"Error in concatenation: {e}")
+			self._concat_fasta_files(file_list, output_file)
 
 		segment_dictionary = self.ref_segments(join(self.base_dir, self.output_dir, "query_uniq_tophit_annotated.tsv"))
 		missing_queries = set()
@@ -571,6 +633,7 @@ class BlastAlignment:
 				write_file.close()
 
 		if missing_queries:
+			self.missing_query_accs.update(missing_queries)
 			print(f"[warn] {len(missing_queries)} query sequences were missing after segment FASTA build; skipped while writing grouped FASTA")
 			preview = ', '.join(sorted(missing_queries)[:10])
 			print(f"[warn] Missing query accession examples: {preview}")
@@ -645,6 +708,17 @@ class BlastAlignment:
 				existing_criteria = row.get('exclusion_criteria', '')
 				if gi in exclusion_hit_queries:
 					new_criteria = 'excluded: best BLAST hit is an exclusion_list reference'
+					if existing_criteria:
+						row['exclusion_criteria'] = f"{existing_criteria}; {new_criteria}"
+					else:
+						row['exclusion_criteria'] = new_criteria
+					row['exclusion_status'] = '1'
+				elif gi in self.missing_query_accs:
+					# Had a BLAST hit but no sequence survived to the grouped
+					# FASTA, so nothing downstream can align or tree it. Marked
+					# excluded rather than left as an included row with no
+					# alignment and no tip.
+					new_criteria = 'excluded: no sequence in strand-normalised query FASTA'
 					if existing_criteria:
 						row['exclusion_criteria'] = f"{existing_criteria}; {new_criteria}"
 					else:
@@ -729,6 +803,10 @@ class BlastAlignment:
 			raise RuntimeError("blastn executable not available")
 		if not self.check_blast_exists("makeblastdb"):
 			raise RuntimeError("makeblastdb executable not available")
+		# Minus-strand queries are reverse-complemented with seqkit. Check it
+		# upfront rather than losing those sequences partway through the run.
+		if not self.check_tool_exists("seqkit"):
+			raise RuntimeError("seqkit executable not available")
 		if self.is_segmented_virus == 'Y' and not self.segment_file:
 			raise ValueError("Missing segment file with accession and segment information")
 

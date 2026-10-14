@@ -1417,6 +1417,7 @@ process VALIDATE_SEGMENT{
         path ref_list
     output:
         path "gB_matrix_validated_segment.tsv", emit: validated_matrix
+        path "segment_conflicts.tsv", emit: segment_conflicts
     shell:
     '''
     SEGMENT_NAME_ARG=""
@@ -1429,6 +1430,7 @@ process VALIDATE_SEGMENT{
         -s !{blast_hits} \
         -r !{ref_list} \
         -o gB_matrix_validated_segment.tsv \
+        --conflicts_out segment_conflicts.tsv \
         ${SEGMENT_NAME_ARG}
     '''
 }

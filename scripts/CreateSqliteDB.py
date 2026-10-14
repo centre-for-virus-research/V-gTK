@@ -1065,6 +1065,7 @@ class CreateSqliteDB:
 	#: this is a per-column exemption rather than a file-wide keep_default_na.
 	NA_IS_A_VALUE_COLUMNS = frozenset({
 		"segment", "segment_name", "segment_declared", "segment_validated",
+		"segment_submitted",
 	})
 
 	def _read_meta_data_tsv(self):

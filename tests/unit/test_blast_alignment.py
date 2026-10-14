@@ -1,5 +1,6 @@
 import csv
 from pathlib import Path
+import shutil
 import subprocess
 
 import pytest
@@ -105,6 +106,7 @@ def test_process_non_segmented_orchestration_without_external_tools(tmp_path: Pa
     out_dir.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(processor, "check_blast_exists", lambda _cmd: True)
+    monkeypatch.setattr(processor, "check_tool_exists", lambda _cmd: True)
     monkeypatch.setattr(processor, "run_makeblastdb", lambda _tmp: None)
 
     def fake_run_blastn(output_dir, _query_file):
@@ -235,3 +237,131 @@ def test_hydrate_update_reference_assets_uses_db_as_reference_source(tmp_path: P
     ref_list_text = Path(processor.segment_file).read_text(encoding="utf-8")
     assert "REF1\tmaster\t1" in ref_list_text
     assert "REF2\treference\t2" in ref_list_text
+
+
+# --- seqkit reverse-complement: failures must not pass silently -------------
+# Regression cover for minus-strand queries vanishing from a run. The call went
+# through os.system(" ".join(cmd)) inside an "except subprocess.CalledProcessError"
+# block; os.system cannot raise that, so a seqkit failure printed success, left
+# an empty redirect target, and dropped every reverse-complement submission.
+
+
+def test_reverse_complement_raises_when_seqkit_exits_nonzero(tmp_path: Path, monkeypatch):
+    processor = make_processor(tmp_path, DATA_DIR / "gb_matrix.tsv")
+    src = tmp_path / "minus.fa"
+    src.write_text(">Q1\nAAAA\n", encoding="utf-8")
+
+    def fail_run(*args, **kwargs):
+        raise subprocess.CalledProcessError(returncode=1, cmd=args[0], stderr=b"seqkit: boom")
+
+    monkeypatch.setattr(subprocess, "run", fail_run)
+    with pytest.raises(RuntimeError, match="seqkit failed to reverse-complement"):
+        processor._reverse_complement_fasta(str(src), str(tmp_path / "out.fa"))
+
+
+def test_reverse_complement_raises_when_seqkit_not_on_path(tmp_path: Path, monkeypatch):
+    processor = make_processor(tmp_path, DATA_DIR / "gb_matrix.tsv")
+    src = tmp_path / "minus.fa"
+    src.write_text(">Q1\nAAAA\n", encoding="utf-8")
+
+    def missing_tool(*args, **kwargs):
+        raise FileNotFoundError("seqkit")
+
+    monkeypatch.setattr(subprocess, "run", missing_tool)
+    with pytest.raises(RuntimeError, match="seqkit is not on PATH"):
+        processor._reverse_complement_fasta(str(src), str(tmp_path / "out.fa"))
+
+
+def test_reverse_complement_raises_when_sequences_are_dropped(tmp_path: Path, monkeypatch):
+    """seqkit exiting 0 after writing short output is still silent data loss."""
+    processor = make_processor(tmp_path, DATA_DIR / "gb_matrix.tsv")
+    src = tmp_path / "minus.fa"
+    src.write_text(">Q1\nAAAA\n>Q2\nCCCC\n>Q3\nGGGG\n", encoding="utf-8")
+    out = tmp_path / "out.fa"
+
+    def truncating_run(cmd, check=False, stdout=None, stderr=None, **kwargs):
+        stdout.write(b">Q1\nTTTT\n")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", truncating_run)
+    with pytest.raises(RuntimeError, match=r"lost sequences .*3 in, 1 out"):
+        processor._reverse_complement_fasta(str(src), str(out))
+
+
+@pytest.mark.skipif(shutil.which("seqkit") is None, reason="seqkit not installed")
+def test_reverse_complement_roundtrip_with_real_seqkit(tmp_path: Path):
+    processor = make_processor(tmp_path, DATA_DIR / "gb_matrix.tsv")
+    src = tmp_path / "minus.fa"
+    src.write_text(">Q1\nAAAAGGGG\n", encoding="utf-8")
+    out = tmp_path / "out.fa"
+
+    processor._reverse_complement_fasta(str(src), str(out))
+
+    text = out.read_text(encoding="utf-8")
+    assert ">Q1" in text
+    assert "CCCCTTTT" in text.upper()
+
+
+# --- concatenation ----------------------------------------------------------
+
+
+def test_concat_fasta_files_separates_records_without_trailing_newline(tmp_path: Path):
+    first = tmp_path / "a.fa"
+    second = tmp_path / "b.fa"
+    first.write_text(">Q1\nAAAA", encoding="utf-8")  # no trailing newline
+    second.write_text(">Q2\nCCCC\n", encoding="utf-8")
+    out = tmp_path / "all.fa"
+
+    BlastAlignment._concat_fasta_files([str(first), str(second)], str(out))
+
+    assert out.read_text(encoding="utf-8") == ">Q1\nAAAA\n>Q2\nCCCC\n"
+
+
+def test_concat_fasta_files_handles_paths_containing_spaces(tmp_path: Path):
+    spaced_dir = tmp_path / "dir with space"
+    spaced_dir.mkdir()
+    src = spaced_dir / "seg 1.fa"
+    src.write_text(">Q1\nAAAA\n", encoding="utf-8")
+    out = tmp_path / "all.fa"
+
+    BlastAlignment._concat_fasta_files([str(src)], str(out))
+
+    assert out.read_text(encoding="utf-8") == ">Q1\nAAAA\n"
+
+
+# --- missing queries become real exclusions ---------------------------------
+
+
+def test_update_gb_matrix_marks_missing_query_sequences_as_excluded(tmp_path: Path):
+    """A query with a hit but no sequence must not stay an included row.
+
+    These were previously skipped with a [warn] only, leaving DB rows with no
+    alignment and no tree tip.
+    """
+    gb_copy = tmp_path / "gb_matrix.tsv"
+    gb_copy.write_text((DATA_DIR / "gb_matrix.tsv").read_text(encoding="utf-8"), encoding="utf-8")
+
+    out_dir = tmp_path / "blast"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "query_uniq_tophits.tsv").write_text(
+        (DATA_DIR / "query_uniq_tophits.tsv").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    processor = make_processor(tmp_path, gb_copy)
+    # Q1 has a good plus-strand hit, so it would otherwise be included.
+    processor.missing_query_accs.add("Q1")
+    processor.update_gB_matrix(
+        query_fasta=str(DATA_DIR / "query.fa"),
+        query_tophit_uniq=str(out_dir / "query_uniq_tophits.tsv"),
+        gB_matrix_file=str(gb_copy),
+    )
+
+    rows = {row["gi_number"]: row for row in read_tsv_as_dicts(gb_copy)}
+    assert rows["Q1"]["exclusion_status"] == "1"
+    assert rows["Q1"]["exclusion_criteria"] == "excluded: no sequence in strand-normalised query FASTA"
+
+
+def test_missing_query_accs_starts_empty(tmp_path: Path):
+    processor = make_processor(tmp_path, DATA_DIR / "gb_matrix.tsv")
+    assert processor.missing_query_accs == set()
