@@ -1443,12 +1443,14 @@ process VALIDATE_STRAIN{
         path gb_matrix
     output:
         path "gB_matrix_validated_strain.tsv", emit: validated_matrix
+        path "strain_date_conflicts.tsv", emit: strain_date_conflicts
     shell:
     '''
     python !{scripts_dir}/ValidateStrain.py \
         -g !{gb_matrix} \
         -o gB_matrix_validated_strain.tsv \
-        -m !{projectDir}/generic/influenza/serotype_mapping.tsv
+        -m !{projectDir}/generic/influenza/serotype_mapping.tsv \
+        --conflicts_out strain_date_conflicts.tsv
     '''
 }
 

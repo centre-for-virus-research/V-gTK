@@ -1,6 +1,6 @@
-primary_accession	strain	serotype	definition	Parsed_strain	serotype_validated
-A1	A/duck Chile//01___		Influenza A virus (A/duck/Chile/01(H5N1))	A/duck_Chile//01	H5N1
-A2		A / H1N1	Influenza A virus without strain pattern		H1N1
-A3		h?n7	Influenza A virus (A/gull/Peru/88(mixed))	A/gull/Peru/88	N7
-A4		HXNY	No subtype in definition		H0N0_LIKE
-A5			completely unparseable		unknown
+primary_accession	strain	serotype	definition	Parsed_strain	serotype_validated	strain_year	strain_date_agreement
+A1	A/duck Chile//01___		Influenza A virus (A/duck/Chile/01(H5N1))	A/duck_Chile//01	H5N1		ambiguous_strain_year
+A2		A / H1N1	Influenza A virus without strain pattern		H1N1		no_strain_year
+A3		h?n7	Influenza A virus (A/gull/Peru/88(mixed))	A/gull/Peru/88	N7		ambiguous_strain_year
+A4		HXNY	No subtype in definition		H0N0_LIKE		no_strain_year
+A5			completely unparseable		unknown		no_strain_year
