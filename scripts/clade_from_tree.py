@@ -39,6 +39,7 @@ def _consensus(counter):
 
 DEFAULT_MIN_PURITY = 0.6
 DEFAULT_MAX_CLADE_FRACTION = 0.5
+DEFAULT_MAX_GENOTYPE_CLADE_FRACTION = 0.85
 # Below this many tips, "fraction of the whole tree" is not a meaningful locality
 # signal (in a 4-tip tree any useful clade spans most of it), so the fraction
 # guard only starts biting once a tree is big enough for it to mean something.
@@ -47,7 +48,8 @@ MIN_CLADE_TIP_ALLOWANCE = 25
 
 def assign_labels_from_tree(newick, reference_labels,
 							min_purity=DEFAULT_MIN_PURITY,
-							max_clade_fraction=DEFAULT_MAX_CLADE_FRACTION):
+							max_clade_fraction=DEFAULT_MAX_CLADE_FRACTION,
+							max_clade_fraction_genotype=None):
 	"""Assign labels to the query tips of a tree from their nearest labelled refs.
 
 	A label is only accepted when the enclosing clade is genuinely informative
@@ -70,7 +72,11 @@ def assign_labels_from_tree(newick, reference_labels,
 		reference_labels: {accession: {"genotype": str, "subtype": str}} for the
 			reference tips whose clade is known. Missing/blank values are ignored.
 		min_purity: minimum winning-label share of references in the deciding clade.
-		max_clade_fraction: maximum share of the tree the deciding clade may span.
+		max_clade_fraction: maximum share of the tree the deciding clade may span
+			(defaults to 0.5, primarily constraining subtype assignment).
+		max_clade_fraction_genotype: maximum share of the tree the deciding clade may
+			span for genotype assignment (defaults to 0.85 to accommodate dominant
+			major lineages while still blocking root climbing).
 
 	Returns:
 		{accession: {"genotype": str, "subtype": str}} for every tip present in
@@ -149,9 +155,17 @@ def assign_labels_from_tree(newick, reference_labels,
 		sub_counts[id(clade)] = s_counter
 		tip_counts[id(clade)] = tips_here
 
-	tip_cap = max(MIN_CLADE_TIP_ALLOWANCE, total_tips * max_clade_fraction) if total_tips else 0
+	if max_clade_fraction_genotype is None:
+		max_clade_fraction_genotype = (
+			DEFAULT_MAX_GENOTYPE_CLADE_FRACTION
+			if max_clade_fraction == DEFAULT_MAX_CLADE_FRACTION
+			else max_clade_fraction
+		)
 
-	def _nearest(clade, counts):
+	tip_cap_sub = max(MIN_CLADE_TIP_ALLOWANCE, total_tips * max_clade_fraction) if total_tips else 0
+	tip_cap_geno = max(MIN_CLADE_TIP_ALLOWANCE, total_tips * max_clade_fraction_genotype) if total_tips else 0
+
+	def _nearest(clade, counts, tip_cap):
 		"""Nearest enclosing clade holding references, subject to the locality and
 		purity guards. Climbing past a failing clade only makes both worse, so a
 		failure ends the search with a blank label."""
@@ -176,7 +190,7 @@ def assign_labels_from_tree(newick, reference_labels,
 		if name in assignments:
 			continue
 		assignments[name] = {
-			"genotype": _nearest(clade, geno_counts),
-			"subtype": _nearest(clade, sub_counts),
+			"genotype": _nearest(clade, geno_counts, tip_cap_geno),
+			"subtype": _nearest(clade, sub_counts, tip_cap_sub),
 		}
 	return assignments

@@ -724,18 +724,17 @@ def test_tree_free_db_has_no_trees_but_still_carries_the_clade_columns():
 
 
 @pytest.mark.skipif(not RABV_CLADE_REF_LIST.exists(), reason=f"missing {RABV_CLADE_REF_LIST}")
-def test_shipped_rabv_clade_list_is_mostly_unlabelled():
-	"""Documents the live trigger for the unlabelled-reference finding rather than
-	asserting a fix: two nextflow profiles point ref_list at this file, and the
-	overwhelming majority of its rows use "NA" for both clade columns, so most
-	RABV references reach assign_labels_from_tree looking like queries.
+def test_shipped_rabv_clade_list_is_labelled():
+	"""All references in the shipped RABV clade list must carry a valid genotype
+	to prevent unlabelled references being treated as queries or poisoning
+	downstream clade assignment.
 	"""
 	rows = [line.rstrip("\n").split("\t") for line in RABV_CLADE_REF_LIST.read_text(encoding="utf-8").splitlines() if line.strip()]
 	sentinel = {"", "na", "n/a", "nan", "none", "null"}
-	unlabelled = [r for r in rows if len(r) >= 5 and r[3].strip().lower() in sentinel and r[4].strip().lower() in sentinel]
-	assert len(unlabelled) > len(rows) / 2, (
-		"expected the shipped RABV clade list to be mostly NA/NA; "
-		f"got {len(unlabelled)}/{len(rows)}"
+	unlabelled_geno = [r for r in rows if len(r) < 4 or r[3].strip().lower() in sentinel]
+	assert not unlabelled_geno, (
+		"expected all references in the shipped RABV clade list to have a valid genotype; "
+		f"got {len(unlabelled_geno)}/{len(rows)} unlabelled"
 	)
 
 

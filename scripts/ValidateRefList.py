@@ -15,8 +15,8 @@ if df.shape[1] < 2:
 if params.is_segmented == 'Y' and not df["segment"].astype(str).str.strip().ne("").any():
     raise ValueError("For segmented data, reference list must contain three columns: accession, master/reference indicator, and segment.")
 
-# check master/reference column contains only 'master', 'reference', or 'exclusion_list'
-valid_indicators = {'master', 'reference', 'exclusion_list'}
+# check master/reference column contains only 'master', 'reference', 'exclusion_list', or 'query'
+valid_indicators = {'master', 'reference', 'exclusion_list', 'query'}
 indicator_series = df["accession_type"].fillna("").astype(str).str.lower().str.strip()
 if not indicator_series.isin(valid_indicators).all():
     invalid = set(indicator_series.unique()) - valid_indicators
