@@ -178,21 +178,22 @@ class FilterAndExtractSequences:
 						exclusion_status = 1
 						exclusion_criteria = "excluded by reference list exclusion flag"
 
-					if self.gb_division is not None and gb_division not in self.gb_division:
-						exclusion_status = 1
-						exclusion_criteria = f"GenBank division {gb_division} not in user-defined exclusion list"
+					if is_query:
+						if self.gb_division is not None and gb_division not in self.gb_division:
+							exclusion_status = 1
+							exclusion_criteria = f"GenBank division {gb_division} not in user-defined exclusion list"
 
-					elif gb_division not in self.valid_divisions:
-						exclusion_status = 1
-						exclusion_criteria = f"GenBank division {gb_division} not in valid division list"
+						elif gb_division not in self.valid_divisions:
+							exclusion_status = 1
+							exclusion_criteria = f"GenBank division {gb_division} not in valid division list"
 
-					if seq_len < self.total_length:
-						exclusion_status = 1
-						exclusion_criteria = "Sequence length less than total length"
+						if seq_len < self.total_length:
+							exclusion_status = 1
+							exclusion_criteria = "Sequence length less than total length"
 
-					if seq_len_without_n < self.real_length:
-						exclusion_status = 1
-						exclusion_criteria = "Real sequence length (length - Ns) less than the threshold"
+						if seq_len_without_n < self.real_length:
+							exclusion_status = 1
+							exclusion_criteria = "Real sequence length (length - Ns) less than the threshold"
 
 					existing_criteria = row.get('exclusion_criteria', '').strip()
 					if existing_criteria:
@@ -246,10 +247,10 @@ if __name__ == "__main__":
 				'    "SYN" = Synthetic and chimeric sequences\n'
 			),
 				nargs='+',
-				default=['VRL', 'PAT', 'SYN', 'ENV'],
+				default=['VRL', 'PAT', 'SYN', 'ENV', 'PHG'],
 				type=str
     )
-	parser.add_argument('-vd', '--valid_divisions', help="Valid GenBank divisions to be considered for the analysis", nargs='+', default=['VRL', 'ENV'], type=str)
+	parser.add_argument('-vd', '--valid_divisions', help="Valid GenBank divisions to be considered for the analysis", nargs='+', default=['VRL', 'ENV', 'PHG'], type=str)
 	parser.add_argument('-s', '--seq_type', help='Sequence type', default=None, type=str)
 	parser.add_argument('--update_db', help='Existing update DB; when set, derive reference accessions from DB instead of ref_file', default=None)
 	args = parser.parse_args()

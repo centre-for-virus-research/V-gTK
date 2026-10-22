@@ -86,6 +86,14 @@ def test_exclusion_list_rows_are_not_expected_in_the_backbone(tmp_path):
     CRB.write_manifest(str(cache), str(ref_list), 2, "with exclusions")
 
 
+def test_query_rows_are_not_expected_in_the_backbone(tmp_path):
+    """Curated query rows in reference lists are not references; the builder leaves them out."""
+    cache, ref_list = _tiny_cache(tmp_path)
+    ref_list.write_text(ref_list.read_text() + "Q_EXTRA\tquery\t1\n")
+    assert CRB.check(str(cache), str(ref_list), 2)[0] == []
+    CRB.write_manifest(str(cache), str(ref_list), 2, "with queries")
+
+
 def test_different_insertion_support_fails(tmp_path):
     cache, ref_list = _tiny_cache(tmp_path)
     failures = CRB.check(str(cache), str(ref_list), 1)[0]

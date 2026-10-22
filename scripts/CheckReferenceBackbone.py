@@ -75,13 +75,14 @@ def reference_rows(ref_list):
 
 	``exclusion_list`` rows (influenza B/C/D in the flu list) name sequences to keep
 	out of the build, not references, so they are not expected in the backbone.
+	``query`` rows (curated query sequences in clade lists) are not references either.
 	"""
 	table = load_reference_file_table(ref_list)
 	types = table["accession_type"].fillna("").astype(str).str.strip().str.lower()
 	segments = table["segment"] if "segment" in table.columns else [""] * len(table)
 	return [(_key(acc), str(seg or "").strip())
 			for acc, seg, kind in zip(table["primary_accession"], segments, types)
-			if str(acc).strip() and kind != "exclusion_list"]
+			if str(acc).strip() and kind in ("master", "reference")]
 
 
 def reference_accessions(ref_list):
@@ -124,7 +125,10 @@ def coverage(backbone_dir, ref_list, is_segmented="N"):
 		name, members = cache[label]
 		if acc not in members:
 			missing.append(f"{acc} (segment {label}: {name or 'no backbone file'})")
-	listed = {acc for acc, _ in rows}
+	table = load_reference_file_table(ref_list)
+	types = table["accession_type"].fillna("").astype(str).str.strip().str.lower()
+	listed = {_key(acc) for acc, kind in zip(table["primary_accession"], types)
+			  if str(acc).strip() and kind != "exclusion_list"}
 	return sorted(set(missing)), sorted(everywhere - listed)
 
 
@@ -168,7 +172,10 @@ def check(backbone_dir, ref_list, min_insertion_support, is_segmented="N"):
 	# A cache was built from exactly its list, so an unlisted row means the list shrank.
 	if extra:
 		failures.append(f"{len(extra)} backbone row(s) are not in the reference list: {extra[:10]}")
-	if not missing and not extra and manifest.get("reference_accessions_sha256") != digest_accessions(reference_accessions(ref_list)):
+	expected_sha = manifest.get("reference_accessions_sha256")
+	actual_sha = digest_accessions(reference_accessions(ref_list))
+	backbone_sha = digest_accessions(in_backbone)
+	if not missing and not extra and expected_sha not in (actual_sha, backbone_sha):
 		failures.append("reference accessions differ from those the cache was built for")
 	if str(manifest.get("min_insertion_support")) != str(min_insertion_support):
 		failures.append(
