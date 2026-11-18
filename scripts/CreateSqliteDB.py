@@ -17,6 +17,7 @@ from Bio import Phylo
 from io import StringIO
 from accession_utils import normalise_accession
 import segment_utils
+import usher_assets
 
 
 class CreateSqliteDB:
@@ -145,6 +146,29 @@ class CreateSqliteDB:
 			newick = self._root_newick(newick, tree_path)
 		self._rooted_trees[tree_path] = newick
 		return newick
+
+	def _store_usher_bundles(self, conn, tree_records, created_at):
+		"""Store each UShER row's usher.pb and sidecars under the row's own key.
+
+		A row written this run always loses its old bundle, so a tree with no
+		verifiable .pb ends up with none rather than with the previous tree's.
+		"""
+		usher_assets.ensure_schema(conn)
+		stored = 0
+		for record in tree_records:
+			if record["source"] != "usher":
+				continue
+			usher_assets.delete_bundle(conn, record)
+			bundle = usher_assets.collect_bundle(record.get("path"))
+			if bundle is None:
+				print(f"[CreateSqliteDB] No UShER mutation-annotated tree stored for {record['name']}")
+				continue
+			usher_assets.store_bundle(conn, record, bundle, record["newick"], created_at)
+			stored += 1
+			if bundle["status"] != "verified":
+				print(f"[CreateSqliteDB] Stored {bundle['status']} UShER bundle for {record['name']}: {bundle['note']}")
+		removed, marked = usher_assets.reconcile(conn)
+		print(f"[CreateSqliteDB] Stored {stored} UShER bundle(s); dropped {removed} orphaned, marked {marked} stale")
 
 	def _reference_accessions(self):
 		"""Bare accessions of every row in the run's reference list."""
@@ -1986,13 +2010,16 @@ class CreateSqliteDB:
 
 		if is_single_segment:
 			usher_newick = None
+			usher_path = None
 			if self.usher_tree:
 				usher_newick = self._read_rooted_tree_file(self.usher_tree)
+				usher_path = self.usher_tree
 			if not usher_newick and self.tree_manifest:
 				for entry in self._load_tree_manifest(self.tree_manifest):
 					if entry.get("source") == "usher":
 						usher_newick = self._read_rooted_tree_file(entry["path"])
 						if usher_newick:
+							usher_path = entry["path"]
 							break
 			if usher_newick:
 				tree_records.append({
@@ -2000,7 +2027,8 @@ class CreateSqliteDB:
 					"source": "usher",
 					"segment_key": None,
 					"segment": "1",
-					"newick": usher_newick
+					"newick": usher_newick,
+					"path": usher_path,
 				})
 
 		# One reference-only tree per IQ-TREE, under its own source so nothing that
@@ -2053,6 +2081,7 @@ class CreateSqliteDB:
 			).rowcount
 			if removed:
 				print(f"[CreateSqliteDB] Removed {removed} unlabelled duplicate tree row(s)")
+			self._store_usher_bundles(conn, tree_records, now_str)
 
 		creation_type = self._resolve_creation_type()
 		# Two columns, appended - the info table's shape is unchanged, so anything

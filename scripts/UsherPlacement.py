@@ -14,6 +14,7 @@ from io import StringIO
 import pandas as pd
 from Bio import Phylo, SeqIO
 import segment_utils
+import usher_assets
 
 
 class UsherPlacement:
@@ -1208,11 +1209,42 @@ class UsherPlacement:
 			raise FileNotFoundError(f"USHER did not produce an updated protobuf at {output_pb}")
 		return output_pb
 
-	def promote_final_usher_outputs(self, final_output_dir):
-		for name in ["final-tree.nh", "uncondensed-final-tree.nh", "usher.pb", "mutation-paths.txt", "placement_stats.tsv", "all_samples.vcf"]:
+	def promote_final_usher_outputs(self, final_output_dir, chunk_dirs=None):
+		for name in ["final-tree.nh", "uncondensed-final-tree.nh", "usher.pb", "all_samples.vcf"]:
 			src = os.path.join(final_output_dir, name)
 			if os.path.isfile(src):
 				shutil.copyfile(src, os.path.join(self.output_dir, name))
+		# Each batch writes these for its own samples only; copying the last
+		# batch's alone dropped every earlier placement.
+		for name in ["mutation-paths.txt", "placement_stats.tsv"]:
+			sources = [os.path.join(d, name) for d in (chunk_dirs or [final_output_dir])]
+			sources = [src for src in sources if os.path.isfile(src)]
+			if not sources:
+				continue
+			with open(os.path.join(self.output_dir, name), "wb") as out:
+				for src in sources:
+					with open(src, "rb") as handle:
+						shutil.copyfileobj(handle, out)
+
+	def write_sample_paths(self):
+		"""The mutation path of every tip in the final .pb, backbone included.
+
+		mutation-paths.txt only covers newly placed samples; this is the full
+		set, so the DB bundle answers "which mutations lead to X" for any tip.
+		"""
+		pb_path = os.path.join(self.output_dir, usher_assets.PB_FILE)
+		out_path = os.path.join(self.output_dir, usher_assets.SIDECARS["sample_paths_gz"])
+		if os.path.isfile(out_path):
+			os.remove(out_path)
+		if not os.path.isfile(pb_path):
+			return None
+		try:
+			subprocess.run(["matUtils", "extract", "-i", pb_path, "-S", out_path], check=True,
+			               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+		except (OSError, subprocess.CalledProcessError) as exc:
+			print(f"[warn] Could not write {out_path} with matUtils: {getattr(exc, 'stderr', '') or exc}", flush=True)
+			return None
+		return out_path
 
 	def copy_tree_outputs(self, tree_file):
 		"""Publish an unchanged starter tree as this run's result.
@@ -1409,6 +1441,7 @@ class UsherPlacement:
 			self.copy_tree_outputs(tree_file)
 			self.expand_identical_sequence_tree_outputs(collapse_plan["anchor_to_members"])
 			self.assert_tree_covers_alignment(collapse_plan)
+			usher_assets.write_provenance(self.output_dir, pb_produced=False, starter_tree=os.path.abspath(tree_file), placed=0)
 			return
 
 		# Build a mutation-annotated backbone protobuf ONCE. This is the fix:
@@ -1447,6 +1480,7 @@ class UsherPlacement:
 			self.copy_tree_outputs(tree_file)
 			self.expand_identical_sequence_tree_outputs(collapse_plan["anchor_to_members"])
 			self.assert_tree_covers_alignment(collapse_plan)
+			usher_assets.write_provenance(self.output_dir, pb_produced=False, starter_tree=os.path.abspath(tree_file), placed=0)
 			return
 		print(
 			f"[info] Placing {len(placeable_ids)} sequence(s) in {len(chunk_fastas)} batch(es) "
@@ -1458,6 +1492,7 @@ class UsherPlacement:
 		)
 		current_pb = backbone_pb
 		final_chunk_dir = None
+		chunk_dirs = []
 		self.log_chunk_progress(0, len(chunk_fastas))
 		for idx, chunk_fasta in enumerate(chunk_fastas, start=1):
 			chunk_dir = os.path.join(self.output_dir, f"chunk_{idx:04d}")
@@ -1468,11 +1503,23 @@ class UsherPlacement:
 			)
 			current_pb = self.place_onto_pb(current_pb, vcf_path, chunk_dir)
 			final_chunk_dir = chunk_dir
+			chunk_dirs.append(chunk_dir)
 			self.log_chunk_progress(idx, len(chunk_fastas))
 		if final_chunk_dir:
-			self.promote_final_usher_outputs(final_chunk_dir)
+			self.promote_final_usher_outputs(final_chunk_dir, chunk_dirs)
 			self.expand_identical_sequence_tree_outputs(collapse_plan["anchor_to_members"])
 			self.assert_tree_covers_alignment(collapse_plan)
+			self.write_sample_paths()
+			# Last, so the recorded tree hashes are of the expanded trees a DB
+			# build reads; the .pb itself holds only the collapsed anchors.
+			usher_assets.write_provenance(
+				self.output_dir,
+				starter_tree=os.path.abspath(tree_file),
+				reference_id=ref_id,
+				placed=len(placeable_ids),
+				batches=len(chunk_dirs),
+				collapsed_identical=collapsed_count,
+			)
 
 	@classmethod
 	def _read_text_lines(cls, path):
