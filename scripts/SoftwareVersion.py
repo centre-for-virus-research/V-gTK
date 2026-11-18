@@ -52,7 +52,7 @@ class SoftwareVersionChecker:
 			for software, version in self.software_versions.items():
 				writer.writerow([software, version])
 			writer.writerow(["Time of creation", time.time()])
-			writer.writerow(["vgtk version", "v.1.0.0"])
+			writer.writerow(["vgtk version", "v.1.1.0"])
         
 if __name__ == "__main__":
     parser = ArgumentParser(description='Create a TSV with available software version information')

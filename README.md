@@ -12,7 +12,9 @@ The pipeline has full out-of-the-box support for the following viruses, with pre
 |---|---|---|
 | **Rabies Virus (RABV)** | No | Initial build, database update, phylogenetic tree placement (UShER) |
 | **Hepatitis C Virus (HCV)** | No | Database updates, mutation catalog annotation & verification (`VerifyMutations`) |
-| **Influenza A Virus (IAV)** | Yes | Segment validation, strain validation, GISAID and GenBank XML merging |
+| **Influenza A Virus (IAV)** | Yes | Segment validation, strain validation, GISAID and GenBank XML merging, cross-DB/strain sequence deduplication |
+| **Human RSV (*Orthopneumovirus hominis*)** | No | RSV-A and RSV-B complete-genome reference backbone (`G` duplications preserved), tree placement |
+| **Divergent Virus Families (opt-in)** | Yes / No | Codon-aware per-segment ML backbones + dense-cluster UShER grafting via `--run_divergent_mode` (see [`info_help/divergent_mode.md`](info_help/divergent_mode.md)) |
 
 ---
 
@@ -51,10 +53,13 @@ The pipeline profiles in `nextflow.config` are grouped by their operational purp
 |---|---|---|---|
 | **Test Runs**<br>*(Quick validation using small subsets)* | `test` | RABV | Basic run with a small set of sequences |
 | | `HCV_test` | HCV | Small scale run validating mutation annotations |
-| | `segmented_test` | IAV | Validation run for segmented influenza mapping |
-| | `flu_gisaid_test` | IAV | Test run incorporating simulated GISAID metadata |
+| | `RSV_test` | RSV | Small scale run validating RSV-A and RSV-B genome backbone |
+| | `segmented_test` / `segmented_xml_test` | IAV | Validation run for segmented influenza mapping (live fetch or frozen XML fixture) |
+| | `flu_gisaid_test` | IAV | Test run incorporating GISAID metadata and cross-DB deduplication |
+| | `divergent_test` / `hanta_divergent_test` | Cystoviridae / Hantaviridae | Validation runs for opt-in `--run_divergent_mode` |
 | **Fresh Runs**<br>*(Build full DB from scratch)* | `setup_rabv_full` | RABV | Complete database construction from scratch |
 | | `HCV_full` | HCV | Complete database construction with mutation cataloging |
+| | `RSV_full` | RSV | Complete Human RSV database construction from scratch |
 | **Update Runs**<br>*(Incremental updates to existing DB)* | `HCV_update` | HCV | Updates an existing HCV database with new sequences |
 | | `setup_rabv_test_update` | RABV | Test run validating incremental rabies database updates |
 | | `update_test` | RABV | Quick regression test checking database updates |

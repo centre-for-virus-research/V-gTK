@@ -44,6 +44,7 @@ def test_get_software_version_and_tsv_write(tmp_path: Path, monkeypatch):
     assert "Python" in names
     assert "Time of creation" in names
     assert "vgtk version" in names
+    assert dict(rows[1:])["vgtk version"] == "v.1.1.0"
 
     assert checker.software_versions["MAFFT"] == "mafft v7.520"
 
