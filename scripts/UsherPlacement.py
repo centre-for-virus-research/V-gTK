@@ -14,6 +14,8 @@ from io import StringIO
 import pandas as pd
 from Bio import Phylo, SeqIO
 import segment_utils
+from accession_utils import normalise_accession
+from cross_db_dedup import prune_and_rename_newick
 
 
 class UsherPlacement:
@@ -49,12 +51,13 @@ class UsherPlacement:
 		"--last_optimization_minutes", "0",
 	]
 
-	def __init__(self, padded_aln, output_dir, mmseq_cluster_dir=None, iqtree_dir=None, update_db=None, threads=1, test_mode=False, chunk_size=50000, chunk_threshold=100000, starter_tree=None, existing_ids_file=None, placement_order="quality", segment=None, min_informative_bases=1, reference_ids=None, collapse_output_tree=True, placer="usher"):
+	def __init__(self, padded_aln, output_dir, mmseq_cluster_dir=None, iqtree_dir=None, update_db=None, threads=1, test_mode=False, chunk_size=50000, chunk_threshold=100000, starter_tree=None, existing_ids_file=None, placement_order="quality", segment=None, min_informative_bases=1, reference_ids=None, collapse_output_tree=True, placer="usher", retire_ids_file=None):
 		self.padded_aln = padded_aln
 		self.output_dir = output_dir
 		self.mmseq_cluster_dir = self._normalize_optional_path(mmseq_cluster_dir)
 		self.iqtree_dir = self._normalize_optional_path(iqtree_dir)
 		self.update_db = self._normalize_optional_path(update_db)
+		self.retire_ids_file = self._normalize_optional_path(retire_ids_file)
 		# Clamped from above as well as below: an unbounded -T is handed straight
 		# to usher and to OMP_NUM_THREADS, which oversubscribes a shared node.
 		self.threads = min(max(1, int(threads)), max(1, os.cpu_count() or 1))
@@ -317,6 +320,28 @@ class UsherPlacement:
 			)
 		return found.pop() if found else "0"
 
+	def _load_retire_ids(self):
+		"""Accessions superseded by incoming preferred-source sequences in update mode."""
+		if not self.retire_ids_file or not os.path.isfile(self.retire_ids_file):
+			return set()
+		protected = set(self.reference_ids)
+		for r in list(protected):
+			bare = normalise_accession(r)
+			if bare:
+				protected.add(bare)
+		retired = set()
+		for line in self._read_text_lines(self.retire_ids_file):
+			tok = line.split()[0].strip()
+			if not tok or tok in protected:
+				continue
+			bare = normalise_accession(tok)
+			if bare and bare in protected:
+				continue
+			retired.add(tok)
+			if bare:
+				retired.add(bare)
+		return retired
+
 	def prepare_update_assets(self):
 		if not self.update_db:
 			raise ValueError("update_db is required for update-mode USHER placement")
@@ -328,9 +353,36 @@ class UsherPlacement:
 		tree_out = os.path.join(self.output_dir, f"tree_segment_{segment}.nwk")
 		ids_out = os.path.join(self.output_dir, f"existing_ids_segment_{segment}.txt")
 
+		retired_ids = set(self._load_retire_ids())
+		protected_refs = set(self.reference_ids)
+		for r in list(protected_refs):
+			bare = normalise_accession(r)
+			if bare:
+				protected_refs.add(bare)
+
 		conn = sqlite3.connect(self.update_db)
 		try:
 			cur = conn.cursor()
+
+			if cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta_data'").fetchone():
+				meta_cols = {row[1] for row in cur.execute("PRAGMA table_info(meta_data)").fetchall()}
+				if "exclusion_status" in meta_cols and "primary_accession" in meta_cols:
+					acc_type_clause = (
+						"AND LOWER(TRIM(COALESCE(CAST(accession_type AS TEXT), ''))) NOT IN ('master', 'reference')"
+						if "accession_type" in meta_cols else ""
+					)
+					for (acc,) in cur.execute(
+						f"SELECT primary_accession FROM meta_data "
+						f"WHERE primary_accession IS NOT NULL AND TRIM(primary_accession) <> '' "
+						f"AND LOWER(TRIM(COALESCE(CAST(exclusion_status AS TEXT), ''))) NOT IN ('', '0', 'false', 'no', 'na', 'none', 'nan') "
+						f"{acc_type_clause}"
+					):
+						acc_s = str(acc).strip()
+						if acc_s and acc_s not in protected_refs:
+							retired_ids.add(acc_s)
+							bare = normalise_accession(acc_s)
+							if bare and bare not in protected_refs:
+								retired_ids.add(bare)
 
 			tree_written = False
 			if cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='trees'").fetchone():
@@ -365,8 +417,18 @@ class UsherPlacement:
 							"De-duplicate the trees table to remove the ambiguity.",
 							flush=True,
 						)
+					starter_newick = best[2]
+					if retired_ids:
+						pruned_newick, prune_stats = prune_and_rename_newick(starter_newick, retired_ids)
+						n_pruned = prune_stats.get("pruned_tips", 0)
+						if n_pruned > 0 and pruned_newick:
+							print(
+								f"[info] Pruned {n_pruned} retired/superseded tip(s) from starter tree on segment {segment}.",
+								flush=True,
+							)
+							starter_newick = pruned_newick
 					with self._open_text(tree_out, "w") as handle:
-						handle.write(best[2] + "\n")
+						handle.write(starter_newick + "\n")
 					tree_written = True
 
 			if not tree_written:
@@ -411,7 +473,7 @@ class UsherPlacement:
 			self._require_tables(cur, ["meta_data", "sequence_alignment"])
 			df_meta = pd.read_sql_query("SELECT primary_accession, accession_type, segment FROM meta_data", conn)
 			df_aln = pd.read_sql_query("SELECT * FROM sequence_alignment", conn)
-			excluded = set()
+			excluded = set(self._load_retire_ids())
 			meta_cols = {row[1] for row in cur.execute("PRAGMA table_info(meta_data)").fetchall()}
 			if "exclusion_status" in meta_cols:
 				for (acc,) in cur.execute(
@@ -1538,6 +1600,12 @@ if __name__ == "__main__":
 		help="Reference list. Its master accessions are preferred as the faToVcf reference when they "
 			 "are in the alignment (and, in a fresh build, among the cluster representatives).",
 	)
+	parser.add_argument(
+		"--retire_ids_file",
+		default=None,
+		help="Optional file listing update_db accessions superseded by incoming preferred-source sequences; "
+			 "pruned from the starter tree and skipped during alignment rehydration.",
+	)
 	args = parser.parse_args()
 
 	reference_ids = []
@@ -1566,4 +1634,5 @@ if __name__ == "__main__":
 		reference_ids=reference_ids,
 		collapse_output_tree=not args.no_collapse_output_tree,
 		placer=args.placer,
+		retire_ids_file=args.retire_ids_file,
 	).run()

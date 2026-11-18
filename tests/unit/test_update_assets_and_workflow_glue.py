@@ -86,6 +86,16 @@ def test_workflow_update_glue_contains_skip_and_guard():
     assert "--db !{params.db_name}.db" in text
     # TEST_SUBSAMPLE_CLUSTER_INPUT is invoked in test mode to speed up CI
     assert "TEST_SUBSAMPLE_CLUSTER_INPUT(" in text
+    # Cross-DB & strain alignment deduplication glue
+    assert "--base_fasta !{gb_seqs}" in text
+    assert "--dedup_fasta_out gisaid_dedup.fas" in text
+    assert "--dedup_report gisaid_cross_source_dedup_report.tsv" in text
+    assert "CAT_FASTA(gb_seqs_ch, MERGE_GISAID.out.gisaid_dedup_nuc)" in text
+    assert "process DEDUP_STRAIN_ALIGNMENT" in text
+    assert "DedupStrainAlignment.py" in text
+    assert "DEDUP_STRAIN_ALIGNMENT(" in text
+    assert "DEDUP_STRAIN_ALIGNMENT.out.retired_update_ids" in text
+    assert "--retire_ids_file !{retired_update_ids}" in text
 
 
 def test_workflow_genbank_parser_passes_segmented_flag():

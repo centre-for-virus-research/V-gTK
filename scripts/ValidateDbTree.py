@@ -1906,6 +1906,262 @@ def validate_collection_dates(conn, meta_cols, today=None):
     return invariant_result(title, findings)
 
 
+def validate_strain_sequence_duplicates(
+    conn,
+    meta_cols,
+    force=False,
+    accession_column="primary_accession",
+    exclusion_column="exclusion_status",
+    exclude_value="1",
+):
+    """Active query rows on the same segment must not carry unretired 0-mismatch
+    same-strain duplicate uploads (cross-DB GenBank+GISAID or intra-DB).
+
+    Auto-enabled on multi-source databases (where ``dataset_source`` carries >=2
+    distinct values or ``*_insdc_upload`` columns exist), and available on any
+    single-source database via ``force=True`` / ``--check-strain-duplicates``."""
+    title = "strain sequence deduplication"
+    if not table_exists(conn, "meta_data") or accession_column not in meta_cols:
+        return invariant_result(title, skipped=True, reason=f"meta_data.{accession_column} not present.")
+    if not table_exists(conn, "sequence_alignment") and not table_exists(conn, "sequences"):
+        return invariant_result(title, skipped=True, reason="Neither sequence_alignment nor sequences table is present.")
+
+    has_dataset_source = "dataset_source" in meta_cols
+    has_insdc_col = any("insdc" in c.lower() for c in meta_cols)
+    if not force:
+        sources = set()
+        if has_dataset_source:
+            for (val,) in conn.execute(
+                'SELECT DISTINCT LOWER(TRIM(COALESCE(CAST("dataset_source" AS TEXT), ""))) FROM meta_data'
+            ):
+                if val:
+                    sources.add(val)
+        if len(sources) < 2 and not has_insdc_col:
+            return invariant_result(
+                title,
+                skipped=True,
+                reason="Single-source DB without multi-repository dataset_source; pass --check-strain-duplicates to force.",
+            )
+
+    from accession_utils import normalise_accession
+    from cross_db_dedup import (
+        aligned_sequences_agree,
+        candidate_winner_sort_key,
+        count_acgt,
+        extract_canonical_isolate,
+        extract_insdc_links,
+        extract_passage_class,
+        is_preferred_source,
+        passages_compatible,
+        unaligned_sequences_agree,
+    )
+
+    wanted_cols = [
+        c for c in (
+            accession_column, "dataset_source", "accession_type", exclusion_column,
+            "segment", "strain", "Parsed_strain", "isolate", "definition",
+            "collection_date", "Passage_History", "isolation_source", "real_length",
+            "alt_accessions",
+        )
+        if c in meta_cols
+    ]
+    for c in meta_cols:
+        if ("insdc" in c.lower() or "genbank_accession" in c.lower()) and c not in wanted_cols:
+            wanted_cols.append(c)
+
+    qcols = ", ".join(quote_ident(c) for c in wanted_cols)
+    where_clause, params = get_meta_nonexcluded_filter(meta_cols, exclusion_column, exclude_value)
+    sql = f"SELECT {qcols} FROM meta_data"
+    if where_clause:
+        sql += f" WHERE {where_clause}"
+
+    has_seg = "segment" in meta_cols
+    by_seg_iso = {}
+    by_seg_bare = {}
+    linked_rows = []
+    for raw_tuple in conn.execute(sql, params):
+        row = {col: ("" if v is None else str(v)) for col, v in zip(wanted_cols, raw_tuple)}
+        acc = row.get(accession_column, "").strip()
+        if not acc:
+            continue
+        seg = row.get("segment", "").strip() if has_seg else "1"
+        acc_type = row.get("accession_type", "").strip().lower()
+        protected = acc_type in ("master", "reference")
+        src = (row.get("dataset_source") or "genbank").strip().lower() or "genbank"
+        iso = extract_canonical_isolate(row)
+        pas = extract_passage_class(row)
+        bare = (normalise_accession(acc) or acc).upper()
+        try:
+            rlen = int(float(row.get("real_length") or 0))
+        except ValueError:
+            rlen = 0
+        cand = {
+            "accession": acc,
+            "bare_upper": bare,
+            "segment": seg,
+            "isolate": iso,
+            "passage": pas,
+            "real_length": rlen,
+            "protected": protected,
+            "source": src,
+            "collection_date": row.get("collection_date", ""),
+            "origin": "update_db",
+            "preferred": is_preferred_source(src, "genbank") or protected,
+        }
+        by_seg_bare[(seg, bare)] = cand
+        if iso:
+            by_seg_iso.setdefault((seg, iso), []).append(cand)
+        links = extract_insdc_links(row, segment_hint=seg)
+        if links and not protected:
+            linked_rows.append((seg, cand, links))
+
+    shortlist_accs = set()
+    for grp in by_seg_iso.values():
+        if len(grp) >= 2:
+            for c in grp:
+                shortlist_accs.add(c["accession"])
+    for seg, cand, links in linked_rows:
+        for lk in links:
+            w = by_seg_bare.get((seg, lk))
+            if w is not None and w["accession"] != cand["accession"]:
+                shortlist_accs.add(cand["accession"])
+                shortlist_accs.add(w["accession"])
+
+    if not shortlist_accs:
+        return invariant_result(title, [])
+
+    # Load sequences for shortlisted accessions only
+    use_aln = table_exists(conn, "sequence_alignment")
+    seq_map = {}
+    acc_list = sorted(shortlist_accs)
+    if use_aln:
+        aln_cols = get_table_columns(conn, "sequence_alignment")
+        id_col = next((c for c in ("primary_accession", "accession", "sequence_id") if c in aln_cols), None)
+        s_col = next((c for c in ("alignment", "aligned_seq", "sequence") if c in aln_cols), None)
+        aln_has_seg = "segment" in aln_cols
+        if id_col and s_col:
+            for i in range(0, len(acc_list), 900):
+                chunk = acc_list[i:i + 900]
+                ph = ",".join("?" * len(chunk))
+                q = (
+                    f"SELECT {quote_ident(id_col)}, {quote_ident(s_col)}"
+                    + (", segment" if aln_has_seg else "")
+                    + f" FROM sequence_alignment WHERE {quote_ident(id_col)} IN ({ph})"
+                )
+                for r in conn.execute(q, chunk):
+                    a = str(r[0] or "").strip()
+                    s = str(r[1] or "").strip()
+                    sg = str(r[2] or "").strip() if aln_has_seg else "1"
+                    if a and s:
+                        seq_map[(sg if has_seg and aln_has_seg else "1", a)] = s
+                        seq_map.setdefault(("*", a), s)
+    else:
+        seq_cols = get_table_columns(conn, "sequences")
+        id_col = next((c for c in ("header", "primary_accession", "accession") if c in seq_cols), None)
+        if id_col and "sequence" in seq_cols:
+            for i in range(0, len(acc_list), 900):
+                chunk = acc_list[i:i + 900]
+                ph = ",".join("?" * len(chunk))
+                q = f"SELECT {quote_ident(id_col)}, sequence FROM sequences WHERE {quote_ident(id_col)} IN ({ph})"
+                for r in conn.execute(q, chunk):
+                    a = str(r[0] or "").strip()
+                    s = str(r[1] or "").strip()
+                    if a and s:
+                        seq_map[("*", a)] = s
+
+    def _get_seq(sg, a):
+        return seq_map.get((sg, a)) or seq_map.get(("*", a), "")
+
+    cross_dups = []
+    intra_dups = []
+    seen_retired = set()
+
+    # Check explicit INSDC cross-DB links first
+    for seg, cand, links in linked_rows:
+        c_acc = cand["accession"]
+        if (seg, c_acc) in seen_retired or cand["protected"]:
+            continue
+        c_seq = _get_seq(seg, c_acc)
+        if not c_seq:
+            continue
+        c_len = cand["real_length"] or count_acgt(c_seq)
+        for lk in links:
+            w = by_seg_bare.get((seg, lk))
+            if w is None or w["accession"] == c_acc:
+                continue
+            if not passages_compatible(w["passage"], cand["passage"]):
+                continue
+            w_seq = _get_seq(seg, w["accession"])
+            if not w_seq:
+                continue
+            w_len = w["real_length"] or count_acgt(w_seq)
+            if use_aln:
+                ok, _, _ = aligned_sequences_agree(w_seq, c_seq, w_len, c_len, max_mm=2)
+            else:
+                ok, _, _ = unaligned_sequences_agree(w_seq, c_seq, max_mm=2)
+            if ok:
+                seen_retired.add((seg, c_acc))
+                cross_dups.append(f"seg={seg} {c_acc} ({cand['source']}) == {w['accession']} ({w['source']}) [insdc_link]")
+                break
+
+    # Check 0-mm same-strain groups
+    for (seg, iso), grp in sorted(by_seg_iso.items()):
+        if len(grp) < 2:
+            continue
+        ordered = sorted(grp, key=lambda item: candidate_winner_sort_key(item, "genbank"))
+        kept = []
+        for cand in ordered:
+            c_acc = cand["accession"]
+            if (seg, c_acc) in seen_retired:
+                continue
+            c_seq = _get_seq(seg, c_acc)
+            if not c_seq or cand["protected"]:
+                kept.append(cand)
+                continue
+            c_len = cand["real_length"] or count_acgt(c_seq)
+            matched_w = None
+            for w in kept:
+                if not passages_compatible(w["passage"], cand["passage"]):
+                    continue
+                w_seq = _get_seq(seg, w["accession"])
+                if not w_seq:
+                    continue
+                w_len = w["real_length"] or count_acgt(w_seq)
+                if use_aln:
+                    ok, _, _ = aligned_sequences_agree(w_seq, c_seq, w_len, c_len, max_mm=0)
+                else:
+                    ok, _, _ = unaligned_sequences_agree(w_seq, c_seq, max_mm=0)
+                if ok:
+                    matched_w = w
+                    break
+            if matched_w is None:
+                kept.append(cand)
+                continue
+            seen_retired.add((seg, c_acc))
+            desc = f"seg={seg} {c_acc} ({cand['source']}) == {matched_w['accession']} ({matched_w['source']}) strain={iso}"
+            if cand["source"] != matched_w["source"]:
+                cross_dups.append(desc)
+            else:
+                intra_dups.append(desc)
+
+    findings = []
+    add_finding(
+        findings,
+        "cross_db_duplicate_strain_sequences",
+        len(cross_dups),
+        "active cross-repository duplicate uploads of the same strain/segment with identical sequence",
+        cross_dups,
+    )
+    add_finding(
+        findings,
+        "intra_db_duplicate_strain_sequences",
+        len(intra_dups),
+        "active intra-repository duplicate uploads of the same strain/segment with identical sequence",
+        intra_dups,
+    )
+    return invariant_result(title, findings)
+
+
 def run_extended_invariant_checks(
     conn,
     meta_cols,
@@ -1915,6 +2171,7 @@ def run_extended_invariant_checks(
     exclude_value="1",
     where_sql=None,
     where_params=(),
+    check_strain_duplicates=False,
 ):
     """Run every extended invariant check and return the ordered result list."""
     return [
@@ -1928,6 +2185,14 @@ def run_extended_invariant_checks(
         validate_tree_tip_resolution(conn, accession_column=accession_column),
         validate_segment_tree_coverage(conn, meta_cols),
         validate_collection_dates(conn, meta_cols),
+        validate_strain_sequence_duplicates(
+            conn,
+            meta_cols,
+            force=check_strain_duplicates,
+            accession_column=accession_column,
+            exclusion_column=exclusion_column,
+            exclude_value=exclude_value,
+        ),
     ]
 
 
@@ -2027,6 +2292,11 @@ def main(argv=None):
         "--strict-invariants",
         action="store_true",
         help="Fail validation when an extended DB invariant check reports a finding (default: report as warnings)",
+    )
+    parser.add_argument(
+        "--check-strain-duplicates",
+        action="store_true",
+        help="Force 0-mm same-strain sequence duplicate check even on single-source DBs, and fail if any are found",
     )
     args = parser.parse_args(argv)
 
@@ -2227,6 +2497,7 @@ def main(argv=None):
                 exclude_value=args.exclude_value,
                 where_sql=where_sql,
                 where_params=where_params,
+                check_strain_duplicates=args.check_strain_duplicates,
             )
         feature_integrity_result = validate_feature_projection_integrity(conn) if args.check_update_integrity else {
             "title": "feature projection integrity",
@@ -2732,6 +3003,13 @@ def main(argv=None):
             validation_fail(
                 "Validation failed: DB invariant checks failed for " + ", ".join(failed_invariant_checks)
             )
+        if args.check_strain_duplicates:
+            strain_dup_failed = [
+                r["title"] for r in invariant_results
+                if r.get("title") == "strain sequence deduplication" and result_failed(r)
+            ]
+            if strain_dup_failed:
+                validation_fail("Validation failed: unretired same-strain duplicate sequences detected")
 
         failed_consistency_checks = [title for title, result in consistency_results.items() if result_failed(result)]
         failed_mutation_checks = [result["title"] for result in mutation_integrity_results if result_failed(result)]

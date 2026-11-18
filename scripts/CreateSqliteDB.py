@@ -17,6 +17,18 @@ from Bio import Phylo
 from io import StringIO
 from accession_utils import normalise_accession
 import segment_utils
+from cross_db_dedup import (
+	aligned_sequences_agree,
+	candidate_winner_sort_key,
+	coalesce_winner_metadata,
+	count_acgt,
+	extract_canonical_isolate,
+	extract_insdc_links,
+	extract_passage_class,
+	is_preferred_source,
+	passages_compatible,
+	prune_and_rename_newick,
+)
 
 
 class CreateSqliteDB:
@@ -52,9 +64,11 @@ class CreateSqliteDB:
 		update_db=None,
 		batch_id=None,
 		is_segmented=None,
+		dedup_strains=True,
 	):
 		# None = infer from the data (legacy behaviour). True/False = authoritative.
 		self.is_segmented = is_segmented
+		self.dedup_strains = bool(dedup_strains)
 		self.meta_data = meta_data
 		self.features = features
 		self.pad_aln = pad_aln
@@ -1617,6 +1631,511 @@ class CreateSqliteDB:
 		row = conn.execute(sql).fetchone()
 		return int(row[0]) if row else 0
 
+	def _load_update_db_strain_candidates(self, prefer_source="genbank"):
+		cand_by_key = {}
+		raw_by_key = {}
+		aln_by_key = {}
+		if not self.update or not self.update_db or not os.path.isfile(self.update_db):
+			return cand_by_key, raw_by_key, aln_by_key
+		conn = sqlite3.connect(f"file:{self.update_db}?mode=ro", uri=True)
+		try:
+			tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+			if "meta_data" not in tables or "sequence_alignment" not in tables:
+				return cand_by_key, raw_by_key, aln_by_key
+			meta_cols = [r[1] for r in conn.execute("PRAGMA table_info(meta_data)")]
+			aln_cols = [r[1] for r in conn.execute("PRAGMA table_info(sequence_alignment)")]
+			aln_acc_col = next((c for c in ("primary_accession", "accession", "sequence_id") if c in aln_cols), None)
+			aln_seq_col = next((c for c in ("alignment", "aligned_seq", "sequence") if c in aln_cols), None)
+			if not aln_acc_col or not aln_seq_col:
+				return cand_by_key, raw_by_key, aln_by_key
+
+			has_aln_seg = "segment" in aln_cols
+			aln_sql = (
+				f"SELECT {self._quote_identifier(aln_acc_col)}, {self._quote_identifier(aln_seq_col)}"
+				+ (", segment" if has_aln_seg else "")
+				+ " FROM sequence_alignment"
+			)
+			fallback_aln = {}
+			for row in conn.execute(aln_sql):
+				acc_raw = str(row[0] or "").strip()
+				seq = str(row[1] or "").strip()
+				if not acc_raw or not seq:
+					continue
+				acc = normalise_accession(acc_raw) or acc_raw
+				seg = self._normalize_segment_value(row[2]) if has_aln_seg else ""
+				aln_by_key[(acc, seg)] = seq
+				fallback_aln.setdefault(acc, seq)
+
+			qcols = ", ".join(self._quote_identifier(c) for c in meta_cols)
+			for raw_tuple in conn.execute(f"SELECT {qcols} FROM meta_data"):
+				row = {col: ("" if val is None else str(val)) for col, val in zip(meta_cols, raw_tuple)}
+				excl_val = str(row.get("exclusion_status") or "").strip().lower()
+				if excl_val not in ("", "0", "false", "no", "na", "none", "nan"):
+					continue
+				acc_raw = row.get("primary_accession", "").strip()
+				if not acc_raw:
+					continue
+				acc = normalise_accession(acc_raw) or acc_raw
+				seg = self._normalize_segment_value(row.get("segment", ""))
+				seq = aln_by_key.get((acc, seg)) or fallback_aln.get(acc, "")
+				if not seq:
+					continue
+				aln_by_key[(acc, seg)] = seq
+				acc_type = row.get("accession_type", "").strip().lower()
+				protected = acc_type in ("master", "reference")
+				src = (row.get("dataset_source") or "genbank").strip().lower() or "genbank"
+				key = (acc, seg)
+				raw_by_key[key] = row
+				cand_by_key[key] = {
+					"accession": acc,
+					"bare_upper": acc.upper(),
+					"segment": seg,
+					"orig_segment": seg,
+					"isolate": extract_canonical_isolate(row),
+					"passage": extract_passage_class(row),
+					"real_length": count_acgt(seq),
+					"protected": protected,
+					"source": src,
+					"collection_date": row.get("collection_date", ""),
+					"origin": "update_db",
+					"preferred": is_preferred_source(src, prefer_source) or protected,
+				}
+		finally:
+			conn.close()
+		return cand_by_key, raw_by_key, aln_by_key
+
+	def _reconcile_strain_duplicates(self, df_meta_data, df_aln, is_ref_or_master, prefer_source="genbank"):
+		if not getattr(self, "dedup_strains", True):
+			return df_meta_data, {}, [], {}
+		if df_meta_data is None or df_meta_data.empty or df_aln is None or df_aln.empty:
+			return df_meta_data, {}, [], {}
+
+		aln_seq_col = next((c for c in ("alignment", "aligned_seq", "sequence") if c in df_aln.columns), None)
+		if not aln_seq_col or "primary_accession" not in df_aln.columns:
+			return df_meta_data, {}, [], {}
+
+		protected_refs = set(self._reference_accessions())
+		batch_aln_by_key = {}
+		batch_aln_fallback = {}
+		has_aln_seg = "segment" in df_aln.columns
+		for _, arow in df_aln.iterrows():
+			acc = str(arow.get("primary_accession") or "").strip()
+			seq = str(arow.get(aln_seq_col) or "").strip()
+			if not acc or not seq:
+				continue
+			seg = self._normalize_segment_value(arow.get("segment", "")) if has_aln_seg else ""
+			batch_aln_by_key[(acc, seg)] = seq
+			batch_aln_fallback.setdefault(acc, seq)
+
+		upd_cands, upd_raw, upd_aln = self._load_update_db_strain_candidates(prefer_source=prefer_source)
+
+		batch_rows_by_key = {}
+		for idx, mrow in df_meta_data.iterrows():
+			acc = str(mrow.get("primary_accession") or "").strip()
+			if not acc:
+				continue
+			seg = self._normalize_segment_value(mrow.get("segment", ""))
+			batch_rows_by_key.setdefault((acc, seg), []).append(idx)
+			if bool(is_ref_or_master.get(idx, False)):
+				protected_refs.add(acc)
+
+		all_segs = {seg for (_, seg) in batch_rows_by_key} | {seg for (_, seg) in upd_cands}
+		nonblank_segs = {s for s in all_segs if s}
+		unify_single_seg = len(nonblank_segs) <= 1 and ("" in all_segs)
+		canonical_single_seg = next(iter(nonblank_segs), "")
+
+		def _canon_seg(s):
+			return canonical_single_seg if (unify_single_seg and not s) else s
+
+		cands_by_seg = {}
+		raw_by_key = {}
+		aln_by_key = {}
+		seen_batch_keys = set()
+
+		for (acc, orig_seg), indices in batch_rows_by_key.items():
+			idx = indices[0]
+			row_dict = {col: ("" if pd.isna(val) else str(val)) for col, val in df_meta_data.loc[idx].items()}
+			excl_val = str(row_dict.get("exclusion_status") or "").strip().lower()
+			if excl_val not in ("", "0", "false", "no", "na", "none", "nan"):
+				continue
+			if str(row_dict.get("exclusion_criteria") or "").strip():
+				continue
+			seq = batch_aln_by_key.get((acc, orig_seg)) or batch_aln_fallback.get(acc, "")
+			if not seq:
+				continue
+			cseg = _canon_seg(orig_seg)
+			key = (acc, cseg)
+			seen_batch_keys.add(key)
+			raw_by_key[key] = row_dict
+			aln_by_key[key] = seq
+			protected = (acc in protected_refs) or bool(is_ref_or_master.get(idx, False))
+			src = (row_dict.get("dataset_source") or "genbank").strip().lower() or "genbank"
+			cands_by_seg.setdefault(cseg, []).append({
+				"accession": acc,
+				"bare_upper": acc.upper(),
+				"segment": cseg,
+				"orig_segment": orig_seg,
+				"isolate": extract_canonical_isolate(row_dict),
+				"passage": extract_passage_class(row_dict),
+				"real_length": count_acgt(seq),
+				"protected": protected,
+				"source": src,
+				"collection_date": row_dict.get("collection_date", ""),
+				"origin": "batch",
+				"preferred": is_preferred_source(src, prefer_source) or protected,
+			})
+
+		for (acc, orig_seg), ucand in upd_cands.items():
+			cseg = _canon_seg(orig_seg)
+			key = (acc, cseg)
+			if key in seen_batch_keys:
+				continue
+			ucopy = dict(ucand)
+			ucopy["segment"] = cseg
+			ucopy["orig_segment"] = orig_seg
+			raw_by_key[key] = dict(upd_raw[(acc, orig_seg)])
+			aln_by_key[key] = upd_aln[(acc, orig_seg)]
+			cands_by_seg.setdefault(cseg, []).append(ucopy)
+
+		retired_batch_map = {}
+		superseded_update_list = []
+		batch_winner_patches = {}
+		update_winner_patches = {}
+
+		for cseg, seg_cands in sorted(cands_by_seg.items()):
+			pref_by_iso = {}
+			pref_by_bare = {}
+			externals = []
+			ext_by_iso = {}
+			for c in seg_cands:
+				if c["preferred"]:
+					pref_by_bare[str(c["bare_upper"])] = c
+					if c["isolate"]:
+						pref_by_iso.setdefault(str(c["isolate"]), []).append(c)
+				else:
+					externals.append(c)
+					if c["isolate"]:
+						ext_by_iso.setdefault(str(c["isolate"]), []).append(c)
+
+			seg_redirect = {}
+
+			def _dedup_pool(by_iso):
+				retired_here = set()
+				for _iso, grp in sorted(by_iso.items()):
+					if len(grp) < 2:
+						continue
+					ordered = sorted(grp, key=lambda item: candidate_winner_sort_key(item, prefer_source))
+					kept_winners = []
+					for cand in ordered:
+						c_acc = str(cand["accession"])
+						c_key = (c_acc, cseg)
+						c_seq = aln_by_key.get(c_key, "")
+						matched_w = None
+						if not cand["protected"] and c_seq:
+							for w in kept_winners:
+								if not passages_compatible(str(w["passage"]), str(cand["passage"])):
+									continue
+								w_key = (str(w["accession"]), cseg)
+								ok, _, _ = aligned_sequences_agree(
+									aln_by_key[w_key], c_seq, int(w["real_length"]), int(cand["real_length"]), max_mm=0
+								)
+								if ok:
+									matched_w = w
+									break
+						if matched_w is None:
+							kept_winners.append(cand)
+							continue
+						w_acc = str(matched_w["accession"])
+						w_key = (w_acc, cseg)
+						upd = coalesce_winner_metadata(raw_by_key[w_key], raw_by_key[c_key])
+						if upd:
+							raw_by_key[w_key].update(upd)
+							if matched_w["origin"] == "batch":
+								batch_winner_patches.setdefault(w_key, {}).update(upd)
+							else:
+								update_winner_patches.setdefault((w_acc, str(matched_w["orig_segment"])), {}).update(upd)
+						retired_here.add(c_acc)
+						seg_redirect[c_acc] = w_acc
+						reason = f"intra_db_duplicate_of:{w_acc}"
+						if cand["origin"] == "batch":
+							retired_batch_map[(c_acc, str(cand["orig_segment"]))] = (w_acc, reason)
+						else:
+							superseded_update_list.append({
+								"retired_accession": c_acc,
+								"segment": str(cand["orig_segment"]),
+								"winner_accession": w_acc,
+								"reason": reason,
+							})
+				return retired_here
+
+			retired_pref = _dedup_pool(pref_by_iso)
+			if retired_pref:
+				for bare_k, w_info in list(pref_by_bare.items()):
+					curr = str(w_info["accession"])
+					while curr in seg_redirect:
+						curr = seg_redirect[curr]
+					if curr != str(w_info["accession"]):
+						for cand in seg_cands:
+							if str(cand["accession"]) == curr:
+								pref_by_bare[bare_k] = cand
+								break
+				for iso_k in list(pref_by_iso.keys()):
+					pref_by_iso[iso_k] = [w for w in pref_by_iso[iso_k] if str(w["accession"]) not in retired_pref]
+
+			retired_ext = set()
+			for ext in sorted(externals, key=lambda item: candidate_winner_sort_key(item, prefer_source)):
+				if ext["protected"]:
+					continue
+				e_acc = str(ext["accession"])
+				e_key = (e_acc, cseg)
+				e_seq = aln_by_key.get(e_key, "")
+				if not e_seq:
+					continue
+				e_row = raw_by_key[e_key]
+				links = extract_insdc_links(e_row, segment_hint=cseg)
+				matched_w = None
+				for lk in links:
+					w = pref_by_bare.get(lk)
+					if w is None or str(w["accession"]) in retired_pref:
+						continue
+					if not passages_compatible(str(w["passage"]), str(ext["passage"])):
+						continue
+					w_key = (str(w["accession"]), cseg)
+					ok, _, _ = aligned_sequences_agree(
+						aln_by_key[w_key], e_seq, int(w["real_length"]), int(ext["real_length"]), max_mm=2
+					)
+					if ok:
+						matched_w = w
+						break
+				if matched_w is None and ext["isolate"] and ext["isolate"] in pref_by_iso:
+					for w in sorted(pref_by_iso[str(ext["isolate"])], key=lambda item: candidate_winner_sort_key(item, prefer_source)):
+						if not passages_compatible(str(w["passage"]), str(ext["passage"])):
+							continue
+						w_key = (str(w["accession"]), cseg)
+						ok, _, _ = aligned_sequences_agree(
+							aln_by_key[w_key], e_seq, int(w["real_length"]), int(ext["real_length"]), max_mm=0
+						)
+						if ok:
+							matched_w = w
+							break
+				if matched_w is None:
+					continue
+				w_acc = str(matched_w["accession"])
+				w_key = (w_acc, cseg)
+				upd = coalesce_winner_metadata(raw_by_key[w_key], e_row)
+				if upd:
+					raw_by_key[w_key].update(upd)
+					if matched_w["origin"] == "batch":
+						batch_winner_patches.setdefault(w_key, {}).update(upd)
+					else:
+						update_winner_patches.setdefault((w_acc, str(matched_w["orig_segment"])), {}).update(upd)
+				retired_ext.add(e_acc)
+				reason = f"cross_db_duplicate_of:{w_acc}"
+				if ext["origin"] == "batch":
+					retired_batch_map[(e_acc, str(ext["orig_segment"]))] = (w_acc, reason)
+				else:
+					superseded_update_list.append({
+						"retired_accession": e_acc,
+						"segment": str(ext["orig_segment"]),
+						"winner_accession": w_acc,
+						"reason": reason,
+					})
+
+			surviving_ext_by_iso = {
+				iso_k: [e for e in grp if str(e["accession"]) not in retired_ext]
+				for iso_k, grp in ext_by_iso.items()
+			}
+			_dedup_pool(surviving_ext_by_iso)
+
+		for (w_acc, cseg), upd in batch_winner_patches.items():
+			for (b_acc, orig_seg), indices in batch_rows_by_key.items():
+				if b_acc == w_acc and _canon_seg(orig_seg) == cseg:
+					for col, val in upd.items():
+						if col not in df_meta_data.columns:
+							df_meta_data[col] = ""
+						for idx in indices:
+							df_meta_data.at[idx, col] = val
+
+		if retired_batch_map:
+			if "canonical_accession" not in df_meta_data.columns:
+				df_meta_data["canonical_accession"] = ""
+			for (r_acc, orig_seg), (w_acc, reason) in retired_batch_map.items():
+				for idx in batch_rows_by_key.get((r_acc, orig_seg), ()):
+					df_meta_data.at[idx, "exclusion_status"] = "1"
+					existing_crit = str(df_meta_data.at[idx, "exclusion_criteria"] or "").strip()
+					if not existing_crit:
+						df_meta_data.at[idx, "exclusion_criteria"] = reason
+					df_meta_data.at[idx, "canonical_accession"] = w_acc
+			print(
+				f"[CreateSqliteDB] Retired {len(retired_batch_map)} duplicate same-strain segment row(s) in incoming batch"
+			)
+		if superseded_update_list:
+			print(
+				f"[CreateSqliteDB] Superseding {len(superseded_update_list)} existing update_db row(s) with incoming preferred-source sequences"
+			)
+
+		return df_meta_data, retired_batch_map, superseded_update_list, update_winner_patches
+
+	def _apply_update_db_strain_retirements(self, conn, superseded_update_list, update_winner_patches, update_exclusions, now_str):
+		if not self.update or not self._table_exists(conn, "meta_data"):
+			return
+		if not superseded_update_list and not update_winner_patches:
+			return
+
+		meta_cols = self._table_columns(conn, "meta_data")
+		has_seg = "segment" in meta_cols
+
+		# 1. Apply metadata patches to existing update_db winners
+		for (w_acc, seg), upd in update_winner_patches.items():
+			valid_upd = {c: v for c, v in upd.items() if c in meta_cols and v}
+			if not valid_upd:
+				continue
+			set_sql = ", ".join(f"{self._quote_identifier(c)} = ?" for c in valid_upd)
+			params = list(valid_upd.values())
+			if has_seg and seg:
+				conn.execute(
+					f"UPDATE meta_data SET {set_sql} WHERE primary_accession = ? AND TRIM(COALESCE(CAST(segment AS TEXT), '')) = ?",
+					params + [w_acc, seg],
+				)
+			else:
+				conn.execute(f"UPDATE meta_data SET {set_sql} WHERE primary_accession = ?", params + [w_acc])
+
+		if not superseded_update_list:
+			return
+
+		# Ensure exclusion/canonical columns exist on meta_data
+		existing_lower = {c.casefold() for c in meta_cols}
+		for needed_col in ("exclusion_status", "exclusion_criteria", "canonical_accession"):
+			if needed_col.casefold() not in existing_lower:
+				conn.execute(f"ALTER TABLE meta_data ADD COLUMN {self._quote_identifier(needed_col)} TEXT")
+				meta_cols.append(needed_col)
+				existing_lower.add(needed_col.casefold())
+
+		cluster_cols = self._cluster_placeholder_columns(meta_cols)
+		child_tables = (
+			("sequence_alignment", ("primary_accession", "accession", "sequence_id")),
+			("features", ("accession", "primary_accession")),
+			("insertions", ("primary_accession", "accession")),
+			("sequences", ("header", "primary_accession", "accession")),
+			("sequence_mutations", ("primary_accession", "accession")),
+			("sequence_drug_resistance", ("primary_accession", "accession")),
+			("sequence_mutation_summary", ("primary_accession", "accession")),
+			("sequence_completed_signatures", ("primary_accession", "accession")),
+		)
+
+		retired_to_winner_by_seg = {}
+		for item in superseded_update_list:
+			r_acc = item["retired_accession"]
+			seg = item["segment"]
+			w_acc = item["winner_accession"]
+			reason = item["reason"]
+			retired_to_winner_by_seg.setdefault(seg or "", {})[r_acc] = w_acc
+
+			if has_seg and seg:
+				conn.execute(
+					"UPDATE meta_data SET exclusion_status = '1', "
+					"exclusion_criteria = CASE WHEN COALESCE(TRIM(exclusion_criteria), '') = '' THEN ? ELSE exclusion_criteria END, "
+					"canonical_accession = ? "
+					"WHERE primary_accession = ? AND TRIM(COALESCE(CAST(segment AS TEXT), '')) = ?",
+					(reason, w_acc, r_acc, seg),
+				)
+				for ccol in cluster_cols:
+					qcol = self._quote_identifier(ccol)
+					conn.execute(
+						f"UPDATE meta_data SET {qcol} = ? WHERE {qcol} = ? AND TRIM(COALESCE(CAST(segment AS TEXT), '')) = ?",
+						(w_acc, r_acc, seg),
+					)
+			else:
+				conn.execute(
+					"UPDATE meta_data SET exclusion_status = '1', "
+					"exclusion_criteria = CASE WHEN COALESCE(TRIM(exclusion_criteria), '') = '' THEN ? ELSE exclusion_criteria END, "
+					"canonical_accession = ? "
+					"WHERE primary_accession = ?",
+					(reason, w_acc, r_acc),
+				)
+				for ccol in cluster_cols:
+					qcol = self._quote_identifier(ccol)
+					conn.execute(f"UPDATE meta_data SET {qcol} = ? WHERE {qcol} = ?", (w_acc, r_acc))
+
+			for tname, id_candidates in child_tables:
+				if not self._table_exists(conn, tname):
+					continue
+				tcols = self._table_columns(conn, tname)
+				id_col = next((c for c in id_candidates if c in tcols), None)
+				if not id_col:
+					continue
+				qid = self._quote_identifier(id_col)
+				if "segment" in tcols and seg:
+					conn.execute(
+						f"DELETE FROM {tname} WHERE {qid} = ? AND TRIM(COALESCE(CAST(segment AS TEXT), '')) = ?",
+						(r_acc, seg),
+					)
+				else:
+					conn.execute(f"DELETE FROM {tname} WHERE {qid} = ?", (r_acc,))
+
+			if update_exclusions is not None:
+				update_exclusions.append({
+					"batch_id": self.batch_id,
+					"table_name": "meta_data",
+					"key": f"({r_acc!r}, {seg!r})" if seg else r_acc,
+					"reason": reason,
+					"date": now_str,
+				})
+
+		# Prune or rename superseded tips in any existing trees stored in conn
+		if self._table_exists(conn, "trees"):
+			all_retired_map = {}
+			for seg_map in retired_to_winner_by_seg.values():
+				all_retired_map.update(seg_map)
+			tcols = self._table_columns(conn, "trees")
+			has_tree_seg = "segment" in tcols
+			rows = conn.execute(
+				"SELECT rowid, COALESCE(source, ''), "
+				+ ("COALESCE(TRIM(CAST(segment AS TEXT)), ''), " if has_tree_seg else "'', ")
+				+ "COALESCE(newick, '') FROM trees"
+			).fetchall()
+			for rowid, source, tseg, nwk in rows:
+				if not nwk.strip() or source.strip().lower() == "iqtree_reference_only":
+					continue
+				seg_norm = self._normalize_segment_value(tseg)
+				mapping = retired_to_winner_by_seg.get(seg_norm) or all_retired_map
+				if not mapping:
+					continue
+				new_nwk = self._prune_or_rename_single_newick(nwk, source, mapping)
+				if new_nwk and new_nwk != nwk:
+					conn.execute("UPDATE trees SET newick = ? WHERE rowid = ?", (new_nwk, rowid))
+
+	@staticmethod
+	def _prune_or_rename_single_newick(newick, source, retired_to_winner):
+		if not newick or not retired_to_winner:
+			return newick
+		src = str(source or "").strip().lower()
+		if src == "iqtree_reference_only":
+			return newick
+		if src in ("iqtree", "veryfasttree"):
+			# Centroid tree: rename retired representative -> winner if winner is absent, else prune
+			rename_map = {}
+			prune_set = set()
+			for r_acc, w_acc in retired_to_winner.items():
+				if r_acc not in newick:
+					continue
+				# Exact check via token boundary
+				w_in_tree = bool(re.search(r"(?<![A-Za-z0-9_.\-|/])" + re.escape(w_acc) + r"(?![A-Za-z0-9_.\-|/])", newick))
+				if w_in_tree:
+					prune_set.add(r_acc)
+				else:
+					rename_map[r_acc] = w_acc
+			if not prune_set and not rename_map:
+				return newick
+			updated, stats = prune_and_rename_newick(newick, prune_set, rename_map)
+			return updated if (stats.get("pruned_tips", 0) or stats.get("renamed_tips", 0)) and updated else newick
+		else:
+			prune_set = {r_acc for r_acc in retired_to_winner if r_acc in newick}
+			if not prune_set:
+				return newick
+			updated, stats = prune_and_rename_newick(newick, prune_set)
+			return updated if stats.get("pruned_tips", 0) and updated else newick
+
 	def create_db(self):
 		self._require_file(self.meta_data, "meta_data")
 		self._require_file(self.features, "features")
@@ -1771,7 +2290,32 @@ class CreateSqliteDB:
 			df_aln["segment"] = df_aln["segment"].replace("", float("NaN")).fillna(df_aln["primary_accession"].map(acc_to_seg_map)).fillna("")
 		df_aln["segment"] = df_aln["segment"].map(self._normalize_segment_value)
 
+		df_meta_data, retired_batch_map, superseded_update_list, update_winner_patches = self._reconcile_strain_duplicates(
+			df_meta_data, df_aln, is_ref_or_master
+		)
+		if retired_batch_map:
+			# Refresh exclusion_mask, passed_qc_query_accessions, and excluded_records after strain deduplication
+			status_values = df_meta_data["exclusion_status"].fillna("").astype(str).str.strip()
+			status_mask = ~status_values.str.lower().isin(["", "0", "false", "no", "na", "none", "nan"])
+			crit_values = df_meta_data["exclusion_criteria"].fillna("").astype(str).str.strip()
+			exclusion_mask = status_mask | (crit_values != "")
+			if "primary_accession" in df_meta_data.columns:
+				passed_qc_query_accessions = set(
+					df_meta_data.loc[(~is_ref_or_master) & (~exclusion_mask), "primary_accession"]
+				)
+				passed_qc_query_accessions.discard("")
+			for (r_acc, _r_seg), (_w_acc, reason) in retired_batch_map.items():
+				if r_acc:
+					excluded_records.append({"primary_accession": r_acc, "reason": reason})
+
 		df_meta_data = self._add_cluster_column(df_meta_data)
+		if retired_batch_map:
+			cluster_cols = self._cluster_placeholder_columns(df_meta_data.columns)
+			if cluster_cols:
+				for (r_acc, r_seg), (w_acc, _reason) in retired_batch_map.items():
+					seg_mask = (df_meta_data["segment"] == r_seg) if r_seg else pd.Series(True, index=df_meta_data.index)
+					for ccol in cluster_cols:
+						df_meta_data.loc[seg_mask & (df_meta_data[ccol] == r_acc), ccol] = w_acc
 		df_meta_data = self._add_reference_columns(df_meta_data, df_aln)
 		
 		# Establish reference sets using pure python string primitives
@@ -1808,11 +2352,12 @@ class CreateSqliteDB:
 		# Apply high-performance structural list comprehension filters against valid_pairs
 	
 		if valid_pairs:
-			if feat_acc_col in df_features.columns:
+			if feat_acc_col in df_features.columns and not df_features.empty:
 				df_features = df_features[[t in valid_pairs for t in zip(df_features[feat_acc_col], df_features["segment"])]]
 			
 			# FIX: Filter using the clean primary_accession column to match valid_pairs structural layout
-			df_aln = df_aln[[t in valid_pairs for t in zip(df_aln["primary_accession"], df_aln["segment"])]]
+			if not df_aln.empty:
+				df_aln = df_aln[[t in valid_pairs for t in zip(df_aln["primary_accession"], df_aln["segment"])]]
 
 		if self.gene_info is not None:
 			# keep_na_strings: influenza's neuraminidase gene is named "NA". Without
@@ -1861,7 +2406,7 @@ class CreateSqliteDB:
 			df_insertions["segment"] = df_insertions["segment"].replace("", float("NaN")).fillna(df_insertions["primary_accession"].map(acc_to_seg_map)).fillna("")
 		df_insertions["segment"] = df_insertions["segment"].map(self._normalize_segment_value)
 			
-		if valid_pairs and "primary_accession" in df_insertions.columns:
+		if valid_pairs and "primary_accession" in df_insertions.columns and not df_insertions.empty:
 			df_insertions = df_insertions[[t in valid_pairs for t in zip(df_insertions["primary_accession"], df_insertions["segment"])]]
 		
 		df_host_taxa = self._read_tsv_required(self.host_taxa_file, [], "host_taxa_file", dtype=str)
@@ -1884,7 +2429,7 @@ class CreateSqliteDB:
 			df_fasta_sequences["segment"] = df_fasta_sequences["segment"].replace("", float("NaN")).fillna(df_fasta_sequences["header"].map(acc_to_seg_map)).fillna("")
 		df_fasta_sequences["segment"] = df_fasta_sequences["segment"].map(self._normalize_segment_value)
 
-		if valid_pairs and "header" in df_fasta_sequences.columns:
+		if valid_pairs and "header" in df_fasta_sequences.columns and not df_fasta_sequences.empty:
 			df_fasta_sequences = df_fasta_sequences[[t in valid_pairs for t in zip(df_fasta_sequences["header"], df_fasta_sequences["segment"])]]
 
 		db_path = self._db_path()
@@ -1915,6 +2460,10 @@ class CreateSqliteDB:
 		tables_for_delta = ["meta_data", "features", "sequence_alignment", "genes", "sequences", "insertions", "host_taxa"]
 		before_counts = {t: self._table_row_count(conn, t) for t in tables_for_delta}
 		before_query_count = self._count_distinct_nonexcluded_query_accessions(conn)
+
+		self._apply_update_db_strain_retirements(
+			conn, superseded_update_list, update_winner_patches, update_exclusions, now_str
+		)
 
 		self.merge_table_append_nonredundant(conn, df_meta_data, "meta_data", None, update_exclusions)
 		self.merge_table_append_nonredundant(conn, df_features, "features", None, update_exclusions)
@@ -2018,6 +2567,14 @@ class CreateSqliteDB:
 				})
 
 		if tree_records:
+			retired_tree_map = {r_acc: w_acc for (r_acc, _seg), (w_acc, _reason) in retired_batch_map.items()}
+			for item in superseded_update_list:
+				retired_tree_map[item["retired_accession"]] = item["winner_accession"]
+			if retired_tree_map:
+				for rec in tree_records:
+					rec["newick"] = self._prune_or_rename_single_newick(
+						rec.get("newick"), rec.get("source"), retired_tree_map
+					)
 			df_tree = pd.DataFrame(tree_records).drop(columns=["path"], errors="ignore")
 			df_tree["created_at"] = now_str
 			if not self.update:
@@ -2184,6 +2741,7 @@ def process(args):
 		update_db=args.update_db,
 		batch_id=args.batch_id,
 		is_segmented=(None if args.is_segmented is None else args.is_segmented == 'Y'),
+		dedup_strains=args.dedup_strains,
 	)
 	db_creator.create_db()
 
@@ -2224,6 +2782,7 @@ if __name__ == "__main__":
 	parser.add_argument('--batch_id', default=None, help='Optional update batch identifier for audit logging')
 	parser.add_argument('--reference_tsv', help='Optional reference TSV with columns: primary_accession, status,segment,genotype,subtype, to help resolve segment info for tree records', default=None)
 	parser.add_argument('--clade_assignments', help='Optional TSV (primary_accession, genotype, subtype) from CladeAssignment.py, used when no tree is available', default=None)
+	parser.add_argument('--no_dedup_strains', dest='dedup_strains', action='store_false', default=True, help='Disable automatic 0-mm same-strain sequence deduplication at SQLite assembly')
 	args = parser.parse_args()
 	if args.update_db:
 		args.update_db = normpath(args.update_db)

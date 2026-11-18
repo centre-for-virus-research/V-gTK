@@ -475,18 +475,29 @@ process TIDY_GISAID {
 }
 
 process MERGE_GISAID {
+    publishDir "${params.publish_dir}", mode: 'copy', pattern: "gisaid_cross_source_dedup_report.tsv"
     input:
        path gb_matrix
+       path gb_seqs
        path gisaid_meta
        path gisaid_nuc
        path column_mapping
     output:
        path "gB_matrix_merged.tsv", emit: merged_matrix
+       path "gisaid_dedup.fas", emit: gisaid_dedup_nuc
+       path "gisaid_cross_source_dedup_report.tsv", emit: dedup_report
     shell:
        '''
+       UPDATE_DB_ARG=""
+       if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ] && [ -f "!{params.update_db}" ]; then
+           UPDATE_DB_ARG="--update_db !{params.update_db}"
+       fi
        python !{scripts_dir}/merge_into_gB_matrix.py -g !{gb_matrix} \
+           --base_fasta !{gb_seqs} \
            -t !{gisaid_meta} -f !{gisaid_nuc} -o gB_matrix_merged.tsv \
-           -k Segment_Id --dataset_source gisaid -m !{column_mapping}
+           --dedup_fasta_out gisaid_dedup.fas \
+           --dedup_report gisaid_cross_source_dedup_report.tsv \
+           -k Segment_Id --dataset_source gisaid -m !{column_mapping} ${UPDATE_DB_ARG}
        '''
 }
 
@@ -736,6 +747,37 @@ process CHECK_SEGMENT_RETENTION {
     '''
 }
 
+process DEDUP_STRAIN_ALIGNMENT {
+    publishDir "${params.publish_dir}" , mode: 'copy', pattern: "strain_dedup_report.tsv"
+    input:
+        path meta_tsv
+        path msa_files, stageAs: 'in_msa/*'
+        path master_file_opt
+    output:
+        path "dedup_strain_meta.tsv", emit: dedup_meta
+        path "clean_msa/*_merged_MSA.fasta", emit: clean_msa
+        path "retired_update_ids.txt", emit: retired_update_ids
+        path "strain_dedup_report.tsv", emit: report
+    shell:
+    '''
+        EXTRA_DEDUP_ARGS=""
+        if [ -f "!{master_file_opt}" ]; then
+            EXTRA_DEDUP_ARGS="${EXTRA_DEDUP_ARGS} --ref_list !{master_file_opt}"
+        fi
+        if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ] && [ -f "!{params.update_db}" ]; then
+            EXTRA_DEDUP_ARGS="${EXTRA_DEDUP_ARGS} --update_db !{params.update_db}"
+        fi
+        python !{scripts_dir}/DedupStrainAlignment.py \
+            --meta_data !{meta_tsv} \
+            --msa in_msa/*_merged_MSA.fasta \
+            --out_meta dedup_strain_meta.tsv \
+            --out_msa_dir clean_msa \
+            --out_retired_update_ids retired_update_ids.txt \
+            --report_tsv strain_dedup_report.tsv \
+            ${EXTRA_DEDUP_ARGS}
+    '''
+}
+
 process DEDUP_ALIGNMENT{
     publishDir "${params.publish_dir}" , mode: 'copy'
     input:
@@ -970,16 +1012,20 @@ process USHER_PLACEMENT{
     cpus { params.is_segmented == 'Y' ? SEGMENT_PARALLEL_THREADS : MAX_THREADS }
     maxForks HEAVY_TASK_MAX_FORKS
     input:
-        tuple val(mmseq_cluster_dir), val(iqtree_dir), path(padded_aln), val(usher_output_dir)
+        tuple val(mmseq_cluster_dir), val(iqtree_dir), path(padded_aln), val(usher_output_dir), path(retired_update_ids)
     output:
         path "${usher_output_dir}", emit: usher_out
     shell:
     '''
+        RETIRE_ARG=""
+        if [ -s "!{retired_update_ids}" ]; then
+            RETIRE_ARG="--retire_ids_file !{retired_update_ids}"
+        fi
         python !{scripts_dir}/UsherPlacement.py --padded_aln !{padded_aln} \
         --mmseq_cluster_dir "!{mmseq_cluster_dir}" --iqtree_dir "!{iqtree_dir}" \
         --output_dir "!{usher_output_dir}" --update_db "!{params.update_db}" \
         --ref_list "!{params.ref_list}" \
-        --threads !{task.cpus} --test_mode !{params.test}
+        --threads !{task.cpus} --test_mode !{params.test} ${RETIRE_ARG}
     '''
 }
 
@@ -1115,6 +1161,8 @@ process VERY_FAST_TREE{
             echo "[error] Neither VeryFastTree nor FastTree was found in PATH. Activate the vgtk conda environment / conda profile." >&2
             exit 1
         fi
+        sync
+        touch "VeryFastTree_!{mmseq_cluster_dir.baseName}"
     '''
 }
 
@@ -1387,7 +1435,7 @@ process VERIFY_MUTATIONS {
 }
 
 process TEST_DB_VALIDATION {
-    publishDir "${params.publish_dir}/tests" 
+    publishDir "${params.publish_dir}/tests", mode: 'copy'
     when:
         params.test == "1"
     input:
@@ -1499,7 +1547,7 @@ process PIVOT_TABLE_SEGMENTS{
 }
 
 process TEST_SEGMENTED_OUTPUT{
-    publishDir "${params.publish_dir}/tests"
+    publishDir "${params.publish_dir}/tests", mode: 'copy'
     when:
         params.is_segmented == "Y" && params.test == "1"
     input:
@@ -1524,7 +1572,7 @@ process TEST_SEGMENTED_OUTPUT{
 }
 
 process TEST_NON_SEGMENTED_OUTPUT{
-    publishDir "${params.publish_dir}/tests"
+    publishDir "${params.publish_dir}/tests", mode: 'copy'
     when:
         params.is_segmented == "N" && params.test == "1"
     input:
@@ -1652,15 +1700,15 @@ workflow {
 
     if (params.gisaid_dir) {
             def fallbackDbPath = params.scripts_dir ?: "${projectDir}/scripts"
-            def db_in = params.previous_db ? file(params.previous_db) : file(fallbackDbPath)
+            def db_in = params.previous_db ? file(params.previous_db) : (UPDATE_MODE ? file(params.update_db) : file(fallbackDbPath))
          TIDY_GISAID(params.gisaid_dir, db_in)
          
          // Define column mapping path relative to project
          col_map = file("${projectDir}/generic/influenza/column_mapping.tsv")
-         MERGE_GISAID(gb_matrix_ch, TIDY_GISAID.out.gisaid_meta, TIDY_GISAID.out.gisaid_nuc, col_map)
+         MERGE_GISAID(gb_matrix_ch, gb_seqs_ch, TIDY_GISAID.out.gisaid_meta, TIDY_GISAID.out.gisaid_nuc, col_map)
          gb_matrix_ch = MERGE_GISAID.out.merged_matrix
          
-         CAT_FASTA(gb_seqs_ch, TIDY_GISAID.out.gisaid_nuc)
+         CAT_FASTA(gb_seqs_ch, MERGE_GISAID.out.gisaid_dedup_nuc)
          gb_seqs_ch = CAT_FASTA.out.combined_fa
     }
 
@@ -1754,10 +1802,18 @@ workflow {
                                 COLLECT_FILTERED_SEQUENCES.out.filtered_ids)
     }
 
-    // For segmented viruses, PAD_ALIGNMENT emits multiple fasta files (one per segment).
+    // Strain-aware 0-mm sequence deduplication gate (handles intra-batch GenBank+GenBank,
+    // GISAID+GISAID, cross-DB GenBank+GISAID, and update-mode in both arrival orders).
+    DEDUP_STRAIN_ALIGNMENT(data,
+                           PAD_ALIGNMENT.out.merged_msa.collect(),
+                           effective_ref_list)
+    data = DEDUP_STRAIN_ALIGNMENT.out.dedup_meta
+    def clean_merged_msa_collected = DEDUP_STRAIN_ALIGNMENT.out.clean_msa.collect()
+
+    // For segmented viruses, DEDUP_STRAIN_ALIGNMENT emits multiple fasta files (one per segment).
     // Use flatten() to create a channel where each file is processed independently in parallel.
     // For non-segmented viruses, this just passes through the single file.
-    padded_msa_ch = PAD_ALIGNMENT.out.merged_msa.flatten()
+    padded_msa_ch = DEDUP_STRAIN_ALIGNMENT.out.clean_msa.flatten()
 
     DEDUP_ALIGNMENT(padded_msa_ch)
 
@@ -1783,8 +1839,9 @@ workflow {
             usher_collected = Channel.value([])
         } else {
             usher_input_ch = cluster_input_ch
-                .map { fasta ->
-                    tuple('UNSET', 'UNSET', fasta, "UsherUpdate_${fasta.baseName}")
+                .combine(DEDUP_STRAIN_ALIGNMENT.out.retired_update_ids)
+                .map { fasta, retired_ids ->
+                    tuple('UNSET', 'UNSET', fasta, "UsherUpdate_${fasta.baseName}", retired_ids)
                 }
         }
     } else {
@@ -1855,8 +1912,9 @@ workflow {
                 usher_input_ch = mmseq_with_key
                     .join(iqtree_with_key)
                     .join(dedup_with_key)
-                    .map { key, mmseq_dir, iqtree_dir, dedup_fasta ->
-                        tuple(mmseq_dir.toString(), iqtree_dir.toString(), dedup_fasta, "Usher_${mmseq_dir.name}")
+                    .combine(DEDUP_STRAIN_ALIGNMENT.out.retired_update_ids)
+                    .map { key, mmseq_dir, iqtree_dir, dedup_fasta, retired_ids ->
+                        tuple(mmseq_dir.toString(), iqtree_dir.toString(), dedup_fasta, "Usher_${mmseq_dir.name}", retired_ids)
                     }
 
                 USHER_PLACEMENT(usher_input_ch)
@@ -1873,7 +1931,7 @@ workflow {
     }
     
     // For CALC_ALIGNMENT_CORD, collect all MSA files back together
-    CALC_ALIGNMENT_CORD(PAD_ALIGNMENT.out.merged_msa.collect(), 
+    CALC_ALIGNMENT_CORD(clean_merged_msa_collected, 
                         DOWNLOAD_GFF.out, 
                         BLAST_ALIGNMENT.out.query_uniq_tophits,
                         data,
@@ -1885,7 +1943,7 @@ workflow {
     
     GENERATE_TABLES(data, 
                     BLAST_ALIGNMENT.out.query_uniq_tophits, 
-                    PAD_ALIGNMENT.out.merged_msa.collect(), 
+                    clean_merged_msa_collected, 
                     NEXTALIGN_ALIGNMENT.out,
                     params.ref_list,
                     ref_backbone_ch)
@@ -1910,7 +1968,7 @@ workflow {
                      usher_collected,
                      COLLECT_FILTERED_SEQUENCES.out.filtered_tsv,
                      COLLECT_FILTERED_SEQUENCES.out.filtered_ids,
-                     PAD_ALIGNMENT.out.merged_msa.collect()
+                     clean_merged_msa_collected
                      )
 
     if (params.test == "1") {
