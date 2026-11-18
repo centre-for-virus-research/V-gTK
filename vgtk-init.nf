@@ -104,7 +104,17 @@ def scriptDefinedParams = [
     "min_seq_length_ratio", "max_aln_gap_proportion", "tree_free", "base_tree_only",
     "pivot_isolate_key", "pivot_required_segments", "segment_names", "root_outgroup",
     "mmseqs_two_step", "mmseqs_min_completeness", "iqtree_model",
-    "fetch_batch_size", "build_ref_alignment", "ref_aln_min_insertion_support"
+    "fetch_batch_size", "build_ref_alignment", "ref_aln_min_insertion_support",
+    // Divergent run mode (opt-in, default false). These must be listed or the
+    // unknown-parameter guard below rejects the run; listing them changes
+    // nothing on the legacy path.
+    "run_divergent_mode", "divergent_genbank", "divergent_segments",
+    "divergent_segment_floors", "divergent_seed_accessions",
+    "divergent_cluster_evalue", "divergent_cluster_coverage",
+    "divergent_cluster_identity", "divergent_extract_iterations",
+    "divergent_min_taxa", "divergent_min_gene_coverage", "divergent_cutoff",
+    "divergent_auto_ceiling", "divergent_auto_min_band_frac",
+    "divergent_model", "divergent_bootstrap"
     // Add all parameter names defined above
 ]
 
@@ -156,6 +166,11 @@ if (unexpectedParams) {
 
     error(errorMsg) // Stop the pipeline
 }
+
+// Divergent run mode. Importing a subworkflow does not instantiate any of its
+// processes; only the `if (params.run_divergent_mode)` branch in `workflow {}`
+// below can reach them.
+include { DIVERGENT_MODE } from './subworkflows/local/divergent_mode/divergent_mode.nf'
 
 process TEST_DEPENDENCIES{
     // No inputs, so every profile hashes the same: without this a -resume could
@@ -1532,6 +1547,24 @@ process TEST_NON_SEGMENTED_OUTPUT{
 }
 
 workflow {
+
+    // ------------------------------------------------------------------
+    // Divergent run mode. Opt-in, default false. This returns before any
+    // legacy process is instantiated, so the standard path is reached only
+    // when the flag is false - and is then byte-for-byte what it always was.
+    // ------------------------------------------------------------------
+    if( params.run_divergent_mode.toString().toBoolean() ){
+        if( !params.divergent_genbank ){
+            error("ERROR: --run_divergent_mode requires --divergent_genbank (a multi-record GenBank flatfile)")
+        }
+        def dmGb = file(params.divergent_genbank)
+        if( !dmGb.exists() || !dmGb.isFile() ){
+            error("ERROR: params.divergent_genbank must be an existing file: ${params.divergent_genbank}")
+        }
+        log.info("Divergent run mode ON: ${dmGb}")
+        DIVERGENT_MODE(dmGb)
+        return
+    }
 
     // check some params are in right form
     // params.is_segmented should be either Y or N

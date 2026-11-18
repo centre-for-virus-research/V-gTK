@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 
-SCRIPT_FILES = sorted(SCRIPTS_DIR.glob("*.py"))
+SCRIPT_FILES = sorted(SCRIPTS_DIR.glob("*.py")) + sorted((SCRIPTS_DIR / "divergent_mode").glob("*.py"))
 
 #: Scripts known to import something that is not in the repository, with the
 #: reason. Entries are asserted to STILL be broken, so fixing one fails this

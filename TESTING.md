@@ -278,6 +278,84 @@ params.is_segmented = "N"
 params.test = "1"
 ```
 
+## Divergent run mode (opt-in)
+
+`--run_divergent_mode` is off by default and its path is never reached unless
+you turn it on. Two things to run when you touch it:
+
+```bash
+# unit tests for the mode, including the non-regression assertions
+pytest -q tests/unit/test_divergent_mode.py
+
+# end-to-end on the 33-record Cystoviridae fixture (give it its own launch dir)
+mkdir -p dev/nf_runs/divergent && cd dev/nf_runs/divergent
+nextflow run ../../../vgtk-init.nf -profile divergent_test -c ../../../nextflow.config
+
+# and on Hantaviridae, which is the one that exercises the per-segment path
+mkdir -p dev/nf_runs/hanta_divergent && cd dev/nf_runs/hanta_divergent
+nextflow run ../../../vgtk-init.nf -profile hanta_divergent_test -c ../../../nextflow.config
+```
+
+Run both. They test different things: Cystoviridae has a usable gene on one
+segment only, so it checks that the other two are skipped and *reported*;
+Hantaviridae has one on all three, so it checks that three backbones are
+actually built. A wiring mistake that collapses the fan-out passes the
+Cystoviridae profile and fails the Hantaviridae one.
+
+The mode is a separate path that returns before any legacy process, so the real
+risk is not that it breaks - it is that adding its parameters breaks everything
+else. `tests/unit/test_divergent_mode.py` guards that directly: it asserts the
+flag defaults to false, that every `divergent_*` parameter in `nextflow.config`
+is listed in `scriptDefinedParams` (or the unknown-parameter guard aborts every
+run), that the branch sits before `TEST_DEPENDENCIES()` and returns, and that
+no `DM_*` process name collides with a legacy one.
+
+**"Backbone built" is not the same as "the segment was analysed."** A segment
+whose distance partition finds no cluster still builds a backbone, still
+reports `ok` in `backbone_summary.tsv`, and still exits 0 — it just grafts
+nothing, so the whole dense-cluster path goes untested on it. That is a green
+run that tests less than it appears to, and it is what the auto cut-off's old
+band test did to segment L (F15). After a divergent run, check the partitions,
+not just the summary:
+
+```bash
+# every segment should find a cluster on the Hantaviridae fixture.
+# The profile publishes to test_out/ unless you passed --publish_dir.
+grep -H '"mode"\|"cutoff"\|n_dense_members' \
+  test_out/hanta_divergent_test/divergent_mode/by_segment/*/final/partition/partition_cutoff.json
+```
+
+Expect `"mode": "auto"` on all three and `n_dense_members` of 3, 1 and 2 on
+L, M and S. A `"mode": "auto_fallback"` there means the band test rejected the
+distance structure; the JSON now carries a `reason` saying why, and on this
+fixture it is a regression rather than a property of the data.
+
+Three invariants are checked on real output rather than asserted in prose:
+
+- `DM_CODON_ALIGN` counts frameshift gaps in its own alignments and exits
+  non-zero if there is ever one. Back-projection makes that count structurally
+  zero, so a non-zero value means the construction broke.
+- `test_grafted_tree_branch_lengths_are_on_one_scale` reads the grafted tree
+  and fails if any branch exceeds 3.0. UShER emits substitution *counts* and
+  the ML backbone emits substitutions *per site*; grafting without converting
+  produced a max branch of 119. That test skips if you have not run the
+  profile, so run the profile.
+- The auto cut-off tests drive `PartitionByDivergence.py` over synthetic
+  alignments with exact pairwise distances, built from disjoint mutation
+  blocks so `d(i,j) = (m_i + m_j) / N`. They pin both directions: a clean band
+  at a high cluster scale must be accepted, and a divergence continuum must
+  still fall back.
+
+To prove the default path is untouched after a change, run the `test` profile
+from a clean worktree and from your tree with the **same pinned `--xml_dir`**
+and separate publish dirs, then compare order-insensitively. The pipeline is
+not byte-reproducible run to run - `GENBANK_PARSER` record order varies and
+`IQ_TREE` takes no `-seed` - so a raw `diff -r` shows differences between two
+runs of identical code and tells you nothing. Compare content hashes of sorted
+records, and hash the output DB per table.
+
+See `info_help/divergent_mode.md`.
+
 ## Mutation annotation: the invariance check
 
 `scripts/AnnotateMutations.py` turns an alignment and a curated catalogue into
