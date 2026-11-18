@@ -21,6 +21,8 @@ tests/__pycache__/
 tests/unit/__pycache__/*
 */__pycache__/
 */*/__pycache__/
+**/__pycache__/
+*.py[cod]
 coverage.xml
 .coverage
 scripts/rescue
