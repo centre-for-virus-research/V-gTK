@@ -712,10 +712,31 @@ class CreateSqliteDB:
 		return df_meta_data
 
 	def load_fasta(self):
+		allowed = getattr(self, "_allowed_fasta_headers", None)
 		fasta_data = []
-		for record in SeqIO.parse(self.fasta_sequence_file, "fasta"):
-			fasta_data.append({"header": record.id, "sequence": str(record.seq)})
-		return pd.DataFrame(fasta_data)
+		cur_id = None
+		chunks = []
+		with open(self.fasta_sequence_file, "r", encoding="utf-8", errors="replace") as fh:
+			for raw_line in fh:
+				line = raw_line.strip()
+				if not line:
+					continue
+				if line.startswith(">"):
+					if cur_id is not None:
+						fasta_data.append({"header": cur_id, "sequence": "".join(chunks)})
+					parts = line[1:].strip().split(None, 1)
+					cand_id = parts[0] if parts else ""
+					if cand_id and (allowed is None or cand_id in allowed or normalise_accession(cand_id) in allowed):
+						cur_id = cand_id
+						chunks = []
+					else:
+						cur_id = None
+						chunks = []
+				elif cur_id is not None:
+					chunks.append(line)
+			if cur_id is not None:
+				fasta_data.append({"header": cur_id, "sequence": "".join(chunks)})
+		return pd.DataFrame(fasta_data, columns=["header", "sequence"])
 
 	@staticmethod
 	def _normalize_db_status(db_status):
@@ -1896,6 +1917,7 @@ class CreateSqliteDB:
 			if taxa_col:
 				df_host_taxa = df_host_taxa[df_host_taxa[taxa_col].astype(str).str.strip().isin(valid_taxa)]
 		
+		self._allowed_fasta_headers = {acc for acc, _ in valid_pairs if acc} if valid_pairs else None
 		df_fasta_sequences = self.load_fasta()
 		df_fasta_sequences["header"] = df_fasta_sequences["header"].fillna("").astype(str).str.strip()
 		# record.id keeps whatever the FASTA carried, so this is the one identity

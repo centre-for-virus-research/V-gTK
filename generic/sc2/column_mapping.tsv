@@ -1,0 +1,19 @@
+Collection date	collection_date
+Collection_Date	collection_date
+collection_date	collection_date
+covv_collection_date	collection_date
+Submission date	create_date
+Submission_Date	create_date
+submission_date	create_date
+covv_subm_date	create_date
+Update_Date	update_date
+Host	host
+covv_host	host
+Virus name	strain
+virus_name	strain
+covv_virus_name	strain
+Isolate_Name	strain
+Country	country
+Geo_Loc	geo_loc
+Authors	authors
+covv_authors	authors

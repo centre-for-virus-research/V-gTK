@@ -13,6 +13,7 @@ The pipeline has full out-of-the-box support for the following viruses, with pre
 | **Rabies Virus (RABV)** | No | Initial build, database update, phylogenetic tree placement (UShER) |
 | **Hepatitis C Virus (HCV)** | No | Database updates, mutation catalog annotation & verification (`VerifyMutations`) |
 | **Influenza A Virus (IAV)** | Yes | Segment validation, strain validation, GISAID and GenBank XML merging |
+| **SARS-CoV-2 (SC2)** | No | High-QC full-genome filtering, Pango lineage references, EpiCoV GISAID & GenBank merging, treeless UShER-recycle builds |
 
 ---
 
@@ -53,9 +54,13 @@ The pipeline profiles in `nextflow.config` are grouped by their operational purp
 | | `HCV_test` | HCV | Small scale run validating mutation annotations |
 | | `segmented_test` | IAV | Validation run for segmented influenza mapping |
 | | `flu_gisaid_test` | IAV | Test run incorporating simulated GISAID metadata |
+| | `SC2_test` | SC2 | Quick validation run with landmark Pango references and strict high-QC filters |
 | **Fresh Runs**<br>*(Build full DB from scratch)* | `setup_rabv_full` | RABV | Complete database construction from scratch |
 | | `HCV_full` | HCV | Complete database construction with mutation cataloging |
+| | `SC2_ncbi_highqc` | SC2 | 48-thread high-QC full-genome NCBI build in treeless mode (MMseqs deferred) |
+| | `SC2_gisaid_highqc` | SC2 | 48-thread hybrid EpiCoV GISAID + GenBank high-QC build |
 | **Update Runs**<br>*(Incremental updates to existing DB)* | `HCV_update` | HCV | Updates an existing HCV database with new sequences |
+| | `SC2_gisaid_update` | SC2 | Incremental EpiCoV GISAID update onto `SC2_ncbi_highqc.db` |
 | | `setup_rabv_test_update` | RABV | Test run validating incremental rabies database updates |
 | | `update_test` | RABV | Quick regression test checking database updates |
 

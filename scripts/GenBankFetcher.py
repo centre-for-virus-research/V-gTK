@@ -4,8 +4,11 @@ import json
 import sqlite3
 import time
 import random
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from time import sleep
 from os.path import join
+from urllib.parse import quote_plus
 from argparse import ArgumentParser
 from ExportRefListFromUpdateDb import load_reference_file_accessions
 import accession_utils
@@ -24,6 +27,12 @@ except ModuleNotFoundError:
 			class ConnectionError(Exception):
 				pass
 
+			class Timeout(Exception):
+				pass
+
+			class RequestException(Exception):
+				pass
+
 			class HTTPError(Exception):
 				def __init__(self, *args, response=None, **kwargs):
 					super().__init__(*args)
@@ -36,21 +45,25 @@ except ModuleNotFoundError:
 	requests = _RequestsFallback()
 
 class GenBankFetcher:
-	def __init__(self, taxid, base_url, email, output_dir, batch_size, sleep_time, base_dir, update_file, test_run=False, ref_list=None, test_fetch_count=100):
+	def __init__(self, taxid, base_url, email, output_dir, batch_size, sleep_time, base_dir, update_file, test_run=False, ref_list=None, test_fetch_count=100, entrez_filter=None, efetch_batch_size=100, efetch_workers=1):
 		self.taxid = taxid
 		self.base_url = base_url
 		self.email = email
 		self.output_dir = output_dir
 		self.batch_size = batch_size
-		self.efetch_batch_size = 100
+		self.efetch_batch_size = max(1, int(efetch_batch_size))
+		self.efetch_workers = max(1, int(efetch_workers))
 		self.sleep_time = sleep_time
 		self.base_dir = base_dir
 		self.update_file = update_file
 		self.test_run = test_run
 		self.ref_list = ref_list
 		self.test_fetch_count = test_fetch_count
+		self.entrez_filter = str(entrez_filter).strip() if entrez_filter and str(entrez_filter).strip().lower() not in ("null", "none", "unset") else None
 		self.update_log = "update_accessions.tsv"
 		self._last_request = 0.0
+		self._throttle_lock = threading.Lock()
+		self._save_lock = threading.Lock()
 		
 		# Load NCBI API key if available and not in pytest
 		import sys
@@ -112,17 +125,29 @@ class GenBankFetcher:
 			else:
 				url += f"?api_key={self.api_key}"
 		self._throttle()
-		return requests.get(url)
+		try:
+			return requests.get(url, timeout=(20, 180))
+		except TypeError:
+			# Unit-test monkeypatches frequently define fake_get(url) with a single positional arg
+			return requests.get(url)
 
 	def _throttle(self):
 		# Pace requests ourselves instead of discovering NCBI's limit via 429s,
-		# which cost a full backoff each time they are hit.
+		# which cost a full backoff each time they are hit. Locked so concurrent
+		# efetch workers share one global request budget.
 		if self.min_request_interval <= 0:
 			return
-		elapsed = time.time() - self._last_request
-		if elapsed < self.min_request_interval:
-			sleep(self.min_request_interval - elapsed)
-		self._last_request = time.time()
+		with self._throttle_lock:
+			elapsed = time.time() - self._last_request
+			if elapsed < self.min_request_interval:
+				sleep(self.min_request_interval - elapsed)
+			self._last_request = time.time()
+
+	def _search_term_encoded(self):
+		base_term = f"txid{self.taxid}[Organism:exp]"
+		if not self.entrez_filter:
+			return base_term
+		return quote_plus(f"{base_term} AND ({self.entrez_filter})")
 
 	def _parse_json(self, resp, context):
 		"""Decode an E-utilities JSON body, tolerating stray control characters.
@@ -148,7 +173,7 @@ class GenBankFetcher:
 			raise ValueError(f"Undecodable JSON response for {context}: {e}") from e
 
 	def get_record_count(self):
-		search_url = f"{self.base_url}esearch.fcgi?db=nucleotide&term=txid{self.taxid}[Organism:exp]&retmode=json&email={self.email}"
+		search_url = f"{self.base_url}esearch.fcgi?db=nucleotide&term={self._search_term_encoded()}&retmode=json&email={self.email}"
 		response = self._get(search_url)
 		response.raise_for_status()
 		data = self._parse_json(response, "record count")
@@ -161,7 +186,7 @@ class GenBankFetcher:
 		t0 = time.time()
 		hist_url = (
 			f"{self.base_url}esearch.fcgi?db=nucleotide"
-			f"&term=txid{self.taxid}[Organism:exp]"
+			f"&term={self._search_term_encoded()}"
 			f"&retmax=0&idtype=acc"
 			f"&usehistory=y&email={self.email}&retmode=json"
 		)
@@ -224,7 +249,7 @@ class GenBankFetcher:
 		t0 = time.time()
 		hist_url = (
 			f"{self.base_url}esearch.fcgi?db=nucleotide"
-			f"&term=txid{self.taxid}[Organism:exp]"
+			f"&term={self._search_term_encoded()}"
 			f"&retmax=0&idtype=acc"
 			f"&usehistory=y&email={self.email}&retmode=json"
 		)
@@ -280,7 +305,7 @@ class GenBankFetcher:
 			t0 = time.time()
 			hist_url = (
 				f"{self.base_url}esearch.fcgi?db=nucleotide"
-				f"&term=txid{self.taxid}[Organism:exp]"
+				f"&term={self._search_term_encoded()}"
 				f"&retmax=0&idtype=acc"
 				f"&usehistory=y&email={self.email}&retmode=json"
 			)
@@ -351,82 +376,96 @@ class GenBankFetcher:
 				yield page
 
 
+	def _download_one_efetch_batch(self, i, chunk, batch_n, total_ids):
+		ids_str = ",".join(chunk)
+		url = (
+			f"{self.base_url}efetch.fcgi?db=nucleotide"
+			f"&id={ids_str}"
+			f"&retmode=xml&email={self.email}"
+		)
+		max_retries = 8
+		for attempt in range(max_retries):
+			try:
+				resp = self._get(url)
+				resp.raise_for_status()
+				self.save_data(resp.text, i + batch_n)
+				break
+			except (
+				requests.exceptions.ChunkedEncodingError,
+				requests.exceptions.ConnectionError,
+				requests.exceptions.HTTPError,
+				requests.exceptions.Timeout,
+				requests.exceptions.RequestException,
+			) as e:
+				if attempt == max_retries - 1:
+					print(f"Failed to download batch starting with index {i} after {max_retries} attempts.")
+					raise e
+				status_code = getattr(getattr(e, "response", None), "status_code", None)
+				is_backoff_status = status_code in (429, 500, 502, 503, 504)
+				wait_time = (max(1, self.sleep_time) * (attempt + 1)) + (10 if is_backoff_status else 0)
+				print(f"Network error ({type(e).__name__}, status={status_code}) for batch starting with index {i}. Retrying in {wait_time}s... (Attempt {attempt+1}/{max_retries})")
+				sleep(wait_time)
+		print(f"Downloaded XML {i+1:,}–{min(i+batch_n, total_ids):,}")
+		if self.sleep_time > 0:
+			sleep(self.sleep_time)
+
 	def fetch_genbank_data(self, ids):
 		# Use a separate internal batch size just for efetch
 		batch_n = self.efetch_batch_size
 		if self.test_run and not self.update_file:
 			ids = random.sample(ids, k=min(self.test_fetch_count, len(ids)))
-			batch_n=10
+			if self.efetch_batch_size == 100 and self.test_fetch_count <= 100:
+				batch_n = 10
 
 		if self.ref_list and not self.update_file:
 			try:
 				ref_list = load_reference_file_accessions(self.ref_list)
-				ids.extend(ref_list)
-				print(f"Added {len(ref_list)} IDs from reference list.")
+				insdc_refs = [acc for acc in ref_list if not accession_utils.is_gisaid_accession(acc)]
+				skipped_refs = [acc for acc in ref_list if accession_utils.is_gisaid_accession(acc)]
+				ids.extend(insdc_refs)
+				print(f"Added {len(insdc_refs)} IDs from reference list.")
+				if skipped_refs:
+					print(f"[info] Skipped {len(skipped_refs)} GISAID reference ID(s) during GenBank fetch (e.g. {', '.join(skipped_refs[:5])}).")
 			except Exception as e:
 				print(f"Warning: Could not read reference list: {e}")
 		
-		# Remove duplicates
-		ids = list(set(ids))
+		# Remove duplicates deterministically
+		ids = list(dict.fromkeys(ids))
 	
-		max_ids=len(ids)
-		for i in range(0, max_ids, batch_n):
-			chunk = ids[i:i+batch_n]
-			ids_str = ",".join(chunk)
-			url = (
-				f"{self.base_url}efetch.fcgi?db=nucleotide"
-				f"&id={ids_str}"
-				f"&retmode=xml&email={self.email}"
-			)
-			
-			# Retry logic for network interruptions
-			max_retries = 5
-			for attempt in range(max_retries):
-				try:
-					resp = self._get(url)
-					resp.raise_for_status()
-
-					# Pass batch_n here to name the file as before
-					self.save_data(resp.text, i + batch_n)
-					break # Success, exit retry loop
-				except (requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError, requests.exceptions.HTTPError) as e:
-					if attempt == max_retries - 1:
-						print(f"Failed to download batch starting with index {i} after {max_retries} attempts.")
-						raise e
-					
-					# Check if it's a 429 error and wait longer if so
-					is_429 = isinstance(e, requests.exceptions.HTTPError) and e.response.status_code == 429
-					wait_time = (self.sleep_time * (attempt + 1)) + (10 if is_429 else 0)
-
-					print(f"Network error ({type(e).__name__}) for batch starting with index {i}. Retrying in {wait_time}s... (Attempt {attempt+1}/{max_retries})")
-					sleep(wait_time)
-
-			print(f"Downloaded XML {i+1:,}–{min(i+batch_n, len(ids)):,}")
-			sleep(self.sleep_time)
-
-
+		max_ids = len(ids)
+		batches = [(i, ids[i:i+batch_n]) for i in range(0, max_ids, batch_n)]
+		if self.efetch_workers <= 1 or len(batches) <= 1:
+			for i, chunk in batches:
+				self._download_one_efetch_batch(i, chunk, batch_n, max_ids)
+		else:
+			print(f"[efetch] Downloading {max_ids:,} IDs across {len(batches):,} batches with {self.efetch_workers} workers (batch_size={batch_n})")
+			with ThreadPoolExecutor(max_workers=self.efetch_workers) as pool:
+				futures = [pool.submit(self._download_one_efetch_batch, i, chunk, batch_n, max_ids) for i, chunk in batches]
+				for fut in as_completed(futures):
+					fut.result()
 
 	def save_data(self, data, batch_size):
-		os.makedirs(self.output_dir, exist_ok=True)
-		os.makedirs(join(self.output_dir, self.base_dir), exist_ok=True)
+		with self._save_lock:
+			os.makedirs(self.output_dir, exist_ok=True)
+			os.makedirs(join(self.output_dir, self.base_dir), exist_ok=True)
 
-		base_filename = join(self.output_dir, self.base_dir, f"batch-{batch_size}")
-		filename = f"{base_filename}.xml"
-		counter = 1
-		while os.path.exists(filename):
-			filename = f"{base_filename}_{counter}.xml"
-			counter += 1
+			base_filename = join(self.output_dir, self.base_dir, f"batch-{batch_size}")
+			filename = f"{base_filename}.xml"
+			counter = 1
+			while os.path.exists(filename):
+				filename = f"{base_filename}_{counter}.xml"
+				counter += 1
 
-		with open(filename, "w") as file:
+			with open(filename, "w") as file:
 				file.write(data)
-		print(f"Data written to: {filename}")
+			print(f"Data written to: {filename}")
 
 	def download(self):
 		if self.test_run:
 			try:
 				search_url = (
 					f"{self.base_url}esearch.fcgi?db=nucleotide"
-					f"&term=txid{self.taxid}[Organism:exp]"
+					f"&term={self._search_term_encoded()}"
 					f"&retmax={self.test_fetch_count}&idtype=acc"
 					f"&usehistory=y&email={self.email}&retmode=json"
 				)
@@ -696,6 +735,9 @@ if __name__ == "__main__":
 	parser.add_argument("--test_run", action="store_true", help="Run a test fetching only a few records for quick testing")
 	parser.add_argument('--test_fetch_count', default=100, type=int, help='Number of accessions to fetch in test mode (default: 100)')
 	parser.add_argument('--ref_list', help='Reference accession list for test run', default=None)
+	parser.add_argument('--entrez_filter', default=None, help='Optional Entrez query filter ANDed with txid<TAXID>[Organism:exp] (e.g. "29500:30200[SLEN] NOT patent[Division] NOT synthetic[Division]")')
+	parser.add_argument('--efetch_batch_size', default=100, type=int, help='Number of accessions per efetch XML request (default: 100)')
+	parser.add_argument('--efetch_workers', default=1, type=int, help='Concurrent efetch worker threads sharing the NCBI rate limiter (default: 1)')
 	args = parser.parse_args()
 
 	fetcher = GenBankFetcher(
@@ -709,7 +751,10 @@ if __name__ == "__main__":
 		update_file = args.update,
 		test_run = args.test_run,
 		ref_list = args.ref_list,
-		test_fetch_count = args.test_fetch_count
+		test_fetch_count = args.test_fetch_count,
+		entrez_filter = args.entrez_filter,
+		efetch_batch_size = args.efetch_batch_size,
+		efetch_workers = args.efetch_workers,
 	)
 	fetcher.update_log = args.update_log
 

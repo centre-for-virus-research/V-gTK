@@ -143,6 +143,10 @@ def split_accession_version(value):
     return text, None
 
 
+#: GISAID isolate (EpiCoV/EpiFlu) and segment (EpiFlu) accessions.
+_GISAID_RE = re.compile(r'^(?:EPI_ISL_\d+|EPI\d+)$', re.IGNORECASE)
+
+
 def is_accession(value):
     """Does ``value`` look like a GenBank/RefSeq accession, versioned or not?
 
@@ -155,6 +159,14 @@ def is_accession(value):
         return False
     text = str(value).strip()
     return bool(_ACCESSION_RE.match(text) or _VERSIONED_RE.match(text))
+
+
+def is_gisaid_accession(value):
+    """Does ``value`` look like a GISAID accession (``EPI_ISL_<digits>`` or ``EPI<digits>``)?"""
+    if value is None:
+        return False
+    text = str(value).strip()
+    return bool(_GISAID_RE.match(text))
 
 
 def strip_known_suffixes(name):

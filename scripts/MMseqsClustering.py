@@ -467,6 +467,9 @@ if __name__ == "__main__":
     parser.add_argument("--test_mode", default="0",
                         help="'1' selects the fast, less sensitive path (mmseqs linclust). "
                              "Test runs only - never use for a real build.")
+    parser.add_argument("--fast", action="store_true",
+                        help="Explicitly use linear-time 'mmseqs linclust' instead of all-vs-all "
+                             "'mmseqs cluster' (essential for multi-million near-identical genomes).")
     parser.add_argument("--max-seqs", type=int, default=None,
                         help="Prefilter candidates kept per query (MMseqs default). Raise it if a large "
                              "near-identical group appears to be crowding true neighbours out of the candidate list.")
@@ -496,7 +499,7 @@ if __name__ == "__main__":
                                       strip_gaps=not args.keep_gaps, max_seqs=args.max_seqs,
                                       sort_by_quality=not args.no_quality_sort,
                                       two_step=args.two_step, min_completeness=args.min_completeness,
-                                      fast=str(args.test_mode).strip() == "1",
+                                      fast=str(args.test_mode).strip() == "1" or bool(args.fast),
                                       reference_ids=reference_ids)
             print("All processing completed.")
             exit(0)
@@ -517,7 +520,7 @@ if __name__ == "__main__":
                                   strip_gaps=not args.keep_gaps, max_seqs=args.max_seqs,
                                       sort_by_quality=not args.no_quality_sort,
                                       two_step=args.two_step, min_completeness=args.min_completeness,
-                                      fast=str(args.test_mode).strip() == "1",
+                                      fast=str(args.test_mode).strip() == "1" or bool(args.fast),
                                       reference_ids=reference_ids)
 
     print("All processing completed.")

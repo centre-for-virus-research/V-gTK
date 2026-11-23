@@ -6,6 +6,8 @@ from argparse import ArgumentParser
 from datetime import datetime
 from collections import OrderedDict
 import pandas as pd
+from date_utils import split_date_components
+from ExportRefListFromUpdateDb import load_reference_file_dict
 
 """
 Transform an external TSV + FASTA into the gB_matrix-compatible format and append rows to the base gB_matrix.
@@ -19,7 +21,7 @@ Transform an external TSV + FASTA into the gB_matrix-compatible format and appen
 """
 
 class NormalizeAndMerge:
-    def __init__(self, gb_matrix, input_tsv, input_fasta, mapping_file, output, key="Segment_Id", dataset_source="external", prefer="input", drop_unmapped=False, log_file=None):
+    def __init__(self, gb_matrix, input_tsv, input_fasta, mapping_file, output, key="Segment_Id", dataset_source="external", prefer="input", drop_unmapped=False, log_file=None, ref_list=None, require_refs=False):
         self.gb_matrix = gb_matrix
         self.input_tsv = input_tsv
         self.input_fasta = input_fasta
@@ -29,6 +31,8 @@ class NormalizeAndMerge:
         self.dataset_source = dataset_source
         self.prefer = prefer                 # unused in append-only
         self.drop_unmapped = drop_unmapped
+        self.ref_list = ref_list
+        self.require_refs = bool(require_refs)
 
         out_dir = dirname(abspath(self.output)) or "."
         os.makedirs(out_dir, exist_ok=True)
@@ -81,6 +85,39 @@ class NormalizeAndMerge:
                 seqs[current_header] = ''.join(chunks)
 
         return seqs
+
+    def parse_fasta_stats(self):
+        """Stream FASTA and return lightweight {header: (total_len, real_len, a, t, g, c, n)} without retaining sequence text."""
+        stats = {}
+        if not self.input_fasta:
+            return stats
+
+        def _summarize(seq_str):
+            up = seq_str.upper()
+            a = up.count("A")
+            t = up.count("T")
+            g = up.count("G")
+            c = up.count("C")
+            n = up.count("N")
+            return (len(up), a + t + g + c, a, t, g, c, n)
+
+        current_header = None
+        chunks = []
+        with open(self.input_fasta, 'r', encoding='utf-8', errors='replace') as fh:
+            for line in fh:
+                line = line.rstrip('\r\n')
+                if not line:
+                    continue
+                if line.startswith('>'):
+                    if current_header is not None:
+                        stats[current_header] = _summarize(''.join(chunks))
+                    current_header = line[1:].strip()
+                    chunks = []
+                else:
+                    chunks.append(line.strip())
+            if current_header is not None:
+                stats[current_header] = _summarize(''.join(chunks))
+        return stats
 
     def count_real_length(self, seq):
         if not isinstance(seq, str):
@@ -231,12 +268,20 @@ class NormalizeAndMerge:
         base_df = self.read_base_matrix_df()
         self.log(f"[INFO] Loaded base matrix: {self.gb_matrix} (rows={len(base_df)})")
         base_df["dataset_source"] = "genbank" # define source name
+        base_col_set = set(base_df.columns)
         mapping = self.read_mapping()
         in_df = self.read_input_tsv_df()
         self.log(f"[INFO] Loaded input TSV: {self.input_tsv} (rows={len(in_df)})")
         self.log(f"[INFO] Loaded mapping file: {self.mapping_file} (pairs={len(mapping)})")
-        fasta_map = self.parse_fasta()
-        self.log(f"[INFO] Loaded FASTA: {self.input_fasta} (entries={len(fasta_map)})")
+        stream_stats_only = ("sequence" not in base_col_set) and bool(self.ref_list)
+        if stream_stats_only:
+            fasta_stats = self.parse_fasta_stats()
+            fasta_map = None
+            self.log(f"[INFO] Streamed FASTA base stats: {self.input_fasta} (entries={len(fasta_stats)})")
+        else:
+            fasta_map = self.parse_fasta()
+            fasta_stats = None
+            self.log(f"[INFO] Loaded FASTA: {self.input_fasta} (entries={len(fasta_map)})")
 
         if self.key not in in_df.columns:
             self.log(f"[WARN] Key column '{self.key}' not found in input TSV. No rows will be appended.")
@@ -294,12 +339,70 @@ class NormalizeAndMerge:
         norm_df["locus"] = norm_df[self.key]
         norm_df["gi_number"] = norm_df[self.key]
 
-        # import sequences from FASTA to column 'sequence'
-        norm_df["sequence"] = norm_df[self.key].map(fasta_map).fillna("")
-        norm_df.loc[norm_df["sequence"] == "", "exclusion"] = "missing fasta sequence"
-        norm_df["real_length"] = norm_df["sequence"].apply(self.count_real_length)
+        # import sequences or lightweight base counts from FASTA
+        if stream_stats_only:
+            key_list = norm_df[self.key].tolist()
+            zero_stat = (0, 0, 0, 0, 0, 0, 0)
+            matched_stats = [fasta_stats.get(k) for k in key_list]
+            missing_seq = pd.Series([st is None or st[0] == 0 for st in matched_stats], index=norm_df.index)
+            norm_df.loc[missing_seq, "exclusion"] = "missing fasta sequence"
+            norm_df["real_length"] = [st[1] if st else 0 for st in matched_stats]
+        else:
+            norm_df["sequence"] = norm_df[self.key].map(fasta_map).fillna("")
+            norm_df.loc[norm_df["sequence"] == "", "exclusion"] = "missing fasta sequence"
+            norm_df["real_length"] = norm_df["sequence"].apply(self.count_real_length)
+            matched_stats = None
         
         norm_df["dataset_source"] = self.dataset_source
+
+        ref_dict = load_reference_file_dict(self.ref_list) if (self.ref_list and os.path.isfile(self.ref_list)) else {}
+
+        # Populate canonical gB_matrix columns when present in base_df so external/GISAID
+        # references and queries behave identically to GenBank rows downstream.
+        if "accession_type" in base_col_set:
+            existing_type = norm_df["accession_type"].fillna("").astype(str).str.strip() if "accession_type" in norm_df.columns else pd.Series("", index=norm_df.index)
+            inferred_type = norm_df["primary_accession"].map(lambda acc: ref_dict.get(str(acc).strip(), "query"))
+            norm_df["accession_type"] = existing_type.where(existing_type != "", inferred_type)
+
+        if "exclusion_status" in base_col_set:
+            excl_text = norm_df["exclusion"].fillna("").astype(str).str.strip() if "exclusion" in norm_df.columns else pd.Series("", index=norm_df.index)
+            is_excl_ref = (
+                norm_df["accession_type"].fillna("").astype(str).str.strip().str.lower().eq("exclusion_list")
+                if "accession_type" in norm_df.columns else pd.Series(False, index=norm_df.index)
+            )
+            norm_df["exclusion_status"] = (excl_text.ne("") | is_excl_ref).map(lambda flag: "1" if flag else "0")
+            if "exclusion_criteria" in base_col_set:
+                existing_crit = norm_df["exclusion_criteria"].fillna("").astype(str) if "exclusion_criteria" in norm_df.columns else pd.Series("", index=norm_df.index)
+                norm_df["exclusion_criteria"] = existing_crit.where(existing_crit != "", excl_text)
+
+        if "division" in base_col_set:
+            existing_div = norm_df["division"].fillna("").astype(str).str.strip() if "division" in norm_df.columns else pd.Series("", index=norm_df.index)
+            norm_df["division"] = existing_div.where(existing_div != "", "VRL")
+
+        if stream_stats_only:
+            if "length" in base_col_set:
+                norm_df["length"] = [str(st[0]) if st else "0" for st in matched_stats]
+            for idx_nt, base_nt in ((2, "a"), (3, "t"), (4, "g"), (5, "c"), (6, "n")):
+                if base_nt in base_col_set:
+                    norm_df[base_nt] = [str(st[idx_nt]) if st else "0" for st in matched_stats]
+        else:
+            if "length" in base_col_set:
+                norm_df["length"] = norm_df["sequence"].map(lambda s: str(len(s)) if isinstance(s, str) else "0")
+            for base_nt in ("a", "t", "g", "c", "n"):
+                if base_nt in base_col_set:
+                    norm_df[base_nt] = norm_df["sequence"].map(lambda s, ch=base_nt: str(s.lower().count(ch)) if isinstance(s, str) else "0")
+
+        if "segment" in base_col_set and "segment_declared" not in norm_df.columns and self.key != "Segment_Id":
+            base_segs = {str(v).strip() for v in base_df["segment"].tolist() if str(v).strip()}
+            if base_segs == {"1"}:
+                existing_seg = norm_df["segment"].fillna("").astype(str).str.strip() if "segment" in norm_df.columns else pd.Series("", index=norm_df.index)
+                norm_df["segment"] = existing_seg.where(existing_seg != "", "1")
+
+        if "collection_date" in norm_df.columns and {"collection_day", "collection_mon", "collection_year"} <= base_col_set:
+            parsed_dates = norm_df["collection_date"].map(lambda d: split_date_components(str(d or "")))
+            for part in ("day", "mon", "year"):
+                col_name = f"collection_{part}"
+                norm_df[col_name] = parsed_dates.map(lambda parts_dict, k=part: str(parts_dict.get(k, "")))
 
         base_cols = list(base_df.columns)
 
@@ -317,6 +420,28 @@ class NormalizeAndMerge:
 
         norm_df = norm_df.reindex(columns=final_cols, fill_value="")
         merged_df = pd.concat([base_df.reindex(columns=final_cols, fill_value=""), norm_df], ignore_index=True)
+
+        if self.require_refs and ref_dict:
+            present_valid = set(
+                merged_df.loc[
+                    merged_df.get("exclusion_status", pd.Series("0", index=merged_df.index)).astype(str).str.strip() != "1",
+                    "primary_accession",
+                ].astype(str).str.strip()
+            ) if "exclusion_status" in merged_df.columns else set(merged_df["primary_accession"].astype(str).str.strip())
+            missing_critical = sorted(
+                acc for acc, rtype in ref_dict.items()
+                if str(rtype).strip().lower() != "exclusion_list" and acc not in present_valid
+            )
+            if missing_critical:
+                raise ValueError(
+                    f"Missing CRITICAL reference accessions after merging GenBank + {self.dataset_source}: "
+                    f"{', '.join(missing_critical[:20])}"
+                    + (f" (+{len(missing_critical) - 20} more)" if len(missing_critical) > 20 else "")
+                )
+
+        # Drop raw sequence column if base_df did not carry it (sequences are combined via CAT_FASTA)
+        if "sequence" not in base_col_set and "sequence" in merged_df.columns and self.ref_list:
+            merged_df = merged_df.drop(columns=["sequence"])
 
         merged_df.to_csv(self.output, sep="\t", index=False)
         self.log(f"[INFO] Merged matrix written: {self.output}")
@@ -339,6 +464,10 @@ if __name__ == "__main__":
                         help='(accepted for compatibility) preferred side when upsert mode is enabled')
     parser.add_argument('--drop_unmapped', action='store_true',
                         help='If set, drop columns from the new dataset that are not in base matrix, mapping targets, or required columns')
+    parser.add_argument('-r', '--ref_list', default=None,
+                        help='Optional reference list TSV to classify merged master/reference rows')
+    parser.add_argument('--require_refs', action='store_true',
+                        help='Fail if any master/reference accession in --ref_list is missing after merge')
 
     args = parser.parse_args()
 
@@ -352,6 +481,8 @@ if __name__ == "__main__":
         dataset_source=args.dataset_source,
         prefer=args.prefer,
         drop_unmapped=args.drop_unmapped,
-        log_file=args.log_file
+        log_file=args.log_file,
+        ref_list=args.ref_list,
+        require_refs=args.require_refs,
     )
     job.process()
