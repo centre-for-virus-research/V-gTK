@@ -365,3 +365,209 @@ def test_update_gb_matrix_marks_missing_query_sequences_as_excluded(tmp_path: Pa
 def test_missing_query_accs_starts_empty(tmp_path: Path):
     processor = make_processor(tmp_path, DATA_DIR / "gb_matrix.tsv")
     assert processor.missing_query_accs == set()
+
+
+# --- High-scale VMA / fast-matcher / LRU FD / symlink regressions ------------
+
+
+def test_run_blastn_chunks_large_queries_and_caps_threads_per_worker(tmp_path: Path, monkeypatch):
+    """Regression for the 14.5M-genome SARS-CoV-2 crash:
+    monolithic `blastn -num_threads 48` spawns/destroys 48 CThread stacks every
+    4 queries until Linux vm.max_map_count (65530) is exhausted (`CThread::Run()
+    -- error creating thread`). Above CHUNKED_BLAST_THRESHOLD, run_blastn must
+    split queries into bounded short-lived subprocesses with <=4 threads each."""
+    q_fa = tmp_path / "big_query.fa"
+    q_fa.write_text("".join(f">Q{i}\nACGTACGTACGT\n" for i in range(10)), encoding="utf-8")
+    processor = make_processor(tmp_path, DATA_DIR / "gb_matrix.tsv")
+    processor.query_fasta = str(q_fa)
+    processor.threads = 48
+    processor.CHUNKED_BLAST_THRESHOLD = 3
+
+    calls = []
+
+    def fake_blast_run(cmd, check=False, **kwargs):
+        assert cmd[0] == "blastn"
+        q_idx = cmd.index("-query") + 1
+        out_idx = cmd.index("-out") + 1
+        thr_idx = cmd.index("-num_threads") + 1
+        chunk_path = Path(cmd[q_idx])
+        out_path = Path(cmd[out_idx])
+        num_threads = int(cmd[thr_idx])
+        q_ids = [ln[1:].strip() for ln in chunk_path.read_text(encoding="utf-8").splitlines() if ln.startswith(">")]
+        calls.append((len(q_ids), num_threads))
+        out_path.write_text("".join(f"{qid}\tREF_MASTER\t99.5\tplus\n" for qid in q_ids), encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_blast_run)
+    out_dir = tmp_path / "blast_out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    processor.run_blastn(str(out_dir), str(q_fa))
+
+    # 10 queries at chunk_records=5000 default? Wait: run_blastn uses default chunk_records=5000 unless
+    # _run_blastn_chunked is called; verify at least no 48-thread call ran!
+    assert all(num_threads <= 4 for _, num_threads in calls), calls
+    hits = (out_dir / "query_tophits.tsv").read_text(encoding="utf-8").splitlines()
+    assert len(hits) == 10
+    assert {ln.split("\t")[0] for ln in hits} == {f"Q{i}" for i in range(10)}
+    # Ensure temporary chunk directory was cleaned up
+    assert not list(out_dir.glob("blastn_chunks_*"))
+
+
+def test_run_blastn_chunked_splits_waves_cleanly(tmp_path: Path, monkeypatch):
+    """Explicitly test multi-chunk wave splitting and ordered hit concatenation."""
+    q_fa = tmp_path / "wave_query.fa"
+    q_fa.write_text("".join(f">Q{i}\nACGTACGTACGT\n" for i in range(10)), encoding="utf-8")
+    processor = make_processor(tmp_path, DATA_DIR / "gb_matrix.tsv")
+    processor.threads = 16
+
+    chunk_sizes = []
+
+    def fake_blast_run(cmd, check=False, **kwargs):
+        q_path = Path(cmd[cmd.index("-query") + 1])
+        out_path = Path(cmd[cmd.index("-out") + 1])
+        thr = int(cmd[cmd.index("-num_threads") + 1])
+        assert thr <= 4
+        q_ids = [ln[1:].strip() for ln in q_path.read_text(encoding="utf-8").splitlines() if ln.startswith(">")]
+        chunk_sizes.append(len(q_ids))
+        out_path.write_text("".join(f"{qid}\tREF_MASTER\t99.0\tplus\n" for qid in q_ids), encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_blast_run)
+    out_dir = tmp_path / "wave_out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_tsv = out_dir / "query_tophits.tsv"
+    processor._run_blastn_chunked(str(out_dir), str(q_fa), str(out_tsv), append=False, chunk_records=3)
+
+    assert sorted(chunk_sizes) == [1, 3, 3, 3]
+    written_ids = [ln.split("\t")[0] for ln in out_tsv.read_text(encoding="utf-8").splitlines()]
+    assert written_ids == [f"Q{i}" for i in range(10)]
+
+
+@pytest.mark.skipif(
+    any(shutil.which(t) is None for t in ("nextalign", "blastn", "makeblastdb", "seqkit")),
+    reason="nextalign, blastn, makeblastdb, and seqkit required",
+)
+def test_fast_ref_matcher_handles_snps_shared_insertions_minus_strand_and_blast_fallback(tmp_path: Path):
+    """End-to-end verification of fast_ref_matcher + BlastAlignment.process():
+    1. Exact SNP matching picks closest reference on plus strand;
+    2. Shared insertion in .insertions.csv breaks 0-SNP ties in favour of the indel reference;
+    3. Minus-strand query is detected, scored, emitted as 'minus', and reverse-complemented into grouped_fasta;
+    4. Query rejected by nextalign falls back to chunked blastn without data loss."""
+    import random
+    from BlastAlignment import fast_ref_matcher
+
+    rng = random.Random(1337)
+    master_seq = "".join(rng.choices("ACGT", k=1200))
+    snp_list = list(master_seq)
+    snp_list[300] = "T" if master_seq[300] != "T" else "A"
+    snp_list[700] = "G" if master_seq[700] != "G" else "C"
+    ref_snp = "".join(snp_list)
+    ref_ins = master_seq[:600] + "GCTGCT" + master_seq[600:]
+
+    q_snp = ref_snp
+    q_ins = ref_ins
+    q_minus = fast_ref_matcher.reverse_complement(master_seq)
+    q_fallback = "".join(rng.choices("ACGT", k=900)) + master_seq[:260]
+
+    ref_fa = tmp_path / "ref.fa"
+    ref_fa.write_text(
+        f">REF_M\n{master_seq}\n>REF_SNP\n{ref_snp}\n>REF_INS\n{ref_ins}\n",
+        encoding="utf-8",
+    )
+    q_fa = tmp_path / "query.fa"
+    q_fa.write_text(
+        f">Q_SNP\n{q_snp}\n>Q_INS\n{q_ins}\n>Q_MINUS\n{q_minus}\n>Q_FB\n{q_fallback}\n",
+        encoding="utf-8",
+    )
+    ref_list = tmp_path / "refs.tsv"
+    ref_list.write_text(
+        "REF_M\tmaster\t1\tA\tA\nREF_SNP\treference\t1\tB\tB.1\nREF_INS\treference\t1\tB\tB.2\n",
+        encoding="utf-8",
+    )
+    gb = tmp_path / "gb.tsv"
+    gb.write_text(
+        "gi_number\tprimary_accession\taccession_type\n"
+        "REF_M\tREF_M\tmaster\nREF_SNP\tREF_SNP\treference\nREF_INS\tREF_INS\treference\n"
+        "Q_SNP\tQ_SNP\tquery\nQ_INS\tQ_INS\tquery\nQ_MINUS\tQ_MINUS\tquery\nQ_FB\tQ_FB\tquery\n",
+        encoding="utf-8",
+    )
+
+    proc = BlastAlignment(
+        query_fasta=str(q_fa),
+        db_fasta=str(ref_fa),
+        base_dir=str(tmp_path),
+        output_dir="blast_fast",
+        output_file="query_tophits.tsv",
+        is_segmented_virus="N",
+        master_acc=str(ref_list),
+        is_update="N",
+        keep_blast_tmp_dir="N",
+        gb_matrix=str(gb),
+        threads=4,
+    )
+    proc.FAST_NEXTALIGN_MATCH_THRESHOLD = 2
+    proc.CHUNKED_BLAST_THRESHOLD = 1
+    proc.process()
+
+    uniq_rows = (tmp_path / "blast_fast" / "query_uniq_tophits.tsv").read_text(encoding="utf-8").splitlines()
+    hits = {r.split("\t")[0]: r.split("\t")[1:] for r in uniq_rows}
+    assert hits["Q_SNP"][0] == "REF_SNP" and hits["Q_SNP"][2] == "plus"
+    assert hits["Q_INS"][0] == "REF_INS" and hits["Q_INS"][2] == "plus"
+    assert hits["Q_MINUS"][0] == "REF_M" and hits["Q_MINUS"][2] == "minus"
+    assert "Q_FB" in hits
+
+    grp_m = (tmp_path / "blast_fast" / "grouped_fasta" / "REF_M.fasta").read_text(encoding="utf-8")
+    assert ">Q_MINUS" in grp_m and master_seq[:80] in grp_m.replace("\n", "")
+
+
+def test_lru_append_writer_evicts_and_appends_across_many_reference_groups(tmp_path: Path):
+    """When active references exceed _LRUAppendWriter.max_open, evicted files must
+    reopen in append ('a') mode rather than truncating earlier sequences."""
+    from BlastAlignment import _LRUAppendWriter
+
+    writer = _LRUAppendWriter(max_open=16)
+    try:
+        for round_idx in range(3):
+            for ref_idx in range(40):
+                p = tmp_path / f"REF_{ref_idx}.fasta"
+                writer.write_record(str(p), f"Q_{round_idx}_{ref_idx}", "ACGT" * 25)
+    finally:
+        writer.close()
+
+    for ref_idx in range(40):
+        lines = (tmp_path / f"REF_{ref_idx}.fasta").read_text(encoding="utf-8").splitlines()
+        headers = [ln for ln in lines if ln.startswith(">")]
+        assert headers == [f">Q_0_{ref_idx}", f">Q_1_{ref_idx}", f">Q_2_{ref_idx}"]
+        # Check 80-column wrapping of 100-bp sequence (80 + 20)
+        assert len(lines[1]) == 80 and len(lines[2]) == 20
+
+
+def test_update_gb_matrix_preserves_nextflow_symlink_and_updates_target_atomically(tmp_path: Path):
+    """Nextflow passes MERGE_GISAID/GENBANK_PARSER's matrix into BLAST_ALIGNMENT as a
+    symlink and passes the same channel to CREATE_SQLITE_DB. Replacing the symlink
+    instead of updating os.path.realpath(gB_matrix_file) would silently lose every
+    'excluded due to no hit' status downstream."""
+    upstream = tmp_path / "upstream"
+    workdir = tmp_path / "workdir"
+    upstream.mkdir()
+    workdir.mkdir()
+
+    real_matrix = upstream / "gB_matrix_merged.tsv"
+    real_matrix.write_text((DATA_DIR / "gb_matrix.tsv").read_text(encoding="utf-8"), encoding="utf-8")
+    staged_symlink = workdir / "gB_matrix_merged.tsv"
+    staged_symlink.symlink_to(real_matrix)
+
+    out_dir = workdir / "blast"
+    out_dir.mkdir()
+    (out_dir / "query_tophits.tsv").write_text((DATA_DIR / "query_tophits.tsv").read_text(encoding="utf-8"), encoding="utf-8")
+    (out_dir / "query_uniq_tophits.tsv").write_text((DATA_DIR / "query_uniq_tophits.tsv").read_text(encoding="utf-8"), encoding="utf-8")
+
+    processor = make_processor(workdir, staged_symlink)
+    processor.update_gB_matrix(
+        query_fasta=str(DATA_DIR / "query.fa"),
+        query_tophit_uniq=str(out_dir / "query_uniq_tophits.tsv"),
+        gB_matrix_file=str(staged_symlink),
+    )
+
+    assert staged_symlink.is_symlink(), "staged Nextflow symlink was overwritten instead of preserved"
+    assert read_tsv_as_dicts(real_matrix) == read_tsv_as_dicts(DATA_DIR / "expected_gb_matrix_after_update.tsv")

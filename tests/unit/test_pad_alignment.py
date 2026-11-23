@@ -866,3 +866,74 @@ class TestAccessionIdentityIsCanonical:
         updated = processor.insert_gaps("ACGT--ACGT", subalignment, "A/swine/Iowa/4.1/1976")
 
         assert str(updated[1].seq) == "-CGT--AC--"
+
+
+def test_compiled_projection_plan_matches_insert_gaps_and_deduplicates_streamed_queries(tmp_path: Path):
+    """Verify _build_projection_plan + _project_seq_str matches insert_gaps across
+    insertions, deletions, leading/trailing pads, and master gaps, and that
+    process_master_alignment streams deduplicated MSA rows + manifest counts."""
+    guide = tmp_path / "refset_1_aln.fasta"
+    _write_fasta(
+        guide,
+        [
+            ("MASTER", "ACGT---ACGTACGT"),
+            ("REF_A", "ACGTAAAAC--ACGT"),
+            ("REF_B", "--GT---ACGTAC--"),
+        ],
+    )
+    q_dir = tmp_path / "query_aln"
+    # Q_DUP appears in both REF_A and REF_B; streaming dedup must emit it only once.
+    _write_fasta(
+        q_dir / "REF_A" / "REF_A.aligned.fasta",
+        [
+            ("REF_A", "TTACGTAAAAC--ACGT"),  # 2-nt private 5' insertion in Nextalign ref
+            ("Q_A1", "--ACGT---AC--ACGT"),
+            ("Q_DUP", "--ACGTAAAAC--AC--"),
+        ],
+    )
+    _write_fasta(
+        q_dir / "REF_B" / "REF_B.aligned.fasta",
+        [
+            ("REF_B", "GTACGTAC"),
+            ("Q_DUP", "GTACGTAC"),
+            ("Q_B1", "-TACGT--"),
+        ],
+    )
+
+    manifest = tmp_path / "manifest.tsv"
+    processor = PadAlignment(
+        reference_alignment=str(guide),
+        input_dir=str(q_dir),
+        base_dir=str(tmp_path),
+        output_dir=str(tmp_path / "pad_out"),
+        keep_intermediate_files=False,
+        segment_manifest_out=str(manifest),
+    )
+
+    # Check _build_projection_plan + _project_seq_str directly against insert_gaps
+    plan, col_targets, max_col = PadAlignment._build_projection_plan("ACGTAAAAC--ACGT", "TTACGTAAAAC--ACGT")
+    for q_seq in ("--ACGT---AC--ACGT", "--ACGTAAAAC--AC--", "-----------------", "TT---------------"):
+        expected = str(
+            processor.insert_gaps(
+                "ACGTAAAAC--ACGT",
+                [SeqRecord(Seq("TTACGTAAAAC--ACGT"), id="REF_A"), SeqRecord(Seq(q_seq), id="Q")],
+                "REF_A",
+            )[1].seq
+        )
+        assert PadAlignment._project_seq_str(q_seq, plan, col_targets, max_col) == expected
+
+    processor.process_master_alignment(
+        reference_alignment_file=str(guide),
+        input_dir=str(q_dir),
+        base_dir=str(tmp_path),
+        output_dir=str(tmp_path / "pad_out"),
+        keep_intermediate_files=False,
+        segment_value="1",
+    )
+
+    merged_fa = tmp_path / "pad_out" / "refset_1_aln_merged_MSA.fasta"
+    records = list(SeqIO.parse(str(merged_fa), "fasta"))
+    ids = [r.id for r in records]
+    assert len(ids) == len(set(ids)), f"Duplicate IDs leaked into merged MSA: {ids}"
+    assert set(ids) == {"MASTER", "REF_A", "REF_B", "Q_A1", "Q_DUP", "Q_B1"}
+    assert {len(str(r.seq)) for r in records} == {len("ACGT---ACGTACGT")}

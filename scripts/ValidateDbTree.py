@@ -867,115 +867,130 @@ def validate_feature_projection_integrity(conn):
             ),
         }
 
+    distinct_masters = sorted({
+        str(row[0]).strip()
+        for row in conn.execute("SELECT DISTINCT master_ref_accession FROM features WHERE master_ref_accession IS NOT NULL")
+        if row[0] is not None and str(row[0]).strip()
+    })
+
+    master_spans = {}
+    if distinct_masters:
+        for start_idx in range(0, len(distinct_masters), 500):
+            m_chunk = distinct_masters[start_idx:start_idx + 500]
+            marks = ",".join("?" for _ in m_chunk)
+            for accession, product, cds_start, cds_end in conn.execute(
+                f"SELECT accession, product, cds_start, cds_end FROM features WHERE accession IN ({marks})",
+                m_chunk,
+            ):
+                accession_text = str(accession).strip() if accession is not None else ""
+                product_text = str(product).strip() if product is not None else ""
+                start = _try_parse_int(cds_start)
+                end = _try_parse_int(cds_end)
+                if not accession_text or not product_text or start is None or end is None:
+                    continue
+                master_spans.setdefault((accession_text, product_text), []).append((start, end))
+
+    master_columns = _master_residue_columns(conn, distinct_masters)
+
+    offending_examples = []
+    offending_count = 0
+    unresolved_master_rows = 0
+    invalid_aln_rows = 0
+    mismatched_cds_rows = 0
     cursor = conn.cursor()
     cursor.execute(
         "SELECT accession, master_ref_accession, product, aln_start, aln_end, cds_start, cds_end FROM features"
     )
-    feature_rows = cursor.fetchall()
+    while True:
+        batch = cursor.fetchmany(100000)
+        if not batch:
+            break
+        for accession, master_ref_accession, product, aln_start, aln_end, cds_start, cds_end in batch:
+            accession_text = str(accession).strip() if accession is not None else ""
+            master_text = str(master_ref_accession).strip() if master_ref_accession is not None else ""
+            product_text = str(product).strip() if product is not None else ""
+            if not accession_text or not master_text or not product_text or accession_text == master_text:
+                continue
 
-    master_spans = {}
-    for accession, _, product, _, _, cds_start, cds_end in feature_rows:
-        accession_text = str(accession).strip() if accession is not None else ""
-        product_text = str(product).strip() if product is not None else ""
-        start = _try_parse_int(cds_start)
-        end = _try_parse_int(cds_end)
-        if not accession_text or not product_text or start is None or end is None:
-            continue
-        master_spans.setdefault((accession_text, product_text), []).append((start, end))
+            aln_start_int = _try_parse_int(aln_start)
+            aln_end_int = _try_parse_int(aln_end)
+            if aln_start_int is None or aln_end_int is None:
+                invalid_aln_rows += 1
+                continue
 
-    master_columns = _master_residue_columns(
-        conn, {str(row[1]).strip() for row in feature_rows if row[1] is not None}
-    )
+            master_product_spans = master_spans.get((master_text, product_text))
+            if not master_product_spans:
+                unresolved_master_rows += 1
+                continue
+            cds_start_int = _try_parse_int(cds_start)
+            cds_end_int = _try_parse_int(cds_end)
+            if cds_start_int is not None and cds_end_int is not None:
+                cds_start_int = max(cds_start_int, aln_start_int)
+                cds_end_int = min(cds_end_int, aln_end_int)
 
-    offending_rows = []
-    unresolved_master_rows = 0
-    invalid_aln_rows = 0
-    mismatched_cds_rows = 0
-    for accession, master_ref_accession, product, aln_start, aln_end, cds_start, cds_end in feature_rows:
-        accession_text = str(accession).strip() if accession is not None else ""
-        master_text = str(master_ref_accession).strip() if master_ref_accession is not None else ""
-        product_text = str(product).strip() if product is not None else ""
-        if not accession_text or not master_text or not product_text or accession_text == master_text:
-            continue
+            expected_matches = False
+            residue_columns = master_columns.get(master_text)
+            for master_start, master_end in master_product_spans:
+                expected_start = max(master_start, aln_start_int)
+                expected_end = min(master_end, aln_end_int)
+                if residue_columns:
+                    first = bisect.bisect_left(residue_columns, expected_start)
+                    last = bisect.bisect_right(residue_columns, expected_end) - 1
+                    if first < len(residue_columns) and last >= 0:
+                        expected_start = residue_columns[first]
+                        expected_end = residue_columns[last]
+                if expected_start <= expected_end:
+                    if cds_start_int == expected_start and cds_end_int == expected_end:
+                        expected_matches = True
+                        break
 
-        aln_start_int = _try_parse_int(aln_start)
-        aln_end_int = _try_parse_int(aln_end)
-        if aln_start_int is None or aln_end_int is None:
-            invalid_aln_rows += 1
-            continue
+            if not expected_matches:
+                mismatched_cds_rows += 1
+                offending_count += 1
+                if len(offending_examples) < 25:
+                    offending_examples.append(
+                        {
+                            "accession": accession_text,
+                            "master_ref_accession": master_text,
+                            "product": product_text,
+                            "aln_start": str(aln_start),
+                            "aln_end": str(aln_end),
+                            "cds_start": str(cds_start),
+                            "cds_end": str(cds_end),
+                            "reason": "cds_span_mismatch",
+                        }
+                    )
+                continue
 
-        master_product_spans = master_spans.get((master_text, product_text))
-        if not master_product_spans:
-            unresolved_master_rows += 1
-            continue
-        cds_start_int = _try_parse_int(cds_start)
-        cds_end_int = _try_parse_int(cds_end)
-        # Clamp the projected CDS coordinates to the sequence's actual alignment window
-        if cds_start_int is not None and cds_end_int is not None:
-            cds_start_int = max(cds_start_int, aln_start_int)
-            cds_end_int = min(cds_end_int, aln_end_int)
-        
-        expected_matches = False
-        residue_columns = master_columns.get(master_text)
-        for master_start, master_end in master_product_spans:
-            expected_start = max(master_start, aln_start_int)
-            expected_end = min(master_end, aln_end_int)
-            if residue_columns:
-                # Snap to the master bases the row actually covers (see
-                # _master_residue_columns); a no-op for an ungapped master.
-                first = bisect.bisect_left(residue_columns, expected_start)
-                last = bisect.bisect_right(residue_columns, expected_end) - 1
-                if first < len(residue_columns) and last >= 0:
-                    expected_start = residue_columns[first]
-                    expected_end = residue_columns[last]
-            if expected_start <= expected_end:
-                if cds_start_int == expected_start and cds_end_int == expected_end:
-                    expected_matches = True
-                    break
-
-        if not expected_matches:
-            mismatched_cds_rows += 1
-            offending_rows.append(
-                {
-                    "accession": accession_text,
-                    "master_ref_accession": master_text,
-                    "product": product_text,
-                    "aln_start": str(aln_start),
-                    "aln_end": str(aln_end),
-                    "cds_start": str(cds_start),
-                    "cds_end": str(cds_end),
-                    "reason": "cds_span_mismatch",
-                }
+            overlaps_master_feature = any(
+                aln_end_int >= master_start and aln_start_int <= master_end
+                for master_start, master_end in master_product_spans
             )
-            continue
-
-        overlaps_master_feature = any(
-            aln_end_int >= master_start and aln_start_int <= master_end
-            for master_start, master_end in master_product_spans
-        )
-        if not overlaps_master_feature:
-            offending_rows.append(
-                {
-                    "accession": accession_text,
-                    "master_ref_accession": master_text,
-                    "product": product_text,
-                    "aln_start": str(aln_start),
-                    "aln_end": str(aln_end),
-                    "cds_start": str(cds_start),
-                    "cds_end": str(cds_end),
-                    "reason": "aln_span_outside_master_feature",
-                }
-            )
+            if not overlaps_master_feature:
+                offending_count += 1
+                if len(offending_examples) < 25:
+                    offending_examples.append(
+                        {
+                            "accession": accession_text,
+                            "master_ref_accession": master_text,
+                            "product": product_text,
+                            "aln_start": str(aln_start),
+                            "aln_end": str(aln_end),
+                            "cds_start": str(cds_start),
+                            "cds_end": str(cds_end),
+                            "reason": "aln_span_outside_master_feature",
+                        }
+                    )
 
     return {
         "title": title,
-        "ok": len(offending_rows) == 0 and invalid_aln_rows == 0,
+        "ok": offending_count == 0 and invalid_aln_rows == 0,
         "table": "features",
-        "offending_rows": len(offending_rows),
+        "offending_rows": offending_count,
         "invalid_aln_rows": invalid_aln_rows,
         "unresolved_master_rows": unresolved_master_rows,
         "mismatched_cds_rows": mismatched_cds_rows,
-        "examples": offending_rows[:25],
+        "examples": offending_examples,
     }
 
 

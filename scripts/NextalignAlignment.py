@@ -3,6 +3,7 @@ import re
 import csv
 import shlex
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from Bio import SeqIO
 from os.path import join
 from argparse import ArgumentParser
@@ -431,6 +432,54 @@ class NextalignAlignment:
 			if os.path.exists(tmp_path):
 				os.remove(tmp_path)
 
+	def _stream_apply_exclusions_atomically(self, gB_matrix_file, failed_accessions):
+		"""Stream gB_matrix in bounded batches into a sibling temp file and os.replace atomically."""
+		target_path = os.path.realpath(gB_matrix_file)
+		tmp_path = target_path + '.tmp'
+		try:
+			with open(target_path, newline='', encoding='utf-8') as csvfile, \
+			     open(tmp_path, 'w', newline='', encoding='utf-8') as out_csv:
+				reader = csv.DictReader(csvfile, delimiter='\t', restval='')
+				if not reader.fieldnames:
+					raise ValueError(f"gB matrix has no header row: {gB_matrix_file}")
+				fieldnames = list(reader.fieldnames)
+				for column in ('exclusion_status', 'exclusion_criteria'):
+					if column not in fieldnames:
+						fieldnames.append(column)
+				writer = csv.DictWriter(out_csv, fieldnames=fieldnames, delimiter='\t')
+				writer.writeheader()
+				batch = []
+				for line_number, row in enumerate(reader, start=2):
+					overflow = row.pop(None, None)
+					if overflow:
+						raise ValueError(
+							f"{gB_matrix_file} line {line_number} has more fields than the "
+							f"{len(reader.fieldnames)}-column header; trailing values: {overflow!r}. "
+							f"The matrix has not been modified."
+						)
+					gi = row.get('gi_number')
+					acc_type = str(row.get('accession_type') or '').strip().lower()
+					status = row.get('exclusion_status') or '0'
+					criteria = self._split_criteria(row.get('exclusion_criteria'))
+					if gi in failed_accessions and acc_type not in {'reference', 'master', 'exclusion_list'}:
+						status = '1'
+						for error in failed_accessions[gi]:
+							criterion = self._sanitise_criteria(error)
+							if criterion and criterion not in criteria:
+								criteria.append(criterion)
+					row['exclusion_status'] = status
+					row['exclusion_criteria'] = '; '.join(criteria)
+					batch.append(row)
+					if len(batch) >= 10000:
+						writer.writerows(batch)
+						batch = []
+				if batch:
+					writer.writerows(batch)
+			os.replace(tmp_path, target_path)
+		finally:
+			if os.path.exists(tmp_path):
+				os.remove(tmp_path)
+
 	def update_gb_matrix(self, alignment_dir: list, gB_matrix_file, extra_failures=None):
 		"""Mark sequences nextalign could not align as excluded.
 
@@ -453,32 +502,89 @@ class NextalignAlignment:
 		for acc, errors in (extra_failures or {}).items():
 			failed_accessions.setdefault(acc, []).extend(errors)
 
-		fieldnames, updated_rows = self._apply_exclusions(gB_matrix_file, failed_accessions)
-		self._write_matrix_atomically(gB_matrix_file, fieldnames, updated_rows)
+		self._stream_apply_exclusions_atomically(gB_matrix_file, failed_accessions)
+
+	def _nextalign_query_with_jobs(self, query_acc_path, ref_acc_path, query_aln_op, jobs):
+		accession = self.path_to_basename(query_acc_path)
+		base_profile = self.relaxation_profiles[0]
+		command = [
+			'nextalign', 'run',
+			'--min-seeds', str(base_profile["min_seeds"]),
+			'--seed-spacing', str(base_profile["seed_spacing"]),
+			'--min-match-rate', str(base_profile["min_match_rate"]),
+			'--input-ref', ref_acc_path,
+			'--output-all', join(query_aln_op, f'{accession}'),
+			'--output-basename', f'{accession}',
+			'--include-reference',
+			'--jobs', str(max(1, int(jobs))),
+			query_acc_path,
+		]
+		return_code = self._run_nextalign(command, f"Executing Query Alignment for {accession}")
+		if return_code != 0:
+			print(f"Query alignment error: {accession} exited with code {return_code}")
+			return False
+		return True
 
 	def _align_query_groups(self, query_aln_output_dir):
-		"""Align every query group against its like-named reference file.
-
-		Returns ``{accession: [reason]}`` for groups that could not be aligned
-		at all, so those sequences can be excluded rather than passing silently
-		into the tree build.
-		"""
+		"""Align every query group against its like-named reference file."""
 		unaligned = {}
-		for each_query_file in self._listdir_files(self.query_dir):
+		files = self._listdir_files(self.query_dir)
+		# Keep existing sequential self.nextalign_query path for small numbers of groups
+		# (preserves unit-test monkeypatches on nextalign_query); fan out across workers
+		# when hundreds/thousands of reference groups are present.
+		if len(files) <= 32 or self.max_threads <= 2:
+			for each_query_file in files:
+				query_path = join(self.query_dir, each_query_file)
+				ref_path = join(self.ref_dir, each_query_file)
+				if not os.path.isfile(ref_path):
+					reason = f"No reference sequence file for query group {each_query_file}"
+					print(f"WARNING: {reason}; group not aligned.")
+					self._record_group_failure(unaligned, query_path, reason)
+					continue
+				if not self.nextalign_query(query_path, ref_path, query_aln_output_dir):
+					self._record_group_failure(
+						unaligned, query_path,
+						f"nextalign failed to run for query group {each_query_file}",
+					)
+			return unaligned
+
+		large_groups = []
+		small_groups = []
+		for each_query_file in files:
 			query_path = join(self.query_dir, each_query_file)
 			ref_path = join(self.ref_dir, each_query_file)
-
 			if not os.path.isfile(ref_path):
 				reason = f"No reference sequence file for query group {each_query_file}"
 				print(f"WARNING: {reason}; group not aligned.")
 				self._record_group_failure(unaligned, query_path, reason)
 				continue
+			if os.path.getsize(query_path) >= 30 * 1024 * 1024:
+				large_groups.append((each_query_file, query_path, ref_path))
+			else:
+				small_groups.append((each_query_file, query_path, ref_path))
 
+		for each_query_file, query_path, ref_path in large_groups:
 			if not self.nextalign_query(query_path, ref_path, query_aln_output_dir):
 				self._record_group_failure(
 					unaligned, query_path,
 					f"nextalign failed to run for query group {each_query_file}",
 				)
+
+		if small_groups:
+			workers = min(12, max(2, self.max_threads // 4))
+			jobs_per_worker = max(1, self.max_threads // workers)
+			with ThreadPoolExecutor(max_workers=workers) as pool:
+				fut_map = {
+					pool.submit(self._nextalign_query_with_jobs, q_path, r_path, query_aln_output_dir, jobs_per_worker): (fname, q_path)
+					for fname, q_path, r_path in small_groups
+				}
+				for fut in as_completed(fut_map):
+					fname, q_path = fut_map[fut]
+					if not fut.result():
+						self._record_group_failure(
+							unaligned, q_path,
+							f"nextalign failed to run for query group {fname}",
+						)
 
 		return unaligned
 

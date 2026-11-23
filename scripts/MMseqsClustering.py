@@ -64,6 +64,20 @@ def informative_length(sequence):
     return sum(seq.count(base) for base in INFORMATIVE_BASES)
 
 
+def _detect_total_ram_gib():
+    try:
+        return (os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")) / (1024 ** 3)
+    except Exception:
+        return 0.0
+
+
+def _default_mmseqs_split_memory_limit():
+    """Cap MMseqs2 at 1000G on multi-TB hosts so it does not claim 80% (~3+ TB) of shared RAM."""
+    if _detect_total_ram_gib() >= 1100:
+        return "1000G"
+    return None
+
+
 def sort_fasta_by_informative_length(input_fasta, output_fasta):
     """Rewrite a FASTA in descending order of informative (non-N, non-gap) length.
 
@@ -80,6 +94,11 @@ def sort_fasta_by_informative_length(input_fasta, output_fasta):
     """
     tmp_tsv = output_fasta + ".sort.tsv"
     sorted_tsv = output_fasta + ".sorted.tsv"
+    sort_dir = os.path.dirname(os.path.abspath(output_fasta)) or "."
+    sort_cmd = ["sort", "-t", "\t", "-k1,1nr", "-s"]
+    if _detect_total_ram_gib() >= 512:
+        sort_cmd += ["-S", "128G", "-T", sort_dir]
+    sort_cmd.append(tmp_tsv)
     try:
         with open(tmp_tsv, "w") as handle:
             for record in SeqIO.parse(input_fasta, "fasta"):
@@ -88,7 +107,7 @@ def sort_fasta_by_informative_length(input_fasta, output_fasta):
 
         env = dict(os.environ, LC_ALL="C")
         with open(sorted_tsv, "w") as handle:
-            subprocess.run(["sort", "-t", "\t", "-k1,1nr", "-s", tmp_tsv],
+            subprocess.run(sort_cmd,
                            check=True, stdout=handle, env=env)
 
         # Write to a scratch path and swap it in only on success. This is
@@ -200,7 +219,7 @@ def split_by_completeness(alignment_fasta, min_completeness, complete_out, remai
 
 
 def assign_remainder_to_representatives(remainder_fasta, representatives_fasta, tmp_dir,
-                                        threads, min_seq_id):
+                                        threads, min_seq_id, split_memory_limit=None):
     """Search the held-back sequences against the step-1 representatives and
     return {member_id: representative_id} for those meeting min_seq_id.
 
@@ -218,7 +237,7 @@ def assign_remainder_to_representatives(remainder_fasta, representatives_fasta, 
     ungapped_reps = os.path.join(tmp_dir, "representatives_ungapped.seq")
     strip_alignment_gaps(representatives_fasta, ungapped_reps)
 
-    subprocess.run([
+    search_cmd = [
         "mmseqs", "easy-search", remainder_fasta, ungapped_reps, hits_path,
         os.path.join(tmp_dir, "search_tmp"),
         "--threads", str(threads),
@@ -228,7 +247,11 @@ def assign_remainder_to_representatives(remainder_fasta, representatives_fasta, 
         "--cov-mode", "2", "-c", "0.8",
         "--max-seqs", "10",
         "--format-output", "query,target,pident",
-    ], check=True)
+    ]
+    eff_mem = split_memory_limit or _default_mmseqs_split_memory_limit()
+    if eff_mem:
+        search_cmd += ["--split-memory-limit", str(eff_mem)]
+    subprocess.run(search_cmd, check=True)
 
     threshold = float(min_seq_id) * 100.0
     best = {}
@@ -283,7 +306,7 @@ def write_aligned_representatives(alignment_fasta, cluster_tsv, output_fasta):
 
 def run_mmseqs_clustering(input_fasta, output_dir, min_seq_id, threads=8, strip_gaps=True, max_seqs=None,
                           sort_by_quality=True, two_step=False, min_completeness=0.9,
-                          fast=False, reference_ids=None):
+                          fast=False, reference_ids=None, split_memory_limit=None):
     base_name = os.path.splitext(os.path.basename(input_fasta))[0]
     mmseqs_dir = os.path.join(output_dir, base_name)
     segments_db_dir = os.path.join(mmseqs_dir, "segments_DB")
@@ -361,6 +384,9 @@ def run_mmseqs_clustering(input_fasta, output_dir, min_seq_id, threads=8, strip_
         # neighbours out of the candidate list. linclust has no prefilter, so
         # the flag is rejected there.
         cluster_cmd += ["--max-seqs", str(max_seqs)]
+    eff_mem = split_memory_limit or _default_mmseqs_split_memory_limit()
+    if eff_mem:
+        cluster_cmd += ["--split-memory-limit", str(eff_mem)]
     if fast:
         print(f"[test-mode] using 'mmseqs linclust' (linear time, less sensitive) "
               f"instead of 'mmseqs cluster'")
@@ -411,7 +437,7 @@ def run_mmseqs_clustering(input_fasta, output_dir, min_seq_id, threads=8, strip_
             # the database and are still placed on the tree by UShER.
             assignments = assign_remainder_to_representatives(
                 remainder_source, rep_fasta, os.path.join(mmseqs_dir, "step2_tmp"),
-                threads, min_seq_id)
+                threads, min_seq_id, split_memory_limit=eff_mem)
             with open(tsv_output, "a") as handle:
                 for member, representative in sorted(assignments.items()):
                     handle.write(f"{representative}\t{member}\n")

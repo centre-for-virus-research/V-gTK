@@ -50,6 +50,9 @@ def attach_clusters_to_db(db_path, cluster_tsv, min_seq_id):
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
+        cur.execute("PRAGMA temp_store = MEMORY;")
+        cur.execute("PRAGMA cache_size = -67108864;")
+        cur.execute("PRAGMA mmap_size = 274877906944;")
         cols = [row[1] for row in cur.execute("PRAGMA table_info(meta_data)").fetchall()]
         if not cols:
             raise ValueError(f"Database {db_path} has no meta_data table")
@@ -90,6 +93,8 @@ def main(argv=None):
     parser.add_argument("--min-seq-id", type=float, default=0.999, help="MMseqs minimum sequence identity (default: 0.999)")
     parser.add_argument("--min-completeness", type=float, default=0.98, help="Minimum completeness for step-1 representatives (default: 0.98)")
     parser.add_argument("--threads", type=int, default=48, help="Threads for MMseqs2 (default: 48)")
+    parser.add_argument("--max-memory", default="1000G",
+                        help="MMseqs2 --split-memory-limit cap (default: 1000G = ~1 TB)")
     parser.add_argument("--exact", action="store_true",
                         help="Use full all-vs-all 'mmseqs cluster' instead of default linear-time 'mmseqs linclust'")
     args = parser.parse_args(argv)
@@ -115,6 +120,7 @@ def main(argv=None):
             min_completeness=args.min_completeness,
             fast=not args.exact,
             reference_ids=master_ids,
+            split_memory_limit=args.max_memory,
         )
         cluster_tsv = os.path.join(out_dir, base_name, f"{base_name}_clusters.tsv")
         col_name, n_members, n_updated = attach_clusters_to_db(args.db, cluster_tsv, args.min_seq_id)

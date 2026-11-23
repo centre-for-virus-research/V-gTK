@@ -1434,3 +1434,57 @@ def test_process_non_reference_alignment_runs_master_path(tmp_path: Path, monkey
     processor.process()
 
     assert calls == {"query": 1, "master": 1, "update": 1, "dedup": 1}
+
+
+def test_update_gb_matrix_writes_through_symlink_target_atomically(tmp_path: Path):
+    """Nextflow stages gB_matrix into NEXTALIGN_ALIGNMENT as a symlink. Atomic
+    os.replace must target os.path.realpath(gB_matrix_file) so the symlink stays
+    intact and exclusions propagate to the underlying matrix file."""
+    upstream = tmp_path / "upstream"
+    workdir = tmp_path / "workdir"
+    upstream.mkdir()
+    workdir.mkdir()
+
+    real_matrix = upstream / "gB_matrix_merged.tsv"
+    write_matrix(real_matrix, [["ACC_OK", "query", "0", ""], ["ACC_FAIL", "query", "0", ""]])
+    staged = workdir / "gB_matrix_merged.tsv"
+    staged.symlink_to(real_matrix)
+
+    aln = write_errors_csv(
+        workdir / "Nextalign", "REF1", "seqName,errors,warnings\nACC_FAIL,unable to align,\n"
+    )
+    make(workdir).update_gb_matrix([aln], str(staged))
+
+    assert staged.is_symlink()
+    rows = {r["gi_number"]: r for r in read_matrix(real_matrix)}
+    assert rows["ACC_OK"]["exclusion_status"] == "0"
+    assert rows["ACC_FAIL"]["exclusion_status"] == "1"
+    assert "unable to align" in rows["ACC_FAIL"]["exclusion_criteria"]
+
+
+def test_align_query_groups_parallel_fanout_for_many_reference_groups(tmp_path: Path, monkeypatch):
+    """When >32 reference groups exist (e.g. 5,836 SARS-CoV-2 Pango references),
+    _align_query_groups fans out small groups concurrently across a ThreadPoolExecutor
+    and collects any non-zero exit group's queries into extra_failures."""
+    q_dir = tmp_path / "grouped_fasta"
+    r_dir = tmp_path / "ref_seqs"
+    out_dir = tmp_path / "query_aln"
+    out_dir.mkdir(parents=True)
+
+    for idx in range(40):
+        write_fasta(q_dir / f"REF_{idx}.fasta", [(f"Q_{idx}_1", "ACGT"), (f"Q_{idx}_2", "ACGT")])
+        write_fasta(r_dir / f"REF_{idx}.fasta", [(f"REF_{idx}", "ACGT")])
+
+    proc = make(tmp_path, query_dir=str(q_dir), ref_dir=str(r_dir), max_threads=16)
+    seen = []
+
+    def fake_run_with_jobs(q_path, _r_path, _out, jobs):
+        name = Path(q_path).stem
+        seen.append((name, jobs))
+        return name != "REF_17"
+
+    monkeypatch.setattr(proc, "_nextalign_query_with_jobs", fake_run_with_jobs)
+    failures = proc._align_query_groups(str(out_dir))
+
+    assert len(seen) == 40
+    assert set(failures.keys()) == {"Q_17_1", "Q_17_2"}

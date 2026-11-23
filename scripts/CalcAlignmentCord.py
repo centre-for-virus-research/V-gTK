@@ -137,20 +137,19 @@ from ExportRefListFromUpdateDb import load_master_accessions_from_file, load_ref
 import segment_utils
 
 def alignment_covered_columns(sequence):
-	"""``(first, last)`` 1-based ALIGNMENT COLUMNS carrying a residue, or None.
-
-	Everything outside this is padding added to square the alignment up: columns
-	the submitter never reported, not sequence missing from the virus.
-	"""
-	first = last = None
-	for index, base in enumerate(sequence, start=1):
-		if base != "-":
-			if first is None:
-				first = index
-			last = index
+	"""``(first, last)`` 1-based ALIGNMENT COLUMNS carrying a residue, or None."""
+	n = len(sequence)
+	first = None
+	for idx in range(n):
+		if sequence[idx] != "-":
+			first = idx + 1
+			break
 	if first is None:
 		return None
-	return (first, last)
+	for idx in range(n - 1, -1, -1):
+		if sequence[idx] != "-":
+			return (first, idx + 1)
+	return (first, first)
 
 
 class CalculateAlignmentCoordinates:
@@ -369,20 +368,17 @@ class CalculateAlignmentCoordinates:
 	def get_gap_ranges(self, sequence):
 		"""Inclusive 1-based ALIGNMENT COLUMN ranges (space 2) of each gap run."""
 		gap_ranges = []
-		start = None
-
-		for i, char in enumerate(sequence):
-			if char == '-':
-				if start is None:
-					start = i + 1
-			else:
-				if start is not None:
-					gap_ranges.append([start, i])
-					start = None
-
-		if start is not None:
-			gap_ranges.append([start, len(sequence)])
-
+		n = len(sequence)
+		pos = 0
+		while pos < n:
+			g_start = sequence.find('-', pos)
+			if g_start == -1:
+				break
+			g_end = g_start + 1
+			while g_end < n and sequence[g_end] == '-':
+				g_end += 1
+			gap_ranges.append([g_start + 1, g_end])
+			pos = g_end
 		return gap_ranges
 
 	def count_gaps_before_position(self, gap_ranges, position):
@@ -659,34 +655,101 @@ class CalculateAlignmentCoordinates:
 				gff_dict = GffDictionary(gff_file).gff_dict
 				cds_list = gff_dict['CDS']
 
-				calc = CalculateGenomeCoordinates(join(fasta_file_dir, fasta_file), current_master)
-				genome_coords = calc.extract_alignment_coordinates()
-				
-				fasta_records = list(SeqIO.parse(join(fasta_file_dir, fasta_file), "fasta"))
-				master_record = next((r for r in fasta_records if r.id == current_master), None)
-				if not master_record:
-					master_record = fasta_records[0]
-				master_alignment = str(master_record.seq)
+				def _iter_fasta_fast(path, chunk_bytes=16 * 1024 * 1024):
+					with open(path, "r", encoding="utf-8", errors="replace") as fh:
+						carry = ""
+						first_chunk = True
+						while True:
+							chunk = fh.read(chunk_bytes)
+							if not chunk:
+								break
+							data = carry + chunk
+							if first_chunk:
+								gt = data.find(">")
+								if gt == -1:
+									carry = ""
+									continue
+								data = data[gt + 1:]
+								first_chunk = False
+							parts = data.split("\n>")
+							carry = parts[-1]
+							for blk in parts[:-1]:
+								hdr, sep_nl, body = blk.partition("\n")
+								if sep_nl or hdr:
+									h = hdr.strip()
+									rid = h.split(None, 1)[0] if h else ""
+									yield rid, body.replace("\n", "").replace("\r", "")
+						if carry and not first_chunk:
+							hdr, sep_nl, body = carry.partition("\n")
+							if sep_nl or hdr:
+								h = hdr.strip()
+								rid = h.split(None, 1)[0] if h else ""
+								yield rid, body.replace("\n", "").replace("\r", "")
 
-				# The GFF is in record coordinates; this row may start partway
-				# into the record. Everything derived from the row is therefore
-				# shifted into record space by the same offset, so that the CDS
-				# coordinates, the coordinate map and the covered span are all
-				# in one space and can legitimately be compared.
+				full_fasta_path = join(fasta_file_dir, fasta_file)
+				master_alignment = None
+				first_alignment = None
+				for rid, rseq in _iter_fasta_fast(full_fasta_path):
+					if first_alignment is None:
+						first_alignment = rseq
+					if rid == current_master:
+						master_alignment = rseq
+						break
+				if master_alignment is None:
+					if first_alignment is None:
+						raise ValueError(f"No FASTA records found in alignment file: {full_fasta_path}")
+					raise ValueError(
+						f"Master reference '{current_master}' not found in alignment file: {full_fasta_path}"
+					)
+
 				trim_offset = self.compute_trim_offset(current_master, master_alignment, gff_dict)
 
 				master_coord_to_aln_pos = {}
+				master_non_gap_cols = []
+				col_to_master_trimmed = {}
 				master_res_count = 0
 				for align_pos, base in enumerate(master_alignment, start=1):
 					if base != "-":
 						master_res_count += 1
 						master_coord_to_aln_pos[master_res_count + trim_offset] = align_pos
+						col0 = align_pos - 1
+						master_non_gap_cols.append(col0)
+						col_to_master_trimmed[col0] = master_res_count
 
-				for record in fasta_records:
-					record_id = str(record.id).strip()
-					sequence = str(record.seq)
+				# Precompile contiguous 0-based alignment column slices per (feature_start, feature_end)
+				cov_plan_cache = {}
+				for cds in cds_list:
+					try:
+						fs = int(cds['start'])
+						fe = int(cds['end'])
+					except (TypeError, ValueError):
+						continue
+					key_fe = (fs, fe)
+					if key_fe in cov_plan_cache:
+						continue
+					s_lo, s_hi = (fe, fs) if fs > fe else (fs, fe)
+					cols = [master_coord_to_aln_pos[mp] - 1 for mp in range(s_lo, s_hi + 1) if mp in master_coord_to_aln_pos]
+					if not cols:
+						cov_plan_cache[key_fe] = (0, (), ())
+						continue
+					runs = []
+					r_s = cols[0]
+					r_e = r_s + 1
+					for c in cols[1:]:
+						if c == r_e:
+							r_e += 1
+						else:
+							runs.append((r_s, r_e))
+							r_s = c
+							r_e = c + 1
+					runs.append((r_s, r_e))
+					cov_plan_cache[key_fe] = (len(cols), tuple(runs), tuple(cols))
+
+				n_master_cols = len(master_non_gap_cols)
+				for raw_id, sequence in _iter_fasta_fast(full_fasta_path):
+					record_id = raw_id.strip()
 					current_len = len(sequence)
-					
+
 					old_len = historical_lengths.get(record_id)
 					backbone_expanded = old_len is not None and current_len > old_len
 
@@ -699,31 +762,25 @@ class CalculateAlignmentCoordinates:
 					if update_scope_accessions and record_id in existing_features and not backbone_expanded:
 						continue
 
-					if record.id in genome_coords:
-						master_acc, genome_cord_start, genome_cord_end = genome_coords[record.id]
-						# CalculateGenomeCoordinates counts the master's residues
-						# down the alignment row, so its span is in trimmed-row
-						# numbering. Lift it into record space, because it is
-						# about to be compared against GFF coordinates, which are
-						# in record space, and the clamp has to compare like with
-						# like. This shifted span stays internal.
-						if trim_offset:
-							if genome_cord_start not in (None, "NA"):
-								genome_cord_start = int(genome_cord_start) + trim_offset
-							if genome_cord_end not in (None, "NA"):
-								genome_cord_end = int(genome_cord_end) + trim_offset
-					else:
+					genome_cord_start = None
+					genome_cord_end = None
+					for k_idx in range(n_master_cols):
+						c0 = master_non_gap_cols[k_idx]
+						if c0 < current_len and sequence[c0] != "-":
+							genome_cord_start = col_to_master_trimmed[c0]
+							break
+					if genome_cord_start is not None:
+						for k_idx in range(n_master_cols - 1, -1, -1):
+							c0 = master_non_gap_cols[k_idx]
+							if c0 < current_len and sequence[c0] != "-":
+								genome_cord_end = col_to_master_trimmed[c0]
+								break
+					if genome_cord_start is None or genome_cord_end is None:
 						genome_cord_start, genome_cord_end = "NA", "NA"
+					elif trim_offset:
+						genome_cord_start = int(genome_cord_start) + trim_offset
+						genome_cord_end = int(genome_cord_end) + trim_offset
 
-					# What gets REPORTED as aln_start/aln_end is the row's covered
-					# span in alignment columns - the same space as cds_start and
-					# cds_end. The two are compared directly by
-					# ValidateDbTree.validate_feature_projection_integrity, which
-					# clamps the master's cds columns by this span, so reporting
-					# one in record coordinates and the other in columns makes
-					# that check compare two different number lines. They agree
-					# only for a master that is both flush and ungapped, which is
-					# why this held for RABV and HCV and broke on influenza.
 					covered_columns = alignment_covered_columns(sequence)
 					if covered_columns is None:
 						aln_span_start, aln_span_end = "NA", "NA"
@@ -738,7 +795,7 @@ class CalculateAlignmentCoordinates:
 						start_offset = 1
 
 					adjusted = self.recalculate_cds_coordinates_with_span(
-						record.id,
+						raw_id,
 						gaps,
 						cds_list,
 						start_offset,
@@ -748,26 +805,36 @@ class CalculateAlignmentCoordinates:
 					)
 
 					for each_cords in adjusted:
-						reference_acc = blast_dict[record.id] if record.id in blast_dict else current_master
+						reference_acc = blast_dict[raw_id] if raw_id in blast_dict else current_master
 						if segment_map:
-							record_segment = segment_map.get(record.id, "")
+							record_segment = segment_map.get(raw_id, "")
 							master_segment = segment_map.get(current_master, record_segment)
 							ref_segment = segment_map.get(reference_acc, record_segment)
 							if record_segment and master_segment and record_segment != master_segment:
-								raise ValueError(f"Segment mismatch for {record.id}: record={record_segment}, master={master_segment}")
+								raise ValueError(f"Segment mismatch for {raw_id}: record={record_segment}, master={master_segment}")
 							if record_segment and ref_segment and record_segment != ref_segment:
-								raise ValueError(f"Segment mismatch for {record.id}: record={record_segment}, ref={ref_segment}")
+								raise ValueError(f"Segment mismatch for {raw_id}: record={record_segment}, ref={ref_segment}")
 
-						# Execute coverage evaluation using tracking maps
-						genome_coverage = self.format_genome_coverage(
-							sequence,
-							master_coord_to_aln_pos,
-							each_cords.get('feature_start'),
-							each_cords.get('feature_end')
-						)
+						fs_raw = each_cords.get('feature_start')
+						fe_raw = each_cords.get('feature_end')
+						plan_cov = cov_plan_cache.get((fs_raw, fe_raw))
+						if plan_cov is not None:
+							tot_cols, runs, all_cols = plan_cov
+							if tot_cols == 0:
+								genome_coverage = "NA"
+							elif runs and runs[-1][1] <= current_len:
+								missing_bases = 0
+								for r_s, r_e in runs:
+									seg_s = sequence[r_s:r_e]
+									missing_bases += seg_s.count('-') + seg_s.count('N') + seg_s.count('n')
+								genome_coverage = f"{((tot_cols - missing_bases) / tot_cols) * 100:.2f}"
+							else:
+								genome_coverage = self.format_genome_coverage(sequence, master_coord_to_aln_pos, fs_raw, fe_raw)
+						else:
+							genome_coverage = self.format_genome_coverage(sequence, master_coord_to_aln_pos, fs_raw, fe_raw)
 
 						data = [
-							record.id,
+							raw_id,
 							current_master,
 							reference_acc,
 							str(aln_span_start),
@@ -780,7 +847,7 @@ class CalculateAlignmentCoordinates:
 							str(genome_coverage)
 						]
 						if segment_map:
-							data.append(segment_map.get(record.id, ""))
+							data.append(segment_map.get(raw_id, ""))
 						out_f.write('\t'.join(data) + "\n")
 
 if __name__ == "__main__":

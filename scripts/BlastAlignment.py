@@ -2,19 +2,78 @@
 
 import os
 import csv
+import resource
 import sys
 import shlex
 import sqlite3
 import shutil
 import subprocess
+import tempfile
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pandas as pd
 from Bio import SeqIO
 from os.path import join
 from argparse import ArgumentParser
+
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPTS_DIR not in sys.path:
+	sys.path.insert(0, _SCRIPTS_DIR)
+
 import read_file
+import fast_ref_matcher
 from ExportRefListFromUpdateDb import load_master_accessions_from_file, load_reference_file_table, load_reference_rows
 import segment_utils
+
+
+def _default_max_open_files():
+	try:
+		soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+		if soft == resource.RLIM_INFINITY or soft < 0:
+			return 8192
+		return min(8192, max(256, int(soft) - 256))
+	except Exception:
+		return 256
+
+
+class _LRUAppendWriter:
+	"""Bounded-FD buffered writer for fanning out millions of FASTA records across thousands of ref groups."""
+
+	def __init__(self, max_open=None):
+		self.max_open = _default_max_open_files() if max_open is None else max(16, int(max_open))
+		self._handles = OrderedDict()
+		self._initialized = set()
+
+	def write_record(self, path, acc, seq):
+		fh = self._handles.get(path)
+		if fh is not None:
+			self._handles.move_to_end(path)
+		else:
+			if len(self._handles) >= self.max_open:
+				_, old_fh = self._handles.popitem(last=False)
+				old_fh.close()
+			mode = "a" if path in self._initialized else "w"
+			self._initialized.add(path)
+			fh = open(path, mode, encoding="utf-8", buffering=1024 * 1024)
+			self._handles[path] = fh
+
+		wrapped = "\n".join(seq[i:i + 80] for i in range(0, len(seq), 80))
+		if wrapped:
+			fh.write(f">{acc}\n{wrapped}\n")
+		else:
+			fh.write(f">{acc}\n")
+
+	def ensure_created(self, path):
+		if path not in self._initialized:
+			self._initialized.add(path)
+			with open(path, "w", encoding="utf-8"):
+				pass
+
+	def close(self):
+		while self._handles:
+			_, fh = self._handles.popitem(last=False)
+			fh.close()
 
 class BlastAlignment:
 	def __init__(self, query_fasta, db_fasta, base_dir, output_dir, output_file, is_segmented_virus, master_acc, is_update, keep_blast_tmp_dir, gb_matrix, segment_file=None, update_db=None, threads=1):
@@ -59,7 +118,49 @@ class BlastAlignment:
 
 	@staticmethod
 	def _fasta_ids(path):
-		return [record.id for record in SeqIO.parse(path, "fasta")]
+		ids = []
+		with open(path, "r", encoding="utf-8", errors="replace") as handle:
+			for line in handle:
+				if line.startswith(">"):
+					hdr = line[1:].strip()
+					ids.append(hdr.split(None, 1)[0] if hdr else "")
+		return ids
+
+	@staticmethod
+	def _iter_fasta_headers_stripped(path):
+		with open(path, "r", encoding="utf-8", errors="replace") as handle:
+			for line in handle:
+				if line.startswith(">"):
+					yield line[1:].strip()
+
+	@staticmethod
+	def _iter_fasta_raw_blocks(path, chunk_bytes=64 * 1024 * 1024):
+		"""Stream (raw_header_stripped, seq_stripped) from a FASTA file using 16 MiB block reads."""
+		with open(path, "r", encoding="utf-8", errors="replace") as fh:
+			carry = ""
+			first_chunk = True
+			while True:
+				chunk = fh.read(chunk_bytes)
+				if not chunk:
+					break
+				data = carry + chunk
+				if first_chunk:
+					gt = data.find(">")
+					if gt == -1:
+						carry = ""
+						continue
+					data = data[gt + 1:]
+					first_chunk = False
+				parts = data.split("\n>")
+				carry = parts[-1]
+				for blk in parts[:-1]:
+					hdr, sep_nl, body = blk.partition("\n")
+					if sep_nl or hdr:
+						yield hdr.strip(), body.replace("\n", "").replace("\r", "").strip()
+			if carry and not first_chunk:
+				hdr, sep_nl, body = carry.partition("\n")
+				if sep_nl or hdr:
+					yield hdr.strip(), body.replace("\n", "").replace("\r", "").strip()
 
 	@staticmethod
 	def _normalize_segment(value):
@@ -308,23 +409,95 @@ class BlastAlignment:
 		except subprocess.CalledProcessError as e:
 			raise RuntimeError(f"makeblastdb failed for reference FASTA '{self.db_fasta}': {e}") from e
 
-	def run_blastn(self, output_dir, query_file):
+	CHUNKED_BLAST_THRESHOLD = 5000
+	FAST_NEXTALIGN_MATCH_THRESHOLD = 25000
+
+	def _run_blastn_single_cmd(self, db_prefix, query_file, out_hits_path, threads):
 		command = [
 			'blastn',
 			'-query', query_file,
-			'-db', join(output_dir, "DB", self.db_file_name),
+			'-db', db_prefix,
 			'-task', 'blastn',
 			'-max_target_seqs', '1',
 			'-max_hsps', '1',
-			'-out', join(output_dir, self.output_file),
+			'-out', out_hits_path,
 			'-outfmt', "6 qacc sacc pident sstrand",
-			'-num_threads', str(self.threads)
-			]
+			'-num_threads', str(max(1, int(threads))),
+		]
 		try:
 			subprocess.run(command, check=True)
-			print(f"blastn ran successfully. Results saved in {self.output_file}")
 		except subprocess.CalledProcessError as e:
-			raise RuntimeError(f"blastn failed for query '{query_file}' against db '{join(output_dir, 'DB', self.db_file_name)}': {e}") from e
+			raise RuntimeError(f"blastn failed for query '{query_file}' against db '{db_prefix}': {e}") from e
+
+	def _run_blastn_chunked(self, output_dir, query_file, out_hits_path, append=False, chunk_records=5000):
+		"""Run short-lived chunked blastn subprocesses so Linux VMA maps (vm.max_map_count) never exhaust."""
+		db_prefix = join(output_dir, "DB", self.db_file_name)
+		threads_per_job = min(4, self.threads)
+		workers = max(1, min(8, self.threads // threads_per_job))
+		os.makedirs(output_dir, exist_ok=True)
+		out_mode = "ab" if append else "wb"
+
+		with tempfile.TemporaryDirectory(prefix="blastn_chunks_", dir=output_dir) as chunk_tmp, \
+		     open(out_hits_path, out_mode) as merged_out, \
+		     ThreadPoolExecutor(max_workers=workers) as pool:
+
+			wave_chunks = []
+			cur_records = []
+			chunk_id = 0
+
+			def _flush_wave(chunks_to_run):
+				if not chunks_to_run:
+					return
+				def _exec_one(item):
+					c_fa, c_tsv = item
+					self._run_blastn_single_cmd(db_prefix, c_fa, c_tsv, threads_per_job)
+					return c_fa, c_tsv
+
+				for c_fa, c_tsv in pool.map(_exec_one, chunks_to_run):
+					if os.path.isfile(c_tsv):
+						with open(c_tsv, "rb") as cfh:
+							shutil.copyfileobj(cfh, merged_out, length=1024 * 1024)
+						os.remove(c_tsv)
+					if os.path.isfile(c_fa):
+						os.remove(c_fa)
+
+			for raw_hdr, seq in self._iter_fasta_raw_blocks(query_file):
+				cur_records.append((raw_hdr, seq))
+				if len(cur_records) >= chunk_records:
+					chunk_id += 1
+					c_fa = join(chunk_tmp, f"q_{chunk_id}.fa")
+					c_tsv = join(chunk_tmp, f"q_{chunk_id}.tsv")
+					with open(c_fa, "w", encoding="utf-8") as cfh:
+						for rh, sq in cur_records:
+							cfh.write(f">{rh}\n{sq}\n")
+					cur_records = []
+					wave_chunks.append((c_fa, c_tsv))
+					if len(wave_chunks) >= workers:
+						_flush_wave(wave_chunks)
+						wave_chunks = []
+
+			if cur_records:
+				chunk_id += 1
+				c_fa = join(chunk_tmp, f"q_{chunk_id}.fa")
+				c_tsv = join(chunk_tmp, f"q_{chunk_id}.tsv")
+				with open(c_fa, "w", encoding="utf-8") as cfh:
+					for rh, sq in cur_records:
+						cfh.write(f">{rh}\n{sq}\n")
+				wave_chunks.append((c_fa, c_tsv))
+
+			if wave_chunks:
+				_flush_wave(wave_chunks)
+
+		print(f"blastn ran successfully across {chunk_id} chunk(s). Results saved in {os.path.basename(out_hits_path)}")
+
+	def run_blastn(self, output_dir, query_file):
+		out_hits_path = join(output_dir, self.output_file)
+		n_queries = self._count_fasta_records(query_file)
+		if n_queries > self.CHUNKED_BLAST_THRESHOLD:
+			self._run_blastn_chunked(output_dir, query_file, out_hits_path, append=False)
+			return
+		self._run_blastn_single_cmd(join(output_dir, "DB", self.db_file_name), query_file, out_hits_path, self.threads)
+		print(f"blastn ran successfully. Results saved in {self.output_file}")
 
 	def get_master_list(self):
 		if os.path.isfile(self.master_acc):
@@ -386,107 +559,113 @@ class BlastAlignment:
 
 		self.write_master_seq(master_seq)
 	
-		with open(input_file, newline='') as file:
+		best_hits = {}
+		with open(input_file, newline='', encoding='utf-8') as file:
 			reader = csv.reader(file, delimiter='\t')
 			for row in reader:
-				col1, col2, col3, col4 = row[0], row[1], float(row[2]), row[3]
-				if col1 in values:
-					existing_value = values[col1]
-					if col3 > existing_value:
-						records[col1] = [col1, col2, col3, col4]
-						values[col1] = col3
-				else:
-					records[col1] = [col1, col2, col3, col4]
-					values[col1] = col3
+				if len(row) < 4:
+					continue
+				qacc = row[0]
+				racc = sys.intern(row[1])
+				score = float(row[2])
+				strand = sys.intern(row[3])
+				prev = best_hits.get(qacc)
+				if prev is None or score > prev[1]:
+					best_hits[qacc] = (racc, score, strand)
 
-		with open(query_tophit_uniq, 'w', newline='') as file:
+		kept_hits = {}
+		active_refs = OrderedDict()
+		with open(query_tophit_uniq, 'w', newline='', encoding='utf-8') as file:
 			writer = csv.writer(file, delimiter='\t')
 			excluded_count = 0
-			for record in records.values():
+			for qacc, (racc, score, strand) in best_hits.items():
 				# Skip queries whose best hit is an exclusion_list reference
-				if record[1] in exclusion_refs:
+				if racc in exclusion_refs:
 					excluded_count += 1
 					continue
-				writer.writerow(record)
+				writer.writerow([qacc, racc, score, strand])
+				kept_hits[qacc] = (racc, strand)
+				active_refs.setdefault(racc, None)
 			if excluded_count:
 				print(f"[exclusion_list] Excluded {excluded_count} queries matching exclusion_list references")
-	
-		seq_dicts = {}
-		query_seqs = read_file.fasta(query_fasta)  
-		for rows in query_seqs:
-			raw_header = rows[0].strip()
-			seq = rows[1].strip()
-			seq_dicts[raw_header] = seq
-			norm_header = self.normalize_query_id(raw_header)
-			if norm_header and norm_header != raw_header:
-				seq_dicts[norm_header] = seq
+		del best_hits
 
-		#Seperate plus and minus strand sequences
-		for each_line in open(query_tophit_uniq, 'r'):
-			query_acc, ref_acc, identity, strand = each_line.strip().split('\t')
-			if query_acc not in seq_dicts:
-				print(f"[warn] Missing query sequence for accession: {query_acc}")
-				self.missing_query_accs.add(query_acc)
-				continue
-			if strand == "plus":
-				with open(join(sorted_fasta, "plus.fa"), 'a') as file_plus:
-					file_plus.write(">" + query_acc + "\n" + seq_dicts[query_acc] + "\n")
-			else:
-				with open(join(sorted_fasta, "minus.fa"), 'a') as file_minus:
-					file_minus.write(">" + query_acc + "\n" + seq_dicts[query_acc] + "\n")
+		# Stream query_fasta once: route plus-strand hits directly into grouped_fasta/<ref>.fasta
+		# via a bounded-FD LRU writer, and collect minus-strand hits for batch seqkit reverse-complement.
+		minus_src_path = join(sorted_fasta, "minus.fa")
+		minus_rc_path = join(merged_fasta, "minus.fa")
+		minus_count = 0
+		seen_queries = set()
+		group_writer = _LRUAppendWriter()
 
-		for each_file in os.listdir(sorted_fasta):
-			if "minus" in each_file:
-				self._reverse_complement_fasta(join(sorted_fasta, each_file), join(merged_fasta, each_file))
-			else:
-				shutil.copyfile(join(sorted_fasta, each_file), join(merged_fasta, each_file))
+		try:
+			for racc in active_refs:
+				if racc not in exclusion_refs:
+					group_writer.ensure_created(join(grouped_fasta, racc + '.fasta'))
 
-		file_list = []
-		for each_file in os.listdir(merged_fasta):
-			prefix = merged_fasta + "/"
-			file_list.append(prefix + each_file)
-
-		self._concat_fasta_files(file_list, join(sorted_all, "query_seq.fa"))
-
-		grouped_dict = {}
-		for each_line in open(query_tophit_uniq, 'r'):
-			query_acc, ref_acc, identity, strand = each_line.strip().split('\t')
-			if ref_acc not in grouped_dict:
-				grouped_dict[ref_acc] = [query_acc]
-			else:
-				grouped_dict[ref_acc].append(query_acc)
-
-		print('\n'.join(grouped_dict.keys()))
-		seq_dicts = {}
-		query_seqs = read_file.fasta(join(sorted_all, "query_seq.fa"))
-		for rows in query_seqs:
-			seq_dicts[rows[0].strip()] = rows[1].strip()
-
-		for each_ref_acc, list_of_query_acc in grouped_dict.items():
-			# Don't write grouped fasta or ref_seqs for exclusion_list references
-			if each_ref_acc in exclusion_refs:
-				continue
-			with open(join(grouped_fasta, each_ref_acc + '.fasta'), 'a') as write_file:
-				for each_query_acc in list_of_query_acc:
-					if each_query_acc not in seq_dicts:
-						self.missing_query_accs.add(each_query_acc)
+			with open(minus_src_path, 'w', encoding='utf-8') as minus_out:
+				for raw_header, seq in self._iter_fasta_raw_blocks(query_fasta):
+					norm_header = self.normalize_query_id(raw_header)
+					matched_keys = []
+					if raw_header in kept_hits:
+						matched_keys.append(raw_header)
+					if norm_header and norm_header != raw_header and norm_header in kept_hits:
+						matched_keys.append(norm_header)
+					if not matched_keys:
 						continue
-					seqs = seq_dicts[each_query_acc]
-					write_file.write(">" + each_query_acc + '\n')
-					for i in range(0, len(seqs), 80):
-						write_file.write(seqs[i:i + 80] + '\n')
-		
-		#writing reference sequences into individual fasta files
-		ref_seqs = read_file.fasta(self.db_fasta)
-		for rows in ref_seqs:
-			seq_dicts[rows[0].strip()] = rows[1].strip()
-			
-		for ref_accs in grouped_dict.keys():
-			# Don't write ref_seq files for exclusion_list references
+					for qacc in matched_keys:
+						if qacc in seen_queries:
+							continue
+						seen_queries.add(qacc)
+						if not seq:
+							self.missing_query_accs.add(qacc)
+							continue
+						racc, strand = kept_hits[qacc]
+						if racc in exclusion_refs:
+							continue
+						if strand == "plus":
+							group_writer.write_record(join(grouped_fasta, racc + '.fasta'), qacc, seq)
+						else:
+							minus_out.write(f">{qacc}\n{seq}\n")
+							minus_count += 1
+
+			if minus_count > 0:
+				self._reverse_complement_fasta(minus_src_path, minus_rc_path)
+				for raw_header, rc_seq in self._iter_fasta_raw_blocks(minus_rc_path):
+					qacc = raw_header if raw_header in kept_hits else self.normalize_query_id(raw_header)
+					if qacc not in kept_hits or not rc_seq:
+						if qacc in kept_hits:
+							self.missing_query_accs.add(qacc)
+						continue
+					racc, _ = kept_hits[qacc]
+					if racc not in exclusion_refs:
+						group_writer.write_record(join(grouped_fasta, racc + '.fasta'), qacc, rc_seq)
+			else:
+				if os.path.exists(minus_src_path):
+					os.remove(minus_src_path)
+		finally:
+			group_writer.close()
+
+		for qacc in kept_hits:
+			if qacc not in seen_queries:
+				print(f"[warn] Missing query sequence for accession: {qacc}")
+				self.missing_query_accs.add(qacc)
+
+		print('\n'.join(active_refs.keys()))
+
+		# Write active reference sequences into individual fasta files
+		ref_seq_map = {}
+		for raw_hdr, rseq in self._iter_fasta_raw_blocks(self.db_fasta):
+			ref_seq_map[raw_hdr] = rseq
+			norm_ref = self.normalize_query_id(raw_hdr)
+			if norm_ref and norm_ref not in ref_seq_map:
+				ref_seq_map[norm_ref] = rseq
+
+		for ref_accs in active_refs.keys():
 			if ref_accs in exclusion_refs:
 				continue
-			seqs = seq_dicts[ref_accs]
-			with open(join(ref_seq_dir, ref_accs + '.fasta'), 'w') as write_file:
+			seqs = ref_seq_map[ref_accs]
+			with open(join(ref_seq_dir, ref_accs + '.fasta'), 'w', encoding='utf-8') as write_file:
 				write_file.write(">" + ref_accs + '\n')
 				for i in range(0, len(seqs), 80):
 					write_file.write(seqs[i:i + 80] + '\n')
@@ -656,14 +835,13 @@ class BlastAlignment:
 
 		exclusion_refs = self.get_exclusion_list_refs()
 
-		uniq_blast_acc = {}
-		with open(query_tophit_uniq) as f:
+		uniq_blast_acc = set()
+		with open(query_tophit_uniq, encoding='utf-8') as f:
 			for line in f:
 				parts = line.strip().split("\t")
 				if len(parts) != 4:
 					raise ValueError(f"Malformed unique BLAST hit row in {query_tophit_uniq}: {line.strip()}")
-				query_acc, ref_acc, score, strand = parts
-				uniq_blast_acc[query_acc] = ref_acc
+				uniq_blast_acc.add(parts[0])
 
 		# Also read the raw blast hits to identify which queries hit exclusion refs
 		# (these were filtered from query_uniq_tophits but we need to mark them specifically)
@@ -671,7 +849,7 @@ class BlastAlignment:
 		exclusion_hit_queries = set()
 		if os.path.exists(raw_blast_file) and exclusion_refs:
 			raw_hits = {}
-			with open(raw_blast_file) as f:
+			with open(raw_blast_file, encoding='utf-8') as f:
 				for line in f:
 					parts = line.strip().split("\t")
 					if len(parts) >= 4:
@@ -683,63 +861,66 @@ class BlastAlignment:
 					exclusion_hit_queries.add(q)
 
 		query_acc_status = {}
-		read_query_obj = read_file.fasta(query_fasta)
-		for each_seq_obj in read_query_obj:
-			header = each_seq_obj[0]
+		for header in self._iter_fasta_headers_stripped(query_fasta):
 			if header not in uniq_blast_acc:
 				query_acc_status[header] = 1  # excluded
 			else:
 				query_acc_status[header] = 0  # not excluded
+		del uniq_blast_acc
 
-		updated_rows = []
-		with open(gB_matrix_file, newline='') as infile:
-			reader = csv.DictReader(infile, delimiter='\t')
-			fieldnames = reader.fieldnames or []
+		# Stream row-by-row into a sibling temp file next to the resolved matrix path and os.replace
+		# atomically (avoids holding 18M+ row dicts in RAM and avoids non-atomic truncation, while
+		# preserving Nextflow's shared matrix semantics across steps).
+		target_matrix_path = os.path.realpath(gB_matrix_file)
+		tmp_matrix_path = target_matrix_path + ".blast_tmp"
+		try:
+			with open(target_matrix_path, newline='', encoding='utf-8') as infile, \
+			     open(tmp_matrix_path, 'w', newline='', encoding='utf-8') as outfile:
+				reader = csv.DictReader(infile, delimiter='\t')
+				fieldnames = list(reader.fieldnames or [])
 
-			if 'exclusion_status' not in fieldnames:
-				fieldnames.append('exclusion_status')
-			if 'exclusion_criteria' not in fieldnames:
-				fieldnames.append('exclusion_criteria')
+				if 'exclusion_status' not in fieldnames:
+					fieldnames.append('exclusion_status')
+				if 'exclusion_criteria' not in fieldnames:
+					fieldnames.append('exclusion_criteria')
 
-			for row in reader:
-				gi = row.get('gi_number')
-				status = query_acc_status.get(gi, 0)
+				writer = csv.DictWriter(outfile, fieldnames=fieldnames, delimiter='\t')
+				writer.writeheader()
 
-				existing_criteria = row.get('exclusion_criteria', '')
-				if gi in exclusion_hit_queries:
-					new_criteria = 'excluded: best BLAST hit is an exclusion_list reference'
-					if existing_criteria:
-						row['exclusion_criteria'] = f"{existing_criteria}; {new_criteria}"
-					else:
-						row['exclusion_criteria'] = new_criteria
-					row['exclusion_status'] = '1'
-				elif gi in self.missing_query_accs:
-					# Had a BLAST hit but no sequence survived to the grouped
-					# FASTA, so nothing downstream can align or tree it. Marked
-					# excluded rather than left as an included row with no
-					# alignment and no tip.
-					new_criteria = 'excluded: no sequence in strand-normalised query FASTA'
-					if existing_criteria:
-						row['exclusion_criteria'] = f"{existing_criteria}; {new_criteria}"
-					else:
-						row['exclusion_criteria'] = new_criteria
-					row['exclusion_status'] = '1'
-				elif status == 1 and gi in query_acc_status:
-					new_criteria = 'excluded due to no hit'
-					if existing_criteria:
-						row['exclusion_criteria'] = f"{existing_criteria}; {new_criteria}"
-					else:
+				for row in reader:
+					gi = row.get('gi_number')
+					status = query_acc_status.get(gi, 0)
+
+					existing_criteria = row.get('exclusion_criteria', '')
+					if gi in exclusion_hit_queries:
+						new_criteria = 'excluded: best BLAST hit is an exclusion_list reference'
+						if existing_criteria:
+							row['exclusion_criteria'] = f"{existing_criteria}; {new_criteria}"
+						else:
 							row['exclusion_criteria'] = new_criteria
-					row['exclusion_status'] = '1'
-				else:
-					row['exclusion_criteria'] = existing_criteria
+						row['exclusion_status'] = '1'
+					elif gi in self.missing_query_accs:
+						new_criteria = 'excluded: no sequence in strand-normalised query FASTA'
+						if existing_criteria:
+							row['exclusion_criteria'] = f"{existing_criteria}; {new_criteria}"
+						else:
+							row['exclusion_criteria'] = new_criteria
+						row['exclusion_status'] = '1'
+					elif status == 1 and gi in query_acc_status:
+						new_criteria = 'excluded due to no hit'
+						if existing_criteria:
+							row['exclusion_criteria'] = f"{existing_criteria}; {new_criteria}"
+						else:
+							row['exclusion_criteria'] = new_criteria
+						row['exclusion_status'] = '1'
+					else:
+						row['exclusion_criteria'] = existing_criteria
 
-				updated_rows.append(row)
-
-		with open(gB_matrix_file, 'w', newline='') as outfile:
-			writer = csv.DictWriter(outfile, fieldnames=fieldnames, delimiter='\t')
-			writer.writeheader()
-			writer.writerows(updated_rows)
+					writer.writerow(row)
+			os.replace(tmp_matrix_path, target_matrix_path)
+		finally:
+			if os.path.exists(tmp_matrix_path):
+				os.remove(tmp_matrix_path)
 
 	'''
 	def update_gB_matrix(self, query_fasta, query_tophit_uniq, gB_matrix_file):
@@ -837,11 +1018,46 @@ class BlastAlignment:
 				if self.keep_blast_tmp_dir == 'N':
 					shutil.rmtree(blast_tmp_dir)
 			else:
-				self.run_makeblastdb(join(self.base_dir, self.output_dir))
-				self.run_blastn(join(self.base_dir, self.output_dir), self.query_fasta)
-				self.process_non_segmented_virus(join(self.base_dir, self.output_dir), self.query_fasta)
-				self.update_gB_matrix(self.query_fasta, join(self.base_dir, self.output_dir, "query_uniq_tophits.tsv"), self.gb_matrix)
-				self.write_filtered_ref_fasta(join(self.base_dir, self.output_dir), self.get_exclusion_list_refs())
+				out_dir = join(self.base_dir, self.output_dir)
+				os.makedirs(out_dir, exist_ok=True)
+				excl_refs = self.get_exclusion_list_refs()
+				used_fast_matcher = False
+				if (
+					len(query_ids) >= self.FAST_NEXTALIGN_MATCH_THRESHOLD
+					and len(master_list) == 1
+					and not excl_refs
+				):
+					os.environ.setdefault("OMP_NUM_THREADS", "1")
+					os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+					fallback_fa = join(out_dir, "fast_matcher_unaligned_fallback.fa")
+					tophits_out = join(out_dir, self.output_file)
+					used_fast_matcher = fast_ref_matcher.try_fast_nextalign_tophits(
+						query_fasta=self.query_fasta,
+						db_fasta=self.db_fasta,
+						master_acc=master_list[0],
+						tophits_out=tophits_out,
+						unaligned_fasta_out=fallback_fa,
+						threads=self.threads,
+					)
+					if used_fast_matcher:
+						n_fb = self._count_fasta_records(fallback_fa)
+						if n_fb > 0:
+							print(f"[fast-ref-match] Running blastn fallback for {n_fb:,} Nextalign-unaligned queries...")
+							self.run_makeblastdb(out_dir)
+							self._run_blastn_chunked(out_dir, fallback_fa, tophits_out, append=True)
+						if os.path.exists(fallback_fa):
+							os.remove(fallback_fa)
+					else:
+						if os.path.exists(fallback_fa):
+							os.remove(fallback_fa)
+
+				if not used_fast_matcher:
+					self.run_makeblastdb(out_dir)
+					self.run_blastn(out_dir, self.query_fasta)
+
+				self.process_non_segmented_virus(out_dir, self.query_fasta)
+				self.update_gB_matrix(self.query_fasta, join(out_dir, "query_uniq_tophits.tsv"), self.gb_matrix)
+				self.write_filtered_ref_fasta(out_dir, excl_refs)
 
 
 if __name__ == "__main__":
