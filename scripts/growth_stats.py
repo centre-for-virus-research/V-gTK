@@ -579,6 +579,63 @@ def fit_glm(X, y, family='binomial', trials=None, offset=None, firth=False,
 				  separated=ridged or not converged)
 
 
+def _fit_firth_constrained(X, y, keep, family='binomial', trials=None, offset=None,
+						   max_iter=_MAX_ITER, tol=_TOL):
+	"""Fit Firth-penalised binomial GLM under beta[dropped] == 0 using the FULL
+	p x p Fisher information matrix (Heinze & Schemper 2002 constrained PLRT).
+
+	Scoring the null model against the reduced (p-1)x(p-1) determinant makes the
+	Firth penalty depend on arbitrary column scaling; holding beta[dropped]=0
+	while evaluating Jeffreys' 0.5*log|I_full(beta)| makes the PLRT invariant to
+	time units and exact zero on flat data.
+	"""
+	X = np.asarray(X, dtype=float)
+	y = np.asarray(y, dtype=float)
+	n, p = X.shape
+	trials = np.ones(n) if trials is None else np.asarray(trials, dtype=float)
+	offset = np.zeros(n) if offset is None else np.asarray(offset, dtype=float)
+	keep_idx = np.asarray(keep, dtype=int)
+
+	def _penalised_ll(b):
+		eta = X.dot(b) + offset
+		mu = np.clip(_link_inverse(eta, family), _EPS, 1 - _EPS)
+		weights = np.maximum(trials * mu * (1 - mu), _EPS)
+		ll = float(np.sum(trials * y * np.log(mu) + trials * (1 - y) * np.log1p(-mu)))
+		info = X.T.dot(X * weights[:, None])
+		sign, logdet = np.linalg.slogdet(info)
+		return (ll + 0.5 * logdet if sign > 0 else ll), mu, weights, info
+
+	beta = np.zeros(p)
+	for _ in range(1, max_iter + 1):
+		cur_pll, mu, weights, info = _penalised_ll(beta)
+		_, info_inv, _ = _solve_spd(info, np.zeros(p))
+		sqrt_w = np.sqrt(weights)
+		scaled = X * sqrt_w[:, None]
+		hat = np.einsum('ij,jk,ik->i', scaled, info_inv, scaled)
+		score = X.T.dot(trials * (y - mu) + hat * (0.5 - mu))
+		info_sub = info[np.ix_(keep_idx, keep_idx)]
+		step_sub, _, _ = _solve_spd(info_sub, score[keep_idx])
+
+		scale = 1.0
+		accepted = beta
+		for _ in range(20):
+			candidate = beta.copy()
+			candidate[keep_idx] = beta[keep_idx] + scale * step_sub
+			if np.all(np.isfinite(candidate)) and np.max(np.abs(candidate)) < 1e4:
+				cand_pll, _, _, _ = _penalised_ll(candidate)
+				if cand_pll >= cur_pll - 1e-12:
+					accepted = candidate
+					break
+			scale /= 2.0
+		delta = float(np.max(np.abs(accepted - beta)))
+		beta = accepted
+		if delta < tol:
+			break
+
+	final_pll, _, _, _ = _penalised_ll(beta)
+	return final_pll
+
+
 def likelihood_ratio_p(X, y, column, family='binomial', trials=None, offset=None, firth=False):
 	"""p-value for dropping one design column, by (penalised) likelihood ratio.
 
@@ -592,10 +649,13 @@ def likelihood_ratio_p(X, y, column, family='binomial', trials=None, offset=None
 	full = fit_glm(X, y, family=family, trials=trials, offset=offset, firth=firth)
 	if not keep:
 		return float('nan'), full
-	reduced = fit_glm(X[:, keep], y, family=family, trials=trials, offset=offset, firth=firth)
-	if firth:
-		statistic = 2.0 * (full.penalised_loglik - reduced.penalised_loglik)
+	if firth and family == 'binomial':
+		null_penalised = _fit_firth_constrained(
+			X, y, keep, family=family, trials=trials, offset=offset
+		)
+		statistic = 2.0 * (full.penalised_loglik - null_penalised)
 	else:
+		reduced = fit_glm(X[:, keep], y, family=family, trials=trials, offset=offset, firth=firth)
 		statistic = 2.0 * (full.loglik - reduced.loglik)
 	if not math.isfinite(statistic) or statistic < 0:
 		statistic = 0.0

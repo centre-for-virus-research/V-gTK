@@ -1,7 +1,9 @@
 description	display_name	name	parent_name
 Polymerase basic protein 2	PB2	PB2	whole_genome
 Polymerase basic protein 1	PB1	PB1	whole_genome
+PB1-F2 protein	PB1-F2	PB1-F2	whole_genome
 Polymerase acidic protein	PA	PA	whole_genome
+PA-X protein	PA-X	PA-X	whole_genome
 Haemagglutinin	HA	HA	whole_genome
 Nucleoprotein	NP	NP	whole_genome
 Neuraminidase	NA	NA	whole_genome

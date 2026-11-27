@@ -272,9 +272,18 @@ class TestMergeCrossSourceDeduplication:
         assert by_acc["EPI_DUP_STRAIN"]["exclusion_status"] == "1"
         assert by_acc["EPI_DUP_STRAIN"]["canonical_accession"] == "PX100002"
 
-        # Protected / non-duplicate rows stay active
-        for kept_id in ("PX100001", "PX100002", "PX100003", "EPI_BAD_LINK", "EPI_FULL_OVER_STUB", "EPI_EGG_PASSAGE"):
+        # Option B: Full-length GISAID (400 bp) beats truncated GenBank stub PX100003 (180 bp),
+        # keeping EPI_FULL_OVER_STUB active with dual-source tag & retiring the redundant stub.
+        assert by_acc["PX100003"]["exclusion_status"] == "1"
+        assert by_acc["PX100003"]["canonical_accession"] == "EPI_FULL_OVER_STUB"
+        assert by_acc["EPI_FULL_OVER_STUB"]["dataset_source"] == "genbank;gisaid"
+        assert by_acc["EPI_FULL_OVER_STUB"]["sequence_source"] == "gisaid"
+
+        # Protected / non-duplicate / winning rows stay active
+        for kept_id in ("PX100001", "PX100002", "EPI_BAD_LINK", "EPI_FULL_OVER_STUB", "EPI_EGG_PASSAGE"):
             assert by_acc[kept_id].get("exclusion_status", "") != "1", f"{kept_id} should not be excluded"
+        assert by_acc["PX100001"]["dataset_source"] == "genbank;gisaid"
+        assert by_acc["PX100002"]["dataset_source"] == "genbank;gisaid"
 
         # Metadata coalescing + split-date lockstep on PX100001
         assert by_acc["PX100001"]["collection_date"] == "2024-03-15"

@@ -46,6 +46,7 @@ Deliberate design notes
 
 import os
 import re
+import sqlite3
 
 import accession_utils
 import segment_utils
@@ -143,11 +144,24 @@ def find_precomputed_reference_alignment(precomputed_ref_dir, segment_value):
         return preferred
 
     fallback_matches = []
+    seg_marker_re = re.compile(r"(?:^|[_\-.])(?:refset|segment|seg)[_\-]?([A-Za-z0-9]+)(?:$|[_\-.])", re.IGNORECASE)
     for fname in os.listdir(precomputed_ref_dir):
         if not fname.lower().endswith((".fasta", ".fa")):
             continue
-        seg_match = re.search(r"(\d+)", fname)
-        if seg_match and seg_match.group(1) == segment:
+        stem = os.path.splitext(fname)[0]
+        matched_seg = None
+        marker_matches = seg_marker_re.findall(stem)
+        if marker_matches:
+            # Explicit segment/seg/refset marker wins (e.g. v1_seg4 -> '4', not '1' from 'v1')
+            norm_candidates = [segment_utils.normalise_segment(tok) for tok in marker_matches]
+            if segment in norm_candidates:
+                matched_seg = segment
+        else:
+            # Otherwise require an exact delimited filename token matching the segment
+            tokens = [segment_utils.normalise_segment(tok) for tok in re.split(r"[_\-.]+", stem) if tok]
+            if segment in tokens:
+                matched_seg = segment
+        if matched_seg == segment:
             fallback_matches.append(os.path.join(precomputed_ref_dir, fname))
 
     if len(fallback_matches) == 1:
@@ -230,12 +244,66 @@ def backbone_files(nextalign_dir=None, precomputed_ref_dir=None, master_segment_
     return list(dict.fromkeys(paths)), source
 
 
+def _read_update_db_segment_ref_ids(update_db):
+    """Return ``{normalised_segment: set_of_normalised_ref_ids}`` from ``update_db``.
+
+    Mirrors :meth:`PadAlignment.PadAlignment.export_update_backbones` so
+    ``CollectFilteredSequences --update_db`` sees the exact same projectable
+    reference set per segment as ``PadAlignment --update_db``.
+    """
+    update_db = normalise_optional_path(update_db)
+    if not update_db or not os.path.isfile(update_db):
+        return {}
+
+    seg_refs = {}
+    conn = sqlite3.connect(f"file:{update_db}?mode=ro", uri=True)
+    try:
+        cur = conn.cursor()
+        meta_cols = {row[1] for row in cur.execute("PRAGMA table_info(meta_data)")}
+        aln_cols = {row[1] for row in cur.execute("PRAGMA table_info(sequence_alignment)")}
+        if not meta_cols or not aln_cols:
+            return {}
+
+        acc_col = "primary_accession" if "primary_accession" in aln_cols else "sequence_id"
+        seq_col = None
+        for cand in ("alignment", "aligned_seq", "sequence", "aln", "alignment_seq"):
+            if cand in aln_cols:
+                seq_col = cand
+                break
+        if seq_col is None or "primary_accession" not in meta_cols:
+            return {}
+
+        seg_expr = "m.segment" if "segment" in meta_cols else ("a.segment" if "segment" in aln_cols else "'0'")
+        type_expr = "m.accession_type" if "accession_type" in meta_cols else "'query'"
+        query = f"""
+            SELECT DISTINCT a.{acc_col}, {seg_expr}
+            FROM sequence_alignment a
+            LEFT JOIN meta_data m ON m.primary_accession = a.{acc_col}
+            WHERE LOWER(TRIM(COALESCE({type_expr}, 'query'))) IN ('master', 'reference')
+              AND TRIM(COALESCE(a.{seq_col}, '')) <> ''
+              AND LOWER(TRIM(COALESCE(a.{seq_col}, ''))) <> 'nan'
+        """
+        for acc_val, seg_val in cur.execute(query):
+            norm_acc = accession_utils.normalise_accession(str(acc_val).strip()) if acc_val else ""
+            if not norm_acc:
+                continue
+            norm_seg = segment_utils.normalise_segment(seg_val) or "0"
+            seg_refs.setdefault(norm_seg, set()).add(norm_acc)
+    except sqlite3.Error as exc:
+        print(f"[warn] Could not read projectable references from update_db {update_db}: {exc}")
+        return {}
+    finally:
+        conn.close()
+    return seg_refs
+
+
 def projectable_reference_ids(nextalign_dir=None, precomputed_ref_dir=None,
-                              master_segment_map=None):
+                              master_segment_map=None, update_db=None):
     """Return the set of reference accessions PadAlignment can project.
 
     A ``query_aln/<ref>/`` sub-alignment reaches the merged MSA if and only if
-    ``<ref>`` is a row of one of the backbones returned by :func:`backbone_files`.
+    ``<ref>`` is a row of one of the backbones returned by :func:`backbone_files`
+    (or exported from ``update_db`` when ``precomputed_ref_dir`` is unset).
     Anything else is genuinely unprojectable and its queries are legitimately
     dropped.
 
@@ -243,6 +311,36 @@ def projectable_reference_ids(nextalign_dir=None, precomputed_ref_dir=None,
     a real failure and callers must treat it as one - it is exactly the state
     that silently deleted 16% of the influenza database.
     """
+    precomputed_ref_dir = normalise_optional_path(precomputed_ref_dir)
+    nextalign_dir = normalise_optional_path(nextalign_dir)
+    update_db = normalise_optional_path(update_db)
+
+    if not precomputed_ref_dir and update_db:
+        seg_refs = _read_update_db_segment_ref_ids(update_db)
+        if seg_refs:
+            ids = set()
+            used_db = False
+            used_ref_aln = False
+            if master_segment_map:
+                for master, segment in sorted(master_segment_map.items()):
+                    norm_seg = segment_utils.normalise_segment(segment) or "0"
+                    if norm_seg in seg_refs:
+                        ids |= seg_refs[norm_seg]
+                        used_db = True
+                    elif nextalign_dir:
+                        fallback = os.path.join(
+                            nextalign_dir, "reference_aln", master, f"{master}.aligned.fasta"
+                        )
+                        if os.path.isfile(fallback):
+                            ids |= read_fasta_ids(fallback)
+                            used_ref_aln = True
+            else:
+                for ref_set in seg_refs.values():
+                    ids |= ref_set
+                used_db = True
+            if used_db:
+                return ids, ("mixed" if used_ref_aln else "update_db")
+
     paths, source = backbone_files(
         nextalign_dir=nextalign_dir,
         precomputed_ref_dir=precomputed_ref_dir,
@@ -279,7 +377,8 @@ def load_master_segment_map(ref_list_path):
     masters = df[df["accession_type"].astype(str).str.strip().str.lower() == "master"]
     mapping = {}
     for _, row in masters.iterrows():
-        acc = str(row["primary_accession"]).strip()
+        raw_acc = str(row["primary_accession"]).strip()
+        acc = accession_utils.normalise_accession(raw_acc) or raw_acc
         segment = segment_utils.normalise_segment(row.get("segment"))
         if acc:
             mapping[acc] = segment

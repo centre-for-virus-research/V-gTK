@@ -93,16 +93,42 @@ class WithinLineageGrowthAnalyzer:
         """Load cohort from meta_data with robust date parsing and plausibility masking."""
         say(f"Loading cohort from {self.db_path.name}")
         c = self.conn.cursor()
-        c.execute("""
-            SELECT primary_accession, collection_date, collection_year,
-                   country, host, exclusion_status, nearest_reference_genotype,
-                   nearest_reference_subtype
-            FROM meta_data
-        """)
+        meta_cols = {row[1] for row in c.execute("PRAGMA table_info(meta_data)")}
+        base_cols = [
+            "primary_accession", "collection_date", "collection_year",
+            "country", "host", "exclusion_status", "nearest_reference_genotype",
+            "nearest_reference_subtype",
+        ]
+        select_cols = [col for col in base_cols if col in meta_cols]
+        extra_strat = None
+        if self.stratify_by and self.stratify_by in meta_cols and self.stratify_by not in select_cols:
+            extra_strat = self.stratify_by
+            select_cols.append(extra_strat)
+        if not select_cols:
+            return pd.DataFrame()
+        quoted_select = ", ".join(f'"{col}"' for col in select_cols)
+        c.execute(f"SELECT {quoted_select} FROM meta_data")
         rows = c.fetchall()
-        cols = ["primary_accession", "collection_date", "collection_year",
-                "country", "host", "exclusion_status", "genotype", "subtype"]
-        df = pd.DataFrame(rows, columns=cols)
+        df = pd.DataFrame(rows, columns=select_cols)
+        df = df.rename(columns={
+            "nearest_reference_genotype": "genotype",
+            "nearest_reference_subtype": "subtype",
+        })
+        for needed in ("collection_date", "collection_year", "country", "host", "exclusion_status", "genotype", "subtype"):
+            if needed not in df.columns:
+                df[needed] = ""
+
+        # Exclude QC-failed / retired rows
+        excl_norm = df["exclusion_status"].fillna("").astype(str).str.strip().str.lower()
+        df = df[excl_norm.isin({"", "0", "false", "no", "na", "none", "nan"})].copy()
+
+        has_excl_tbl = c.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='excluded_accessions'"
+        ).fetchone()
+        if has_excl_tbl:
+            excl_set = {str(r[0]).strip() for r in c.execute("SELECT primary_accession FROM excluded_accessions") if r and r[0]}
+            if excl_set:
+                df = df[~df["primary_accession"].astype(str).str.strip().isin(excl_set)].copy()
 
         parsed = [gc.parse_collection_date(d) for d in df["collection_date"]]
         df["parsed_date"] = [p[0] for p in parsed]
@@ -172,7 +198,7 @@ class WithinLineageGrowthAnalyzer:
         n_bins = max(int(np.ceil(max_time / self.bin_days)), 1) + 1
 
         for site in all_sites:
-            tested_accs = [a for a in self.allele_set.evaluated[site] if a in acc_time_days]
+            tested_accs = {a for a in self.allele_set.evaluated[site] if a in acc_time_days}
             if not tested_accs:
                 continue
 
@@ -386,7 +412,11 @@ class WithinLineageGrowthAnalyzer:
             "## Top Growing Variants",
             "",
         ]
-        fittable = variant_df[variant_df["status"] == "ok"].copy()
+        fittable = (
+            variant_df[variant_df["status"] == "ok"].copy()
+            if variant_df is not None and not variant_df.empty and "status" in variant_df.columns
+            else pd.DataFrame()
+        )
         if not fittable.empty:
             top_variants = fittable.sort_values("growth_per_day", ascending=False).head(15)
             lines.append("| Variant | Carriers | Freq | Growth (/yr) | SE (/yr) | ln(R ratio) | Strat Growth (/yr) | Het p-val |")
@@ -424,6 +454,7 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Calibrated within-lineage and displacement growth rate estimator.")
     p.add_argument("--db", required=True, help="Path to V-gTK SQLite database")
     p.add_argument("--protein", default="nucleoprotein N", help="Protein product to evaluate")
+    p.add_argument("--segment", default=None, help="Segment identifier for segmented viruses")
     p.add_argument("--out", required=True, help="Output directory")
     p.add_argument("--stratify-by", default="country", help="Column in meta_data for regional stratification")
     p.add_argument("--bin-days", type=float, default=30.0, help="Time bin width in days")
@@ -438,6 +469,7 @@ def main(argv=None):
     with WithinLineageGrowthAnalyzer(
         db_path=args.db,
         protein=args.protein,
+        segment=args.segment,
         bin_days=args.bin_days,
         generation_time_days=args.generation_time,
         generation_sd_days=args.generation_sd,

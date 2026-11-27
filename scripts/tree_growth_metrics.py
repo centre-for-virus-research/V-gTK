@@ -692,9 +692,12 @@ def coalescent_intervals(tree, node_times, nodes=None):
 		return [], [], info
 
 	most_recent = max(time for time, _, _ in events)
-	# tau runs backwards from the most recent sample.
-	timeline = sorted(((most_recent - time, kind, count) for time, kind, count in events),
-					  key=lambda row: row[0])
+	# tau runs backwards from the most recent sample; process samples before
+	# coalescences on tied timestamps so zero-length sampling-to-coalescence is valid.
+	timeline = sorted(
+		((most_recent - time, kind, count) for time, kind, count in events),
+		key=lambda row: (row[0], 0 if row[1] == 'sample' else 1),
+	)
 	intervals = []
 	coalescent_taus = []
 	lineages = 0
@@ -728,15 +731,19 @@ def skyline(intervals, coalescent_taus, group=1):
 	"""
 	if not coalescent_taus:
 		return []
+	from bisect import bisect_left
+	ordered = sorted(set(round(t, 12) for t in coalescent_taus))
 	waiting = {}
 	for start, end, k in intervals:
 		weight = k * (k - 1) / 2.0
 		if weight <= 0:
 			continue
-		waiting.setdefault(round(end, 12), 0.0)
-		waiting[round(end, 12)] += weight * (end - start)
+		idx = bisect_left(ordered, round(end, 12))
+		if idx >= len(ordered):
+			continue
+		target_tau = ordered[idx]
+		waiting[target_tau] = waiting.get(target_tau, 0.0) + weight * (end - start)
 
-	ordered = sorted(set(round(t, 12) for t in coalescent_taus))
 	points = []
 	for tau in ordered:
 		value = waiting.get(tau, 0.0)

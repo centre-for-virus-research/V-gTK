@@ -23,7 +23,8 @@ class HostTaxaTable:
                host_output_file,
                child_output_file,
                lineage_output_file,
-               lineage_lookup_output_file="Host_taxa_lineage_lookup.tsv"):
+               lineage_lookup_output_file="Host_taxa_lineage_lookup.tsv",
+               existing_db=None):
     self.gb_matrix = gb_matrix
     self.output_dir = output_dir
     self.names_file = names_file
@@ -33,26 +34,45 @@ class HostTaxaTable:
     self.child_output_file = child_output_file
     self.lineage_output_file = lineage_output_file
     self.lineage_lookup_output_file = lineage_lookup_output_file
+    self.existing_db = existing_db if existing_db not in (None, "", "null", "None", "UNSET") else None
 
   def load_taxa_ids_from_tsv(self):
     column = "host_taxa_id"
     unique = True
     tsv_file = self.gb_matrix
     taxa_ids = []
-    with open(tsv_file, newline="", encoding="utf-8") as f:
-      reader = csv.DictReader(f, delimiter="\t")
-      if column not in reader.fieldnames:
-        raise ValueError(f"Column '{column}' not found in TSV file")
-      for row in reader:
-        # DictReader yields None for a column a ragged row never reaches, and
-        # None.strip() would abort the whole host taxonomy step over one short
-        # line.  Skip the row instead - see test_host_taxa_table.py.
-        raw_val = row.get(column)
-        if raw_val is None:
-          continue
-        val = raw_val.strip()
-        if val and val.upper() != "NA":
-          taxa_ids.append(int(val))
+    if tsv_file and os.path.isfile(tsv_file):
+      with open(tsv_file, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        if column not in reader.fieldnames:
+          raise ValueError(f"Column '{column}' not found in TSV file")
+        for row in reader:
+          raw_val = row.get(column)
+          if raw_val is None:
+            continue
+          val = raw_val.strip()
+          if val and val.upper() != "NA":
+            try:
+              taxa_ids.append(int(float(val)))
+            except ValueError:
+              continue
+    if self.existing_db and os.path.isfile(self.existing_db):
+      import sqlite3
+      conn = sqlite3.connect(f"file:{self.existing_db}?mode=ro", uri=True)
+      try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(meta_data)")]
+        if column in cols:
+          for (raw_val,) in conn.execute(
+            f"SELECT DISTINCT {column} FROM meta_data WHERE {column} IS NOT NULL"
+          ):
+            val = str(raw_val).strip()
+            if val and val.upper() != "NA":
+              try:
+                taxa_ids.append(int(float(val)))
+              except ValueError:
+                continue
+      finally:
+        conn.close()
     if unique:
       return sorted(set(taxa_ids))
     return taxa_ids
@@ -293,6 +313,9 @@ if __name__ == "__main__":
   parser.add_argument("--lineage_lookup_output_file",
                       default="Host_taxa_lineage_lookup.tsv",
                       help="Output TSV file for reverse lineage lookup (ancestor -> descendants)")
+  parser.add_argument("--existing_db",
+                      default=None,
+                      help="Optional existing SQLite DB whose meta_data.host_taxa_id values are unioned with --gb_matrix")
 
   args = parser.parse_args()
 
@@ -305,6 +328,7 @@ if __name__ == "__main__":
     args.output_file,
     args.child_output_file,
     args.lineage_output_file,
-    args.lineage_lookup_output_file,   # NEW
+    args.lineage_lookup_output_file,
+    existing_db=args.existing_db,
   )
   write_taxa.write_tables()

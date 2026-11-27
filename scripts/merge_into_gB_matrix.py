@@ -22,9 +22,13 @@ from cross_db_dedup import (
     extract_insdc_links,
     extract_passage_class,
     has_coverage_parity,
+    is_external_quality_upgrade,
+    is_preferred_source,
     parse_fasta_file,
     passages_compatible,
+    primary_sequence_source,
     resolve_row_segment_hint,
+    sequence_quality_stats,
     unaligned_sequences_agree,
 )
 
@@ -412,7 +416,7 @@ class NormalizeAndMerge:
             n_ext_upd = 0
             for entry in update_db_entries:
                 src = str(entry.get("source") or "genbank").lower()
-                if src in ("", "genbank", "ncbi", "insdc", "ena", "ddbj"):
+                if is_preferred_source(src, "genbank"):
                     n_gb_upd += 1
                     by_acc[entry["accession_upper"]].append(entry)
                     if entry["isolate"]:
@@ -579,28 +583,44 @@ class NormalizeAndMerge:
             match_mm = 0
 
             # Tier 1: Explicit INSDC upload cross-reference verified by sequence (or strain+length if base_fasta absent)
+            matched_prefer_base = True
             for link_acc in insdc_links:
                 for cand in by_acc.get(link_acc, ()):
                     if ext_seg and cand["segment"] and ext_seg != cand["segment"]:
                         continue
-                    prefer_base = (self.prefer != "input") or cand["protected"]
-                    w_len = cand["real_length"] if prefer_base else ext_len
-                    r_len = ext_len if prefer_base else cand["real_length"]
                     if cand["seq"] and ext_seq:
                         allow_mm = (
                             2
                             if (ext_isolate and cand["isolate"] and ext_isolate == cand["isolate"] and passages_compatible(cand["passage"], ext_passage))
                             else 0
                         )
+                        # Option B: non-protected base row can lose to a genuinely higher-quality external sequence
+                        # (fewer Ns/ambiguities or full-length vs partial GenBank stub); ties & minor UTR overhangs stay GenBank.
+                        ext_upgrade = (
+                            (not cand["protected"])
+                            and cand["df_idx"] is not None
+                            and is_external_quality_upgrade(cand["seq"], ext_seq, is_aligned=False)
+                        )
+                        prefer_base = (self.prefer != "input" and not ext_upgrade) or cand["protected"] or cand["df_idx"] is None
                         w_seq = cand["seq"] if prefer_base else ext_seq
                         r_seq = ext_seq if prefer_base else cand["seq"]
                         ok, mm, _ = unaligned_sequences_agree(w_seq, r_seq, max_mm=allow_mm)
                         if ok:
                             matched_cand = cand
+                            matched_prefer_base = prefer_base
                             match_tier = "insdc_link_seq_verified"
                             match_mm = mm
                             break
                     else:
+                        ext_upgrade = (
+                            (not cand["protected"])
+                            and cand["df_idx"] is not None
+                            and ext_len > cand["real_length"]
+                            and not has_coverage_parity(cand["real_length"], ext_len)
+                        )
+                        prefer_base = (self.prefer != "input" and not ext_upgrade) or cand["protected"] or cand["df_idx"] is None
+                        w_len = cand["real_length"] if prefer_base else ext_len
+                        r_len = ext_len if prefer_base else cand["real_length"]
                         if (
                             ext_isolate
                             and cand["isolate"]
@@ -609,6 +629,7 @@ class NormalizeAndMerge:
                             and has_coverage_parity(w_len, r_len)
                         ):
                             matched_cand = cand
+                            matched_prefer_base = prefer_base
                             match_tier = "insdc_link_strain_length_verified"
                             match_mm = 0
                             break
@@ -624,12 +645,18 @@ class NormalizeAndMerge:
                         continue
                     if not passages_compatible(cand["passage"], ext_passage):
                         continue
-                    prefer_base = (self.prefer != "input") or cand["protected"]
+                    ext_upgrade = (
+                        (not cand["protected"])
+                        and cand["df_idx"] is not None
+                        and is_external_quality_upgrade(cand["seq"], ext_seq, is_aligned=False)
+                    )
+                    prefer_base = (self.prefer != "input" and not ext_upgrade) or cand["protected"] or cand["df_idx"] is None
                     w_seq = cand["seq"] if prefer_base else ext_seq
                     r_seq = ext_seq if prefer_base else cand["seq"]
                     ok, mm, _ = unaligned_sequences_agree(w_seq, r_seq, max_mm=0)
                     if ok:
                         matched_cand = cand
+                        matched_prefer_base = prefer_base
                         match_tier = "strain_and_zero_mm_sequence"
                         match_mm = mm
                         break
@@ -689,7 +716,7 @@ class NormalizeAndMerge:
                 })
                 continue
 
-            prefer_base = (self.prefer != "input") or matched_cand["protected"] or matched_cand["df_idx"] is None
+            prefer_base = matched_prefer_base and (not (self.prefer == "input" and not matched_cand["protected"] and matched_cand["df_idx"] is not None))
             if prefer_base:
                 winner_acc = matched_cand["accession"]
                 retired_acc = ext_acc
@@ -698,9 +725,11 @@ class NormalizeAndMerge:
                     b_row = dict(base_records[b_idx])
                     b_row.update(base_updates_by_idx[b_idx])
                     b_row.setdefault("alt_accessions", "")
+                    b_row.setdefault("dataset_source", "genbank")
                     updates = coalesce_winner_metadata(
                         b_row, ext_rec, retired_source=self.dataset_source, update_split_date_cols=True
                     )
+                    updates.setdefault("sequence_source", "genbank")
                     base_updates_by_idx[b_idx].update(updates)
                 reason = f"cross_db_duplicate_of:{winner_acc}"
                 norm_updates_by_pos[pos].update({
@@ -715,12 +744,15 @@ class NormalizeAndMerge:
                 retired_acc = matched_cand["accession"]
                 b_idx = matched_cand["df_idx"]
                 b_row = dict(base_records[b_idx])
+                b_row.setdefault("dataset_source", "genbank")
                 e_row = dict(ext_rec)
                 e_row.update(norm_updates_by_pos[pos])
                 e_row.setdefault("alt_accessions", "")
+                e_row.setdefault("dataset_source", self.dataset_source)
                 updates = coalesce_winner_metadata(
                     e_row, b_row, retired_source="genbank", update_split_date_cols=True
                 )
+                updates["sequence_source"] = primary_sequence_source(self.dataset_source, default=self.dataset_source)
                 norm_updates_by_pos[pos].update(updates)
                 reason = f"cross_db_duplicate_of:{winner_acc}"
                 base_updates_by_idx[b_idx].update({
@@ -785,6 +817,10 @@ class NormalizeAndMerge:
         orig_base_cols = list(base_df.columns)
         self.log(f"[INFO] Loaded base matrix: {self.gb_matrix} (rows={len(base_df)})")
         base_df["dataset_source"] = "genbank" # define source name
+        if "sequence_source" not in base_df.columns:
+            base_df["sequence_source"] = "genbank"
+        else:
+            base_df["sequence_source"] = base_df["sequence_source"].replace("", "genbank").fillna("genbank")
         mapping = self.read_mapping()
         in_df = self.read_input_tsv_df()
         self.log(f"[INFO] Loaded input TSV: {self.input_tsv} (rows={len(in_df)})")
@@ -861,6 +897,7 @@ class NormalizeAndMerge:
         norm_df["real_length"] = norm_df["sequence"].apply(self.count_real_length)
         
         norm_df["dataset_source"] = self.dataset_source
+        norm_df["sequence_source"] = primary_sequence_source(self.dataset_source, default=self.dataset_source)
 
         base_df, norm_df, retired_input_keys, cross_dup_df = self.deduplicate_cross_source(base_df, norm_df)
         if cross_dup_df.empty and self.dedup_report and not os.path.exists(self.dedup_report):
@@ -874,7 +911,7 @@ class NormalizeAndMerge:
             mapping_targets = set(mapping.values())
             required_cols = {
                 'primary_accession', 'accession_version', 'locus', 'sequence',
-                'dataset_source', 'exclusion', 'exclusion_status', 'exclusion_criteria',
+                'dataset_source', 'sequence_source', 'exclusion', 'exclusion_status', 'exclusion_criteria',
                 'canonical_accession', 'alt_accessions',
             }
             keep_cols = list(set(base_cols) | mapping_targets | required_cols | {self.key})

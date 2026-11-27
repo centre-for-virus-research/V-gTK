@@ -11,9 +11,10 @@ import VerifyMutations
 
 def test_translate_codon():
     assert VerifyMutations.translate_codon('ATG') == 'M'
-    assert VerifyMutations.translate_codon('TAA') == '_'
-    assert VerifyMutations.translate_codon('TGA') == '_'
-    assert VerifyMutations.translate_codon('TAG') == '_'
+    assert VerifyMutations.translate_codon('TAA') == '*'
+    assert VerifyMutations.translate_codon('TGA') == '*'
+    assert VerifyMutations.translate_codon('TAG') == '*'
+    assert VerifyMutations.translate_codon('---') == '-'
     assert VerifyMutations.translate_codon('A-G') == 'X'
     assert VerifyMutations.translate_codon('AT') == 'X'
     assert VerifyMutations.translate_codon('NNN') == 'X'

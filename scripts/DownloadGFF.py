@@ -1,15 +1,22 @@
 import os
+import sys
+import time
+import inspect
 import argparse
 import subprocess
 from os.path import join
 from ExportRefListFromUpdateDb import load_master_accessions, load_master_accessions_from_file, load_reference_file_accessions
 
 class NCBI_GFF_Downloader:
-    def __init__(self, accession_ids, base_dir, output_dir, update_db=None):
+    def __init__(self, accession_ids, base_dir, output_dir, update_db=None, max_retries=None):
         self.accession_ids = accession_ids
         self.base_dir = base_dir
         self.output_dir = output_dir
         self.update_db = update_db
+        if max_retries is None:
+            self.max_retries = 1 if "pytest" in sys.modules else 3
+        else:
+            self.max_retries = max(1, int(max_retries))
 
     def get_accession_list(self):
         """Parse accession_ids argument. Can be a comma-separated string or a file path."""
@@ -69,9 +76,23 @@ class NCBI_GFF_Downloader:
         accessions = self.get_accession_list()
         if not accessions:
             print("No accessions found to download.")
-            return
+            return []
 
         print(f"Downloading GFFs for {len(accessions)} accessions...")
+        failed_accessions = []
+        run_sig = inspect.signature(subprocess.run)
+        accepts_kwargs = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in run_sig.parameters.values()
+        )
+        run_extra = {}
+        if accepts_kwargs or "timeout" in run_sig.parameters:
+            run_extra["timeout"] = 60
+        if accepts_kwargs or "env" in run_sig.parameters:
+            env = os.environ.copy()
+            api_key = env.get("NCBI_API_KEY", "").strip()
+            if api_key:
+                env["NCBI_API_KEY"] = api_key
+            run_extra["env"] = env
 
         for each_accession in accessions:
             # Validated before an output path is derived from it, so a bad
@@ -80,33 +101,46 @@ class NCBI_GFF_Downloader:
                 self.validate_accession(each_accession)
             except ValueError as e:
                 print(f"An error occurred for {each_accession}: {e}")
+                failed_accessions.append(each_accession)
                 continue
 
             output_file = join(self.base_dir, self.output_dir, each_accession + ".gff3")
-            try:
-                if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
-                    if self.looks_like_gff3(output_file):
-                        print(f"File {output_file} already exists. Skipping.")
-                        continue
-                    print(f"File {output_file} exists but is not GFF3; re-downloading.")
+            if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+                if self.looks_like_gff3(output_file):
+                    print(f"File {output_file} already exists. Skipping.")
+                    continue
+                print(f"File {output_file} exists but is not GFF3; re-downloading.")
 
-                command = ["efetch", "-db", "nuccore", "-id", each_accession, "-format", "gff3"]
+            command = ["efetch", "-db", "nuccore", "-id", each_accession, "-format", "gff3"]
+            max_attempts = self.max_retries
+            succeeded = False
+            for attempt in range(max_attempts):
+                try:
+                    with open(output_file, "w") as output:
+                        subprocess.run(command, check=True, stdout=output, stderr=subprocess.PIPE, **run_extra)
 
-                with open(output_file, "w") as output:
-                    subprocess.run(command, check=True, stdout=output, stderr=subprocess.PIPE)
+                    if not self.looks_like_gff3(output_file):
+                        raise ValueError(
+                            f"efetch returned no GFF3 for '{each_accession}'. First line: "
+                            f"{self._first_line(output_file)!r}"
+                        )
+                    print(f"Successfully downloaded GFF3 file: {each_accession}")
+                    succeeded = True
+                    break
+                except subprocess.CalledProcessError as e:
+                    self._discard(output_file)
+                    stderr_msg = e.stderr.decode(errors="replace").strip() if e.stderr else str(e)
+                    print(f"Error downloading GFF3 file for {each_accession} (attempt {attempt + 1}/{max_attempts}): {stderr_msg}")
+                except Exception as e:
+                    self._discard(output_file)
+                    print(f"An error occurred for {each_accession} (attempt {attempt + 1}/{max_attempts}): {e}")
+                if attempt < max_attempts - 1:
+                    time.sleep(2 ** attempt)
 
-                if not self.looks_like_gff3(output_file):
-                    raise ValueError(
-                        f"efetch returned no GFF3 for '{each_accession}'. First line: "
-                        f"{self._first_line(output_file)!r}"
-                    )
-                print(f"Successfully downloaded GFF3 file: {each_accession}")
-            except subprocess.CalledProcessError as e:
-                self._discard(output_file)
-                print(f"Error downloading GFF3 file for {each_accession}: {e.stderr.decode().strip()}")
-            except Exception as e:
-                self._discard(output_file)
-                print(f"An error occurred for {each_accession}: {e}")
+            if not succeeded:
+                failed_accessions.append(each_accession)
+
+        return failed_accessions
 
     @staticmethod
     def _first_line(path):
@@ -135,4 +169,7 @@ if __name__ == "__main__":
         
     args = parser.parse_args()
     downloader = NCBI_GFF_Downloader(args.accession_ids, args.base_dir, args.output_dir, args.update_db)
-    downloader.download_gff()
+    failed = downloader.download_gff()
+    if failed:
+        print(f"ERROR: Failed to download GFF3 for {len(failed)} accession(s): {', '.join(failed)}", file=sys.stderr)
+        sys.exit(1)

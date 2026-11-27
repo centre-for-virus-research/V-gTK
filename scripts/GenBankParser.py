@@ -12,14 +12,27 @@ import segment_utils
 # add source example NCBI or GISAID, or user define, add temp sequences 
 # temp sequences which should available for temp purpose 
 class GenBankParser:
+	_MATRIX_COLUMNS = [
+		'locus', 'length', 'data_source', 'strandedness', 'molecule_type',
+		'topology', 'division', 'update_date', 'create_date', 'definition',
+		'primary_accession', 'accession_version', 'gi_number', 'source',
+		'organism', 'taxonomy', 'accession_type', 'exclusion_criteria',
+		'exclusion_status', 'pubmed_id', 'mol_type', 'strain', 'isolate',
+		'isolation_source', 'db_xref', 'country', 'geo_loc', 'host',
+		'collection_date', 'collection_day', 'collection_mon', 'collection_year',
+		'segment', 'serotype', 'genes', 'cds_info', 'a', 't', 'g', 'c', 'n',
+		'real_length', 'comment', 'reference_number', 'position', 'authors',
+		'title', 'journal',
+	]
+
 	def __init__(
 		self,
-		input_dir,
-		base_dir,
-		output_dir,
-		ref_list,
-		exclusion_list,
-		is_segmented_virus,
+		input_dir=None,
+		base_dir='tmp',
+		output_dir='GenBank-matrix',
+		ref_list=None,
+		exclusion_list=None,
+		is_segmented_virus='N',
 		test_run=False,
 		test_xml_limit=10,
 		require_refs=False,
@@ -78,7 +91,7 @@ class GenBankParser:
 			if ref_dict:
 				return ref_dict
 		if acc_list_file is None:
-			return []
+			return {}
 		try:
 			ref_dict = load_reference_file_dict(acc_list_file)
 		except FileNotFoundError:
@@ -228,70 +241,92 @@ class GenBankParser:
 			return False
 		return incoming_version > stored_version
 
+	@staticmethod
+	def _xml_text(parent, path, default=''):
+		if parent is None:
+			return default
+		elem = parent.find(path)
+		if elem is None or elem.text is None:
+			return default
+		return elem.text
+
+	@staticmethod
+	def _lookup_norm(mapping, acc):
+		if not mapping or not acc:
+			return None
+		if acc in mapping:
+			return mapping[acc]
+		norm = accession_utils.normalise_accession(acc)
+		if norm and norm in mapping:
+			return mapping[norm]
+		return None
+
 	def xml_to_tsv(self, xml_file, ref_seq_dict: dict, exclusion_acc_list: list):
-		tree = ET.parse(xml_file)
+		try:
+			tree = ET.parse(xml_file)
+		except ET.ParseError as exc:
+			raise RuntimeError(f"Malformed GenBank XML in {xml_file}: {exc}") from exc
 		root = tree.getroot()
 		data = []
-		
-		#ref_seq_dict = self.load_ref_list(self.ref_list)
-		#exclusion_acc_list = self.load_exclusion_list(self.exclusion_list)
-				
+		norm_ref_dict = dict(ref_seq_dict or {})
+		for k, v in list(norm_ref_dict.items()):
+			nk = accession_utils.normalise_accession(k)
+			if nk and nk not in norm_ref_dict:
+				norm_ref_dict[nk] = v
+		norm_exclusions = set(exclusion_acc_list or [])
+		for ex in list(norm_exclusions):
+			nx = accession_utils.normalise_accession(ex)
+			if nx:
+				norm_exclusions.add(nx)
+		existing_norm = set(self._existing_accessions)
+		for ex in list(self._existing_accessions):
+			nx = accession_utils.normalise_accession(ex)
+			if nx:
+				existing_norm.add(nx)
+
 		for gbseq in root.findall('GBSeq'):
 			content = {}
-			content['locus'] = gbseq.find('GBSeq_locus').text
-			content['length'] = gbseq.find('GBSeq_length').text
+			content['locus'] = self._xml_text(gbseq, 'GBSeq_locus')
+			content['length'] = self._xml_text(gbseq, 'GBSeq_length', '0')
 			content['data_source'] = 'ncbi'
-			content['strandedness'] = gbseq.find('GBSeq_strandedness').text if gbseq.find('GBSeq_strandedness') is not None else None
-			content['molecule_type'] = gbseq.find('GBSeq_moltype').text
-			content['topology'] = gbseq.find('GBSeq_topology').text
-			content['division'] = gbseq.find('GBSeq_division').text
-			content['update_date'] = gbseq.find('GBSeq_update-date').text
-			content['create_date'] = gbseq.find('GBSeq_create-date').text
-			content['definition'] = gbseq.find('GBSeq_definition').text
-			content['primary_accession'] = gbseq.find('GBSeq_primary-accession').text
-			content['accession_version'] = gbseq.find('GBSeq_accession-version').text
+			stranded = gbseq.find('GBSeq_strandedness')
+			content['strandedness'] = stranded.text if (stranded is not None and stranded.text is not None) else None
+			content['molecule_type'] = self._xml_text(gbseq, 'GBSeq_moltype')
+			content['topology'] = self._xml_text(gbseq, 'GBSeq_topology')
+			content['division'] = self._xml_text(gbseq, 'GBSeq_division')
+			content['update_date'] = self._xml_text(gbseq, 'GBSeq_update-date')
+			content['create_date'] = self._xml_text(gbseq, 'GBSeq_create-date')
+			content['definition'] = self._xml_text(gbseq, 'GBSeq_definition')
+			content['primary_accession'] = self._xml_text(gbseq, 'GBSeq_primary-accession')
+			content['accession_version'] = self._xml_text(gbseq, 'GBSeq_accession-version')
 
 			content['gi_number'] = content['primary_accession']
-			content['source'] = gbseq.find('GBSeq_source').text
-			content['organism'] = gbseq.find('GBSeq_organism').text
-			content['taxonomy'] = gbseq.find('GBSeq_taxonomy').text
-			
-			if content['primary_accession'] in ref_seq_dict:
-				content['accession_type'] = ref_seq_dict[content['primary_accession']]
-			else:
-				content['accession_type'] = 'query'
+			content['source'] = self._xml_text(gbseq, 'GBSeq_source')
+			content['organism'] = self._xml_text(gbseq, 'GBSeq_organism')
+			content['taxonomy'] = self._xml_text(gbseq, 'GBSeq_taxonomy')
+
+			ref_type = self._lookup_norm(norm_ref_dict, content['primary_accession'])
+			content['accession_type'] = ref_type if ref_type else 'query'
 
 			# Skip what the update DB already has - UNLESS GenBank has revised it.
-			# The membership test alone is keyed on the bare accession, so it could
-			# not tell a genuinely unchanged record from one whose version had been
-			# bumped, and threw the revision away silently.
-			if self.update_mode and self._existing_accessions:
+			if self.update_mode and existing_norm:
 				acc_type = str(content['accession_type']).strip().lower()
-				if content['primary_accession'] in self._existing_accessions and acc_type not in {'master', 'reference'}:
+				norm_pa = accession_utils.normalise_accession(content['primary_accession']) or content['primary_accession']
+				in_existing = content['primary_accession'] in existing_norm or norm_pa in existing_norm
+				if in_existing and acc_type not in {'master', 'reference'}:
 					if not self._is_revision_of_existing(content['primary_accession'], content['accession_version']):
 						continue
 					print(
 						f"[update] Re-parsing revised record {content['accession_version']} "
-						f"(stored version {self._existing_versions.get(accession_utils.normalise_accession(content['primary_accession']))})"
+						f"(stored version {self._existing_versions.get(norm_pa)})"
 					)
-	
-			if content['primary_accession'] in exclusion_acc_list:
+
+			norm_pa = accession_utils.normalise_accession(content['primary_accession']) or content['primary_accession']
+			if content['primary_accession'] in norm_exclusions or norm_pa in norm_exclusions:
 				content['accession_type'] = 'excluded'
 				content['exclusion_criteria'] = 'excluded by the user'
 				content['exclusion_status'] = '1'
 			elif str(content['accession_type']).strip().lower() == 'exclusion_list':
-				# The reference list marks this accession as one to exclude - the
-				# influenza B/C/D references in a flu ref list, for instance.  It is
-				# never aligned and never gets features, so it has to carry the
-				# status that says so.  Left at '0' the row claims to be a live
-				# reference, and every cross-table check then demands an alignment
-				# it can never have.
-				#
-				# FilterAndExtractSequences sets the same flag, but only in the copy
-				# of the matrix it rewrites: the Nextflow process does not emit that
-				# copy, so under vgtk-init.nf the correction is discarded and the
-				# database is built from this file.  Setting it here fixes both
-				# entry points at source.
 				content['exclusion_criteria'] = 'excluded by reference list exclusion flag'
 				content['exclusion_status'] = '1'
 			else:
@@ -312,10 +347,11 @@ class GenBankParser:
 			cds = []
 
 			for gb_feature in gbseq.findall('GBSeq_feature-table/GBFeature'):
-				if gb_feature.find('GBFeature_key').text == 'source':
+				fkey = self._xml_text(gb_feature, 'GBFeature_key')
+				if fkey == 'source':
 					for qualifier in gb_feature.findall('GBFeature_quals/GBQualifier'):
-						name = qualifier.find('GBQualifier_name').text if qualifier.find('GBQualifier_name') is not None else None
-						value = qualifier.find('GBQualifier_value').text if qualifier.find('GBQualifier_value') is not None else None
+						name = self._xml_text(qualifier, 'GBQualifier_name', None)
+						value = self._xml_text(qualifier, 'GBQualifier_value', '')
 						if name == 'mol_type':
 							mol_type = value
 						if name == 'strain':
@@ -336,21 +372,21 @@ class GenBankParser:
 							segment = value
 						elif name == 'serotype':
 							serotype = value
-				elif gb_feature.find('GBFeature_key').text == 'gene':
+				elif fkey == 'gene':
 						gene_info = {}
-						gene_info['gene_location'] = gb_feature.find('GBFeature_location').text
+						gene_info['gene_location'] = self._xml_text(gb_feature, 'GBFeature_location')
 						for qualifier in gb_feature.findall('GBFeature_quals/GBQualifier'):
-							name = qualifier.find('GBQualifier_name').text if qualifier.find('GBQualifier_name') is not None else None
-							value = qualifier.find('GBQualifier_value').text if qualifier.find('GBQualifier_value') is not None else None
+							name = self._xml_text(qualifier, 'GBQualifier_name', None)
+							value = self._xml_text(qualifier, 'GBQualifier_value', '')
 							if name == 'gene':
 								gene_info['gene_name'] = value
 								genes.append(gene_info)
-				elif gb_feature.find('GBFeature_key').text == 'CDS':
+				elif fkey == 'CDS':
 						cds_info = {}
-						cds_info['cds_location'] = gb_feature.find('GBFeature_location').text if gb_feature.find('GBFeature_location') is not None else None
+						cds_info['cds_location'] = self._xml_text(gb_feature, 'GBFeature_location', None)
 						for qualifier in gb_feature.findall('GBFeature_quals/GBQualifier'):
-							name = qualifier.find('GBQualifier_name').text if qualifier.find('GBQualifier_name') is not None else None
-							value = qualifier.find('GBQualifier_value').text if qualifier.find('GBQualifier_value') is not None else None
+							name = self._xml_text(qualifier, 'GBQualifier_name', None)
+							value = self._xml_text(qualifier, 'GBQualifier_value', '')
 							cds_info[name] = value
 						cds.append(cds_info)
 
@@ -368,7 +404,8 @@ class GenBankParser:
 			content['isolate'] = isolate
 			content['isolation_source'] = isolation_source
 			content['db_xref'] = db_xref
-			
+
+			country = country or ''
 			if ":" in country:
 				tmp_country = country.split(":")
 				content['country'] = tmp_country[0]
@@ -376,10 +413,10 @@ class GenBankParser:
 			else:
 				content['country'] = country
 				content['geo_loc'] = ""
-		
+
 			content['host'] = host
 			content['collection_date'] = collection_date
-			
+
 			split_collection_date = split_date_components(content['collection_date'])
 			content['collection_day'] = split_collection_date['day']
 			content['collection_mon'] = split_collection_date['month']
@@ -387,8 +424,7 @@ class GenBankParser:
 
 			content['segment'] = self._normalize_segment_value(segment)
 			content['serotype'] = serotype
-			sequence = gbseq.find('GBSeq_sequence')
-			content['sequence'] = sequence.text if sequence is not None else ''
+			content['sequence'] = self._xml_text(gbseq, 'GBSeq_sequence', '')
 			content['genes'] = '; '.join([f"{gene['gene_name']}({gene['gene_location']})" for gene in genes])
 			content['cds_info'] = '; '.join([f"{k}: {v}" for each_cds in cds for k, v in each_cds.items()])
 			nucl_count = self.count_ATGCN(content['sequence'])
@@ -404,11 +440,11 @@ class GenBankParser:
 			for reference in gbseq.findall('GBSeq_references/GBReference'):
 				authors = [author.text for author in reference.findall('GBReference_authors/GBAuthor')]
 				reference_entry = {
-					'reference_number': reference.find('GBReference_reference').text if reference.find('GBReference_reference') is not None else '',
-					'position': reference.find('GBReference_position').text if reference.find('GBReference_position') is not None else '',
+					'reference_number': self._xml_text(reference, 'GBReference_reference'),
+					'position': self._xml_text(reference, 'GBReference_position'),
 					'authors': ', '.join([a for a in authors if a]),
-					'title': reference.find('GBReference_title').text if reference.find('GBReference_title') is not None else '',
-					'journal': reference.find('GBReference_journal').text if reference.find('GBReference_journal') is not None else '',
+					'title': self._xml_text(reference, 'GBReference_title'),
+					'journal': self._xml_text(reference, 'GBReference_journal'),
 				}
 				references.append(reference_entry)
 
@@ -418,7 +454,7 @@ class GenBankParser:
 			content['title'] = '; '.join([r['title'] for r in references if r['title']])
 			content['journal'] = '; '.join([r['journal'] for r in references if r['journal']])
 			data.append(content)
-	
+
 		return data
 
 	def count_xml_files(self):
@@ -499,6 +535,43 @@ class GenBankParser:
 
 		return selected
 
+	def _load_db_reference_lengths(self):
+		"""Load minimum reference real_length values from update_db (global and per-segment)."""
+		if not self.update_db_path or not os.path.isfile(self.update_db_path):
+			return {}
+		seg_lengths = {}
+		conn = sqlite3.connect(self.update_db_path)
+		try:
+			cur = conn.cursor()
+			meta_cols = {r[1] for r in cur.execute("PRAGMA table_info(meta_data)")}
+			if "primary_accession" not in meta_cols or "accession_type" not in meta_cols:
+				return {}
+			seg_expr = "segment" if "segment" in meta_cols else "'1'"
+			if "real_length" in meta_cols:
+				rows = cur.execute(
+					f"SELECT {seg_expr}, real_length FROM meta_data "
+					"WHERE LOWER(TRIM(COALESCE(accession_type, ''))) IN ('master', 'reference') "
+					"AND real_length IS NOT NULL"
+				).fetchall()
+				for seg_val, rl_val in rows:
+					try:
+						rl_int = int(float(rl_val))
+					except (TypeError, ValueError):
+						continue
+					if rl_int > 0:
+						seg_key = self._normalize_segment_value(seg_val)
+						seg_lengths.setdefault(seg_key, []).append(rl_int)
+		except sqlite3.Error:
+			return {}
+		finally:
+			conn.close()
+		return {k: min(v) for k, v in seg_lengths.items() if v}
+
+	def _write_empty_outputs(self):
+		with open(join(self.out_root, 'sequences.fa'), 'w', encoding='utf-8') as fasta_file:
+			pass
+		pd.DataFrame(columns=self._MATRIX_COLUMNS).to_csv(join(self.out_root, 'gB_matrix_raw.tsv'), sep='\t', index=False)
+
 	def process(self):
 
 		ref_seq_dict = self.load_ref_list(self.ref_list)
@@ -540,6 +613,8 @@ class GenBankParser:
 		total_xml = len(selected_xml_files)
 		if total_xml == 0:
 			print(f"No XML files found in: {self.input_dir}")
+			if self.update_mode:
+				self._write_empty_outputs()
 			return
 
 		count = 1
@@ -552,35 +627,73 @@ class GenBankParser:
 
 		if not merged_data:
 			if self.update_mode:
-				print('[update] No new accessions found in XMLs (nothing to write).')
+				print('[update] No new accessions found in XMLs (writing empty headered outputs).')
+				self._write_empty_outputs()
 			else:
 				print('No records parsed.')
 			return
 
 		# --- length filter ---
 		if self.min_length_ratio and self.min_length_ratio > 0:
-			ref_lengths = [
-				int(rec.get('real_length', 0))
-				for rec in merged_data
-				if str(rec.get('accession_type', '')).lower() in ('master', 'reference')
-				and int(rec.get('real_length', 0)) > 0
-			]
-			if ref_lengths:
-				min_ref_length = min(ref_lengths)
-				length_cutoff = min_ref_length * self.min_length_ratio
-				print(f'[length_filter] min ref real_length={min_ref_length}, cutoff={length_cutoff:.0f} (ratio={self.min_length_ratio})')
+			if self.is_segmented_virus == 'Y':
+				ref_len_by_seg = {}
 				for rec in merged_data:
-					acc_type = str(rec.get('accession_type', '')).lower()
-					if acc_type in ('master', 'reference', 'excluded'):
-						continue
-					rl = int(rec.get('real_length', 0))
-					if rl < length_cutoff:
-						print(f"[length_filter] Excluding {rec.get('primary_accession', '?')}: real_length={rl} < {length_cutoff:.0f}")
-						rec['exclusion_status'] = '1'
-						rec['exclusion_criteria'] = (
-							f'sequence_too_short: real_length={rl} < {length_cutoff:.0f} '
-							f'(min_ref={min_ref_length} * ratio={self.min_length_ratio})'
-						)
+					if str(rec.get('accession_type', '')).lower() in ('master', 'reference'):
+						rl = int(rec.get('real_length', 0))
+						seg_key = rec.get('segment', '') or ''
+						if rl > 0:
+							ref_len_by_seg.setdefault(seg_key, []).append(rl)
+				seg_min_ref = {k: min(v) for k, v in ref_len_by_seg.items() if v}
+				if self.update_mode:
+					for seg_k, db_min in self._load_db_reference_lengths().items():
+						if seg_k not in seg_min_ref:
+							seg_min_ref[seg_k] = db_min
+				if seg_min_ref:
+					for rec in merged_data:
+						acc_type = str(rec.get('accession_type', '')).lower()
+						if acc_type in ('master', 'reference', 'excluded', 'exclusion_list'):
+							continue
+						seg_key = rec.get('segment', '') or ''
+						min_ref_length = seg_min_ref.get(seg_key)
+						if not min_ref_length:
+							continue
+						length_cutoff = min_ref_length * self.min_length_ratio
+						rl = int(rec.get('real_length', 0))
+						if rl < length_cutoff:
+							print(f"[length_filter] Excluding {rec.get('primary_accession', '?')} (seg={seg_key}): real_length={rl} < {length_cutoff:.0f}")
+							rec['exclusion_status'] = '1'
+							rec['exclusion_criteria'] = (
+								f'sequence_too_short: real_length={rl} < {length_cutoff:.0f} '
+								f'(min_ref={min_ref_length} * ratio={self.min_length_ratio})'
+							)
+				else:
+					print('[length_filter] No reference sequences found; skipping length filter.')
+			else:
+				ref_lengths = [
+					int(rec.get('real_length', 0))
+					for rec in merged_data
+					if str(rec.get('accession_type', '')).lower() in ('master', 'reference')
+					and int(rec.get('real_length', 0)) > 0
+				]
+				if not ref_lengths and self.update_mode:
+					db_mins = list(self._load_db_reference_lengths().values())
+					ref_lengths.extend(db_mins)
+				if ref_lengths:
+					min_ref_length = min(ref_lengths)
+					length_cutoff = min_ref_length * self.min_length_ratio
+					print(f'[length_filter] min ref real_length={min_ref_length}, cutoff={length_cutoff:.0f} (ratio={self.min_length_ratio})')
+					for rec in merged_data:
+						acc_type = str(rec.get('accession_type', '')).lower()
+						if acc_type in ('master', 'reference', 'excluded', 'exclusion_list'):
+							continue
+						rl = int(rec.get('real_length', 0))
+						if rl < length_cutoff:
+							print(f"[length_filter] Excluding {rec.get('primary_accession', '?')}: real_length={rl} < {length_cutoff:.0f}")
+							rec['exclusion_status'] = '1'
+							rec['exclusion_criteria'] = (
+								f'sequence_too_short: real_length={rl} < {length_cutoff:.0f} '
+								f'(min_ref={min_ref_length} * ratio={self.min_length_ratio})'
+							)
 				else:
 					print('[length_filter] No reference sequences found; skipping length filter.')
 
@@ -592,7 +705,8 @@ class GenBankParser:
 			df = df.drop_duplicates(subset='primary_accession', keep="last")
 		with open(join(self.out_root, 'sequences.fa'), 'w') as fasta_file:
 			for _, row in df.iterrows():
-				fasta_file.write(f">{row['primary_accession']}\n{row['sequence']}\n")
+				seq_val = row.get('sequence') or ''
+				fasta_file.write(f">{row['primary_accession']}\n{seq_val}\n")
 
 		df.drop(columns=['sequence'], inplace=True)
 		df.to_csv(join(self.out_root, 'gB_matrix_raw.tsv'), sep='\t', index=False)

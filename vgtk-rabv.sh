@@ -78,6 +78,8 @@ TEST_MAX_CLUSTER_SEQS="250"
 EMAIL="your_email@example.com"
 MUTATION_CATALOG=""
 MUTATION_VIRUS=""
+MUTATION_PUBLICATIONS=""
+MUTATION_CLINICAL_TRIALS=""
 MAX_ALN_GAP_PROPORTION="0.96"
 MIN_SEQ_LENGTH_RATIO="0.05"
 REF_SET_ALIGNED=""                  # curated backbone dir; empty => build one
@@ -105,6 +107,8 @@ while [[ $# -gt 0 ]]; do
         --email)                  [[ $# -lt 2 ]] && { echo "[error] --email requires a value" >&2; exit 1; }; EMAIL="$2";                shift 2 ;;
         --mutation_catalog)       [[ $# -lt 2 ]] && { echo "[error] --mutation_catalog requires a value" >&2; exit 1; }; MUTATION_CATALOG="$2";     shift 2 ;;
         --mutation_virus)         [[ $# -lt 2 ]] && { echo "[error] --mutation_virus requires a value" >&2; exit 1; }; MUTATION_VIRUS="$2";       shift 2 ;;
+        --mutation_publications)  [[ $# -lt 2 ]] && { echo "[error] --mutation_publications requires a value" >&2; exit 1; }; MUTATION_PUBLICATIONS="$2"; shift 2 ;;
+        --mutation_clinical_trials) [[ $# -lt 2 ]] && { echo "[error] --mutation_clinical_trials requires a value" >&2; exit 1; }; MUTATION_CLINICAL_TRIALS="$2"; shift 2 ;;
         --max_aln_gap_proportion) [[ $# -lt 2 ]] && { echo "[error] --max_aln_gap_proportion requires a value" >&2; exit 1; }; MAX_ALN_GAP_PROPORTION="$2"; shift 2 ;;
         --min_seq_length_ratio)   [[ $# -lt 2 ]] && { echo "[error] --min_seq_length_ratio requires a value" >&2; exit 1; }; MIN_SEQ_LENGTH_RATIO="$2";  shift 2 ;;
         --start_step)             [[ $# -lt 2 ]] && { echo "[error] --start_step requires a value" >&2; exit 1; }; START_STEP="$2";             shift 2 ;;
@@ -795,6 +799,11 @@ if (( STEP >= START_STEP )); then
         fi
     fi
 
+    HOST_TAXA_EXTRA=()
+    [[ -f "${WORK_DIR}/HostTaxa/Host_taxa_children.tsv" ]] && HOST_TAXA_EXTRA+=( -htc "${WORK_DIR}/HostTaxa/Host_taxa_children.tsv" )
+    [[ -f "${WORK_DIR}/HostTaxa/Host_taxa_lineage.tsv" ]] && HOST_TAXA_EXTRA+=( -htl "${WORK_DIR}/HostTaxa/Host_taxa_lineage.tsv" )
+    [[ -f "${WORK_DIR}/HostTaxa/Host_taxa_lineage_lookup.tsv" ]] && HOST_TAXA_EXTRA+=( -htll "${WORK_DIR}/HostTaxa/Host_taxa_lineage_lookup.tsv" )
+
     run_step "CREATE_SQLITE_DB" \
         python "${SCRIPTS}/CreateSqliteDB.py" \
             -m "${GB_MATRIX}" \
@@ -802,12 +811,14 @@ if (( STEP >= START_STEP )); then
             -p "${SEQ_ALN}" \
             -i "${INSERTIONS}" \
             -ht "${HOST_TAXA}" \
+            "${HOST_TAXA_EXTRA[@]+"${HOST_TAXA_EXTRA[@]}"}" \
             -s "${SOFTWARE_INFO}" \
             -fa "${SEQUENCES_FA}" \
             -mc "${ASSETS}/m49_country.csv" \
             -mir "${ASSETS}/m49_intermediate_region.csv" \
             -mr "${ASSETS}/m49_region.csv" \
             -msr "${ASSETS}/m49_sub_region.csv" \
+            --is_segmented "${IS_SEGMENTED}" \
             -d "${DB_NAME}" \
             -b . -o . \
             "${IQTREE_ARG[@]}" \
@@ -824,13 +835,19 @@ if (( STEP >= START_STEP )); then
     if [[ -n "$MUTATION_CATALOG" && -f "$MUTATION_CATALOG" ]]; then
         VIRUS_ARG=()
         [[ -n "$MUTATION_VIRUS" ]] && VIRUS_ARG=( --virus "${MUTATION_VIRUS}" )
+        PUB_ARG=()
+        [[ -n "$MUTATION_PUBLICATIONS" && -f "$MUTATION_PUBLICATIONS" ]] && PUB_ARG=( --publications "${MUTATION_PUBLICATIONS}" )
+        TRIAL_ARG=()
+        [[ -n "$MUTATION_CLINICAL_TRIALS" && -f "$MUTATION_CLINICAL_TRIALS" ]] && TRIAL_ARG=( --clinical_trials "${MUTATION_CLINICAL_TRIALS}" )
         CATALOG_PROFILE="${MUTATION_VIRUS:-all_columns}"
         run_step "ANNOTATE_MUTATIONS" \
             python "${SCRIPTS}/AnnotateMutations.py" \
                 --db "${SQLITE_DB}" \
                 --mutation_catalog "${MUTATION_CATALOG}" \
                 --catalog_column_profile "${CATALOG_PROFILE}" \
-                "${VIRUS_ARG[@]}"
+                "${VIRUS_ARG[@]}" \
+                "${PUB_ARG[@]}" \
+                "${TRIAL_ARG[@]}"
     fi
 fi
 

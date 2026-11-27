@@ -118,14 +118,63 @@ def placements(ungapped, record):
     return early, late
 
 
-def codon_grid(coord_map, cds_start, cds_end):
+class _MultiExonCodonGrid(dict):
+    """Plain ``dict`` codon grid that also carries explicit per-exon sub-grids.
+
+    Returned by ``codon_grid(..., exons=...)`` only when a feature has more
+    than one exon (spliced M2/NEP or ribosomal-frameshifted PA-X). Single-exon
+    features return an ordinary ``dict`` and never trigger exon splitting, even
+    when a guide alignment inserts 9+ gap columns inside a single exon.
+    """
+
+    def __init__(self, mapping, exon_groups):
+        super().__init__(mapping)
+        self.exon_groups = exon_groups
+
+
+def codon_grid(coord_map, cds_start, cds_end, exons=None):
     """``{codon number: (column, column, column)}`` for one feature.
 
     ``coord_map`` is the master's ``{nucleotide position: alignment column}``
     map, so this is the same arithmetic the annotator already used to locate a
     codon - the grid simply covers the whole feature rather than one position.
     A codon the master's alignment cannot place is left out.
+
+    When ``exons`` is supplied (a sorted sequence of ``(start, end)`` 1-based
+    inclusive master nucleotide intervals for a spliced or frameshifted CDS such
+    as influenza M2, NEP, or PA-X), nucleotide positions are concatenated across
+    the exons before grouping into codons, and per-exon codon sub-grids are
+    attached so ``ProteinFrame`` evaluates each exon in its own coding frame.
+    Single-exon features (``exons=None`` or length 1) return a plain dict with
+    the exact original arithmetic.
     """
+    if exons and len(exons) > 1:
+        nuc_with_exon = []
+        valid_exons = []
+        for ex_idx, (ex_start, ex_end) in enumerate(exons):
+            try:
+                s, e = int(ex_start), int(ex_end)
+            except (TypeError, ValueError):
+                continue
+            if e >= s >= 1:
+                valid_exons.append((s, e))
+                for pos in range(s, e + 1):
+                    nuc_with_exon.append((pos, ex_idx))
+        grid = {}
+        per_exon = {}
+        for number in range(1, len(nuc_with_exon) // 3 + 1):
+            base = (number - 1) * 3
+            tri = nuc_with_exon[base:base + 3]
+            columns = tuple(coord_map.get(pos, -1) for pos, _ in tri)
+            if min(columns) >= 0:
+                grid[number] = columns
+                # Codons wholly inside one exon join that exon's ProteinFrame;
+                # splice-junction split codons (e.g. M2 codon 9) defer to alignment.
+                if tri[0][1] == tri[1][1] == tri[2][1]:
+                    per_exon.setdefault(tri[0][1], {})[number] = columns
+        exon_groups = [per_exon[idx] for idx in sorted(per_exon) if per_exon[idx]]
+        return _MultiExonCodonGrid(grid, exon_groups)
+
     try:
         first, last = int(cds_start), int(cds_end)
     except (TypeError, ValueError):
@@ -206,7 +255,7 @@ class ProteinFrame:
     """One protein's reading frame in one record, and the indels around it."""
 
     def __init__(self, mapping, grid, translate, unknown='X', master_alignment=None,
-                 flank_codons=FLANK_CODONS):
+                 flank_codons=FLANK_CODONS, _allow_exon_split=True):
         self.mapping, self.grid = mapping, grid or {}
         self.translate, self.unknown = translate, unknown
         self.frame = None
@@ -226,7 +275,41 @@ class ProteinFrame:
         self._displaced_all, self._unexplained = [], []
         self._ranges = {}
         self._master = str(master_alignment or '').upper()
+        self._exon_frames = None
+        self._codon_to_exon = None
         if not self.grid or mapping is None or not mapping.mapped:
+            return
+
+        # Spliced / ribosomal-frameshift multi-exon CDS handling (e.g. influenza
+        # M2, NEP, PA-X): only triggered when codon_grid(..., exons=...) explicitly
+        # built a _MultiExonCodonGrid with >1 exon, so single-exon proteins with
+        # large alignment gaps are 100% untouched.
+        exon_groups = getattr(self.grid, 'exon_groups', None) if _allow_exon_split else None
+        if exon_groups and len(exon_groups) > 1:
+            self._exon_frames = []
+            self._codon_to_exon = {}
+            for sub_grid in exon_groups:
+                sub_frame = ProteinFrame(
+                    mapping, sub_grid, translate, unknown, master_alignment,
+                    flank_codons=0, _allow_exon_split=False,
+                )
+                self._exon_frames.append(sub_frame)
+                for num in sub_grid:
+                    self._codon_to_exon[num] = sub_frame
+            largest = max(self._exon_frames, key=lambda f: len(f.grid))
+            self.frame = largest.frame
+            self.tie = any(f.tie for f in self._exon_frames)
+            self.frame_conflict = any(f.frame_conflict for f in self._exon_frames)
+            self.record_frameshift = any(f.record_frameshift for f in self._exon_frames)
+            self.internal_stops = sum(f.internal_stops for f in self._exon_frames)
+            self.ambiguous_codons = sum(f.ambiguous_codons for f in self._exon_frames)
+            self.gapped_codons = sum(f.gapped_codons for f in self._exon_frames)
+            for f in self._exon_frames:
+                self.split.extend(f.split)
+                self.off_frame.extend(f.off_frame)
+                self.displaced.extend(f.displaced)
+                self.insertions.extend(f.insertions)
+                self.deletions.extend(f.deletions)
             return
 
         certain = {}
@@ -557,7 +640,11 @@ class ProteinFrame:
         if number is None:
             return None, DEFER
         if number not in self._answers:
-            self._answers[number] = self._resolve(number)
+            if self._codon_to_exon is not None:
+                sub = self._codon_to_exon.get(number)
+                self._answers[number] = sub.read(columns) if sub is not None else (None, DEFER)
+            else:
+                self._answers[number] = self._resolve(number)
         return self._answers[number]
 
     # -- reporting ---------------------------------------------------------

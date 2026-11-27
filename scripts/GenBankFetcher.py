@@ -4,6 +4,7 @@ import json
 import sqlite3
 import time
 import random
+import inspect
 from time import sleep
 from os.path import join
 from argparse import ArgumentParser
@@ -15,16 +16,22 @@ try:
 except ModuleNotFoundError:
 	class _RequestsFallback:
 		class exceptions:
-			class JSONDecodeError(Exception):
+			class RequestException(Exception):
 				pass
 
-			class ChunkedEncodingError(Exception):
+			class JSONDecodeError(RequestException):
 				pass
 
-			class ConnectionError(Exception):
+			class ChunkedEncodingError(RequestException):
 				pass
 
-			class HTTPError(Exception):
+			class ConnectionError(RequestException):
+				pass
+
+			class Timeout(RequestException):
+				pass
+
+			class HTTPError(RequestException):
 				def __init__(self, *args, response=None, **kwargs):
 					super().__init__(*args)
 					self.response = response
@@ -36,7 +43,7 @@ except ModuleNotFoundError:
 	requests = _RequestsFallback()
 
 class GenBankFetcher:
-	def __init__(self, taxid, base_url, email, output_dir, batch_size, sleep_time, base_dir, update_file, test_run=False, ref_list=None, test_fetch_count=100):
+	def __init__(self, taxid, base_url='https://eutils.ncbi.nlm.nih.gov/entrez/eutils/', email='your_email@example.com', output_dir='tmp', batch_size=100000, sleep_time=2, base_dir='GenBank-XML', update_file=None, test_run=False, ref_list=None, test_fetch_count=100):
 		self.taxid = taxid
 		self.base_url = base_url
 		self.email = email
@@ -112,7 +119,42 @@ class GenBankFetcher:
 			else:
 				url += f"?api_key={self.api_key}"
 		self._throttle()
+		sig = inspect.signature(requests.get)
+		accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+		if accepts_kwargs or "timeout" in sig.parameters:
+			return requests.get(url, timeout=(15, 120))
 		return requests.get(url)
+
+	@staticmethod
+	def _is_429(exc):
+		resp = getattr(exc, "response", None)
+		return resp is not None and getattr(resp, "status_code", None) == 429
+
+	def _esearch_json_with_retry(self, url, context, max_retries=5):
+		timeout_exc = getattr(requests.exceptions, "Timeout", TimeoutError)
+		retryable = (
+			requests.exceptions.JSONDecodeError,
+			requests.exceptions.ChunkedEncodingError,
+			requests.exceptions.ConnectionError,
+			requests.exceptions.HTTPError,
+			timeout_exc,
+			KeyError,
+			ValueError,
+		)
+		for attempt in range(max_retries):
+			try:
+				resp = self._get(url)
+				resp.raise_for_status()
+				data = self._parse_json(resp, context)
+				if "esearchresult" not in data:
+					raise ValueError("Incomplete JSON response: missing 'esearchresult'")
+				return data
+			except retryable as e:
+				if attempt == max_retries - 1:
+					raise
+				wait_time = (self.sleep_time * (attempt + 1)) + (10 if self._is_429(e) else 0)
+				print(f"Error in {context} ({type(e).__name__}). Retrying in {wait_time}s... (Attempt {attempt+1}/{max_retries})")
+				sleep(wait_time)
 
 	def _throttle(self):
 		# Pace requests ourselves instead of discovering NCBI's limit via 429s,
@@ -165,9 +207,7 @@ class GenBankFetcher:
 			f"&retmax=0&idtype=acc"
 			f"&usehistory=y&email={self.email}&retmode=json"
 		)
-		resp = self._get(hist_url)
-		resp.raise_for_status()
-		hist = self._parse_json(resp, "fetch_ids ESearch history")["esearchresult"]
+		hist = self._esearch_json_with_retry(hist_url, "fetch_ids ESearch history")["esearchresult"]
 		
 		count = int(hist["count"])
 		print(f"[fetch_ids] ESearch history → count={count:,} took {time.time() - t0:.1f}s")
@@ -178,9 +218,10 @@ class GenBankFetcher:
 		webenv   = hist["webenv"]
 		querykey = hist["querykey"]
 
-		# 2) Paginate in chunks of self.batch_size
+		# 2) Paginate in chunks, advancing by actual returned page length
 		all_accs = []
-		for start in range(0, count, self.batch_size):
+		start = 0
+		while start < count:
 			t1 = time.time()
 			page_url = (
 				f"{self.base_url}esearch.fcgi?db=nucleotide"
@@ -188,32 +229,15 @@ class GenBankFetcher:
 				f"&retstart={start}&retmax={self.batch_size}"
 				f"&idtype=acc&retmode=json"
 			)
-			
-			max_retries = 5
-			for attempt in range(max_retries):
-				try:
-					page_resp = self._get(page_url)
-					page_resp.raise_for_status()
-					data = self._parse_json(page_resp, f"chunk at retstart={start}")
-					if "esearchresult" not in data:
-						raise ValueError("Incomplete JSON response: missing 'esearchresult'")
-					page = data["esearchresult"]["idlist"]
-					break
-				except (requests.exceptions.JSONDecodeError, requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError, requests.exceptions.HTTPError, ValueError) as e:
-					if attempt == max_retries - 1:
-						print(f"Failed to fetch IDs for chunk starting at {start} after {max_retries} attempts.")
-						raise e
-					# Check if it's a 429 error and wait longer if so
-					is_429 = isinstance(e, requests.exceptions.HTTPError) and e.response.status_code == 429
-					wait_time = (self.sleep_time * (attempt + 1)) + (10 if is_429 else 0)
-					
-					print(f"Error fetching IDs ({type(e).__name__}) for chunk starting at {start}. Retrying in {wait_time}s... (Attempt {attempt+1}/{max_retries})")
-					sleep(wait_time)
-
-			page = [acc.split('.', 1)[0] for acc in page]
-			all_accs.extend(page)
-			print(f"[fetch_ids] chunk {start:,}-{min(start+self.batch_size, count):,} "
+			data = self._esearch_json_with_retry(page_url, f"fetch_ids chunk at retstart={start}")
+			page = data["esearchresult"]["idlist"]
+			if not page:
+				break
+			page_bare = [acc.split('.', 1)[0] for acc in page]
+			all_accs.extend(page_bare)
+			print(f"[fetch_ids] chunk {start:,}-{min(start+len(page), count):,} "
 				f"({len(page):,} records) took {time.time() - t1:.1f}s")
+			start += len(page)
 
 		print(f"[fetch_ids] total accs fetched: {len(all_accs):,} in {time.time() - start_all:.1f}s")
 		return all_accs
@@ -228,9 +252,7 @@ class GenBankFetcher:
 			f"&retmax=0&idtype=acc"
 			f"&usehistory=y&email={self.email}&retmode=json"
 		)
-		resp = self._get(hist_url)
-		resp.raise_for_status()
-		hist = self._parse_json(resp, "fetch_accs ESearch history")["esearchresult"]
+		hist = self._esearch_json_with_retry(hist_url, "fetch_accs ESearch history")["esearchresult"]
 
 		count = int(hist["count"])
 		print(f"[fetch_accs] ESearch history → count={count:,} took {time.time() - t0:.1f}s")
@@ -242,7 +264,8 @@ class GenBankFetcher:
 		querykey = hist["querykey"]
 
 		all_accs = []
-		for start in range(0, count, self.batch_size):
+		start = 0
+		while start < count:
 			t1 = time.time()
 			page_url = (
 				f"{self.base_url}esearch.fcgi?db=nucleotide"
@@ -250,105 +273,52 @@ class GenBankFetcher:
 				f"&retstart={start}&retmax={self.batch_size}"
 				f"&idtype=acc&retmode=json"
 			)
-
-			max_retries = 5
-			for attempt in range(max_retries):
-				try:
-					page_resp = self._get(page_url)
-					page_resp.raise_for_status()
-					data = self._parse_json(page_resp, f"chunk at retstart={start}")
-					if "esearchresult" not in data:
-						raise ValueError("Incomplete JSON response: missing 'esearchresult'")
-					page = data["esearchresult"]["idlist"]
-					break
-				except (requests.exceptions.JSONDecodeError, requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError, requests.exceptions.HTTPError, ValueError) as e:
-					if attempt == max_retries - 1:
-						print(f"Failed to fetch accession versions for chunk starting at {start} after {max_retries} attempts.")
-						raise e
-
-					is_429 = isinstance(e, requests.exceptions.HTTPError) and e.response.status_code == 429
-					wait_time = (self.sleep_time * (attempt + 1)) + (10 if is_429 else 0)
-					print(f"Error fetching accession versions ({type(e).__name__}) for chunk starting at {start}. Retrying in {wait_time}s... (Attempt {attempt+1}/{max_retries})")
-					sleep(wait_time)
-
+			data = self._esearch_json_with_retry(page_url, f"fetch_accs chunk at retstart={start}")
+			page = data["esearchresult"]["idlist"]
+			if not page:
+				break
 			all_accs.extend(page)
-			print(f"[fetch_accs] chunk {start:,}-{min(start+self.batch_size, count):,} ({len(page):,} records) took {time.time() - t1:.1f}s")
+			print(f"[fetch_accs] chunk {start:,}-{min(start+len(page), count):,} ({len(page):,} records) took {time.time() - t1:.1f}s")
+			start += len(page)
 
 		print(f"[fetch_accs] total accs fetched: {len(all_accs):,} in {time.time() - start_all:.1f}s")
 		return all_accs
+
 	def iter_accs(self):
-			t0 = time.time()
-			hist_url = (
+		t0 = time.time()
+		hist_url = (
+			f"{self.base_url}esearch.fcgi?db=nucleotide"
+			f"&term=txid{self.taxid}[Organism:exp]"
+			f"&retmax=0&idtype=acc"
+			f"&usehistory=y&email={self.email}&retmode=json"
+		)
+		hist = self._esearch_json_with_retry(hist_url, "iter_accs ESearch history")["esearchresult"]
+
+		count = int(hist["count"])
+		print(f"[fetch_accs] ESearch history → count={count:,} took {time.time() - t0:.1f}s")
+
+		if count == 0:
+			return
+
+		webenv = hist["webenv"]
+		querykey = hist["querykey"]
+
+		start = 0
+		while start < count:
+			t1 = time.time()
+			page_url = (
 				f"{self.base_url}esearch.fcgi?db=nucleotide"
-				f"&term=txid{self.taxid}[Organism:exp]"
-				f"&retmax=0&idtype=acc"
-				f"&usehistory=y&email={self.email}&retmode=json"
+				f"&WebEnv={webenv}&query_key={querykey}"
+				f"&retstart={start}&retmax={self.batch_size}"
+				f"&idtype=acc&retmode=json"
 			)
-			
-			# 1) Wrap the initial history call in a retry loop
-			max_retries = 5
-			hist = None
-			for attempt in range(max_retries):
-				try:
-					resp = self._get(hist_url)
-					resp.raise_for_status()
-					
-					data = self._parse_json(resp, "iter_accs ESearch history")
-					hist = data["esearchresult"]
-					break
-				except (requests.exceptions.JSONDecodeError, requests.exceptions.ChunkedEncodingError, 
-						requests.exceptions.ConnectionError, requests.exceptions.HTTPError, KeyError, ValueError) as e:
-					if attempt == max_retries - 1:
-						print(f"Failed to initialize ESearch history after {max_retries} attempts.")
-						raise e
-					
-					is_429 = isinstance(e, requests.exceptions.HTTPError) and e.response.status_code == 429
-					wait_time = (self.sleep_time * (attempt + 1)) + (10 if is_429 else 0)
-					print(f"Error initializing history ({type(e).__name__}). Retrying in {wait_time}s... (Attempt {attempt+1}/{max_retries})")
-					sleep(wait_time)
-
-			count = int(hist["count"])
-			print(f"[fetch_accs] ESearch history → count={count:,} took {time.time() - t0:.1f}s")
-
-			if count == 0:
-				return
-
-			webenv = hist["webenv"]
-			querykey = hist["querykey"]
-
-			# 2) Pagination loop continues unchanged...
-			for start in range(0, count, self.batch_size):
-				t1 = time.time()
-				page_url = (
-					f"{self.base_url}esearch.fcgi?db=nucleotide"
-					f"&WebEnv={webenv}&query_key={querykey}"
-					f"&retstart={start}&retmax={self.batch_size}"
-					f"&idtype=acc&retmode=json"
-				)
-
-				max_retries = 5
-				for attempt in range(max_retries):
-					try:
-						page_resp = self._get(page_url)
-						page_resp.raise_for_status()
-						
-						data = self._parse_json(page_resp, f"chunk at retstart={start}")
-						if "esearchresult" not in data:
-							raise ValueError("Incomplete JSON response: missing 'esearchresult'")
-						page = data["esearchresult"]["idlist"]
-						break
-					except (requests.exceptions.JSONDecodeError, requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError, requests.exceptions.HTTPError, ValueError) as e:
-						if attempt == max_retries - 1:
-							print(f"Failed to fetch accession versions for chunk starting at {start} after {max_retries} attempts.")
-							raise e
-
-						is_429 = isinstance(e, requests.exceptions.HTTPError) and e.response.status_code == 429
-						wait_time = (self.sleep_time * (attempt + 1)) + (10 if is_429 else 0)
-						print(f"Error fetching accession versions ({type(e).__name__}) for chunk starting at {start}. Retrying in {wait_time}s... (Attempt {attempt+1}/{max_retries})")
-						sleep(wait_time)
-
-				print(f"[fetch_accs] chunk {start:,}-{min(start+self.batch_size, count):,} ({len(page):,} records) took {time.time() - t1:.1f}s")
-				yield page
+			data = self._esearch_json_with_retry(page_url, f"iter_accs chunk at retstart={start}")
+			page = data["esearchresult"]["idlist"]
+			if not page:
+				break
+			print(f"[fetch_accs] chunk {start:,}-{min(start+len(page), count):,} ({len(page):,} records) took {time.time() - t1:.1f}s")
+			yield page
+			start += len(page)
 
 
 	def fetch_genbank_data(self, ids):
@@ -381,22 +351,25 @@ class GenBankFetcher:
 			
 			# Retry logic for network interruptions
 			max_retries = 5
+			timeout_exc = getattr(requests.exceptions, "Timeout", TimeoutError)
 			for attempt in range(max_retries):
 				try:
 					resp = self._get(url)
 					resp.raise_for_status()
+					body = resp.text or ""
+					if body.strip() and "</GBSet>" not in body:
+						raise ValueError("Truncated GenBank XML response: missing </GBSet>")
 
 					# Pass batch_n here to name the file as before
 					self.save_data(resp.text, i + batch_n)
 					break # Success, exit retry loop
-				except (requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError, requests.exceptions.HTTPError) as e:
+				except (requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError, requests.exceptions.HTTPError, timeout_exc, ValueError) as e:
 					if attempt == max_retries - 1:
 						print(f"Failed to download batch starting with index {i} after {max_retries} attempts.")
 						raise e
 					
 					# Check if it's a 429 error and wait longer if so
-					is_429 = isinstance(e, requests.exceptions.HTTPError) and e.response.status_code == 429
-					wait_time = (self.sleep_time * (attempt + 1)) + (10 if is_429 else 0)
+					wait_time = (self.sleep_time * (attempt + 1)) + (10 if self._is_429(e) else 0)
 
 					print(f"Network error ({type(e).__name__}) for batch starting with index {i}. Retrying in {wait_time}s... (Attempt {attempt+1}/{max_retries})")
 					sleep(wait_time)
@@ -417,8 +390,10 @@ class GenBankFetcher:
 			filename = f"{base_filename}_{counter}.xml"
 			counter += 1
 
-		with open(filename, "w") as file:
-				file.write(data)
+		tmp_filename = f"{filename}.tmp"
+		with open(tmp_filename, "w", encoding="utf-8") as file:
+			file.write(data)
+		os.replace(tmp_filename, filename)
 		print(f"Data written to: {filename}")
 
 	def download(self):
@@ -540,7 +515,7 @@ class GenBankFetcher:
 				excl_cols = {row[1] for row in cursor.fetchall()}
 				if 'primary_accession' in excl_cols:
 					cursor.execute("SELECT primary_accession FROM excluded_accessions WHERE primary_accession IS NOT NULL AND TRIM(primary_accession) != ''")
-					excluded_primary = self._canonical_exclusion_keys(row[0] for row in cursor.fetchall())
+					excluded_primary.update(self._canonical_exclusion_keys(row[0] for row in cursor.fetchall()))
 		finally:
 			conn.close()
 

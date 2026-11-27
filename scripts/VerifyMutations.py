@@ -20,8 +20,14 @@ if SCRIPT_DIR not in sys.path:
 # verifier would have reported mismatches that were artefacts of its own rules.
 # Importing removes the possibility by construction.
 from AnnotateMutations import (
+    GeneAliasLookup,
     canonicalize_product as _canonicalize_product,
+    feature_coding_length,
     infer_compact_product_name as _infer_compact_product_name,
+    merge_feature_entry as _merge_feature_entry,
+    normalize_segment,
+    resolve_aligned_codon_indices,
+    resolve_virus_name,
     virus_profile,
 )
 
@@ -46,15 +52,18 @@ CODON_TABLE = {
     'GGA':'G', 'GGC':'G', 'GGG':'G', 'GGT':'G',
     'TCA':'S', 'TCC':'S', 'TCG':'S', 'TCT':'S',
     'TTC':'F', 'TTT':'F', 'TTA':'L', 'TTG':'L',
-    'TAC':'Y', 'TAT':'Y', 'TAA':'_', 'TAG':'_',
-    'TGC':'C', 'TGT':'C', 'TGA':'_', 'TGG':'W',
+    'TAC':'Y', 'TAT':'Y', 'TAA':'*', 'TAG':'*',
+    'TGC':'C', 'TGT':'C', 'TGA':'*', 'TGG':'W',
 }
 
 def translate_codon(codon):
-    codon = codon.upper().replace('-', '')
-    if len(codon) < 3:
+    raw = str(codon or '').upper()
+    if raw == '---':
+        return '-'
+    cleaned = raw.replace('-', '')
+    if len(cleaned) < 3:
         return 'X'
-    return CODON_TABLE.get(codon, 'X')
+    return CODON_TABLE.get(cleaned, 'X')
 
 def normalize_lookup_key(value):
     return re.sub(r'[^a-z0-9]+', '', str(value or '').strip().lower())
@@ -70,7 +79,7 @@ def canonicalize_product(product_name, alias_lookup, profile=None):
 
 
 def load_gene_alias_lookup(conn):
-    alias_lookup = {}
+    alias_lookup = GeneAliasLookup(profile=ACTIVE_VIRUS_PROFILE)
     try:
         genes = pd.read_sql_query('SELECT * FROM genes', conn)
     except Exception:
@@ -115,26 +124,6 @@ def build_alignment_coordinate_map(alignment):
             coord_map[ungapped_position] = alignment_index
     return coord_map
 
-def resolve_aligned_codon_indices(coord_map, cds_start, aa_pos):
-    try:
-        cds_start = int(cds_start)
-        aa_pos = int(aa_pos)
-    except (TypeError, ValueError):
-        return None
-
-    if cds_start < 1 or aa_pos < 1:
-        return None
-
-    nuc_start = cds_start + (aa_pos - 1) * 3
-    query_positions = [nuc_start + offset for offset in range(3)]
-    alignment_indices = []
-    for position in query_positions:
-        alignment_index = coord_map.get(position)
-        if alignment_index is None or alignment_index < 0:
-            return None
-        alignment_indices.append(alignment_index)
-    return tuple(alignment_indices)
-
 def extract_aligned_codon(alignment, alignment_indices):
     alignment = str(alignment or '')
     if not alignment_indices:
@@ -147,7 +136,8 @@ def extract_aligned_codon(alignment, alignment_indices):
     return codon
 
 def is_sequence_coverage_sufficient(alignment, ref_coord_map, gene_entry, start_aa, end_aa, target_pos):
-    target_indices = resolve_aligned_codon_indices(ref_coord_map, gene_entry['cds_start'], target_pos)
+    exons = gene_entry.get('exons')
+    target_indices = resolve_aligned_codon_indices(ref_coord_map, gene_entry['cds_start'], target_pos, exons=exons)
     if target_indices is None:
         return False
     target_codon = extract_aligned_codon(alignment, target_indices)
@@ -156,7 +146,7 @@ def is_sequence_coverage_sufficient(alignment, ref_coord_map, gene_entry, start_
 
     gap_count = 0
     for pos in range(start_aa, end_aa + 1):
-        indices = resolve_aligned_codon_indices(ref_coord_map, gene_entry['cds_start'], pos)
+        indices = resolve_aligned_codon_indices(ref_coord_map, gene_entry['cds_start'], pos, exons=exons)
         if indices is None:
             gap_count += 1
         else:
@@ -179,37 +169,18 @@ def load_master_accessions(conn):
     return set(meta.loc[mask, 'primary_accession'].dropna().astype(str).str.strip())
 
 def merge_feature_entry(feature_maps, reference_accession, product_name, start, end, feature_type, alias_lookup, raw_product=None, source='unknown'):
-    entry = {
-        'product': canonicalize_product(product_name, alias_lookup),
-        'raw_product': raw_product or product_name,
-        'cds_start': int(start),
-        'cds_end': int(end),
-        'reference_accession': reference_accession,
-        'feature_type': feature_type,
-        'source': source,
-    }
-    if not entry['product']:
-        return
-    reference_map = feature_maps.setdefault(reference_accession, {})
-    existing_entry = reference_map.get(entry['product'])
-    if existing_entry is None:
-        reference_map[entry['product']] = entry
-    else:
-        def feature_priority(feature_type, product_name):
-            canonical = normalize_lookup_key(product_name)
-            if canonical in {'polyprotein', 'wholegenome'}:
-                return 99
-            priorities = {'mat_peptide': 0, 'mature_protein_region_of_CDS': 0, 'gene': 1, 'CDS': 2, 'cds': 2}
-            return priorities.get(feature_type, 10)
-        existing_priority = feature_priority(existing_entry.get('feature_type', ''), existing_entry.get('product', ''))
-        new_priority = feature_priority(entry.get('feature_type', ''), entry.get('product', ''))
-        if new_priority < existing_priority:
-            reference_map[entry['product']] = entry
-        elif new_priority == existing_priority:
-            existing_span = int(existing_entry['cds_end']) - int(existing_entry['cds_start'])
-            new_span = int(entry['cds_end']) - int(entry['cds_start'])
-            if new_span < existing_span:
-                reference_map[entry['product']] = entry
+    lookup = alias_lookup if isinstance(alias_lookup, GeneAliasLookup) else GeneAliasLookup(alias_lookup, profile=ACTIVE_VIRUS_PROFILE)
+    _merge_feature_entry(
+        feature_maps,
+        reference_accession,
+        product_name,
+        start,
+        end,
+        feature_type,
+        lookup,
+        raw_product=raw_product,
+        source=source,
+    )
 
 def load_db_gff_feature_maps(conn, alias_lookup):
     table_names = pd.read_sql_query("SELECT name FROM sqlite_master WHERE type='table'", conn)['name'].tolist()
@@ -315,11 +286,11 @@ def resolve_feature_map(ref_acc, master_accessions, catalog_reference_hints, db_
 def main():
     parser = argparse.ArgumentParser(description="Verify mutation annotations against database alignment columns.")
     parser.add_argument("--db", default="/home3/oml4h/RABV-gTK/test_out/HCV_full_XML_treeless/HCV_full.db", help="Path to SQLite database.")
-    parser.add_argument("--mutation_catalog", default="/home3/oml4h/RABV-gTK/generic/hcv/Tables/generalized_mutation_catalog_evidence_linked.tsv", help="Path to mutation catalog TSV.")
+    parser.add_argument("--mutation_catalog", default=None, help="Path to mutation catalog TSV (defaults to the DB's mutation_catalog table if omitted).")
     parser.add_argument("--sample_size", type=int, default=100, help="Number of annotated sequences to sample and verify.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for sampling.")
     parser.add_argument("--hcv_test_ns3_36a", action="store_true", help="Run verification specifically for NS3:36A on the 171 query accessions.")
-    parser.add_argument("--min_identity", type=float, default=0.65, help="Minimum nucleotide identity threshold for alignment validation.")
+    parser.add_argument("--min_identity", type=float, default=None, help="Minimum nucleotide identity threshold for alignment validation (defaults to 0.40 for influenza pan-HA/NA alignments, 0.65 otherwise).")
     parser.add_argument("--virus", default="HCV",
         help="Virus whose protein-name vocabulary to canonicalise with. Must match the "
              "--virus AnnotateMutations was run with, or this script will report "
@@ -328,24 +299,47 @@ def main():
 
     global ACTIVE_VIRUS_PROFILE
     ACTIVE_VIRUS_PROFILE = virus_profile(args.virus)
+    if args.min_identity is None:
+        args.min_identity = 0.40 if resolve_virus_name(args.virus) == 'influenza' else 0.65
 
     if not os.path.isfile(args.db):
         print(f"Error: Database {args.db} not found.", file=sys.stderr)
         sys.exit(1)
-    if not args.hcv_test_ns3_36a and not os.path.isfile(args.mutation_catalog):
-        print(f"Error: Catalog {args.mutation_catalog} not found.", file=sys.stderr)
-        sys.exit(1)
+
+    conn = sqlite3.connect(args.db)
 
     if args.hcv_test_ns3_36a:
         catalog_refs = []
-    else:
+    elif args.mutation_catalog:
+        if not os.path.isfile(args.mutation_catalog):
+            conn.close()
+            print(f"Error: Catalog {args.mutation_catalog} not found.", file=sys.stderr)
+            sys.exit(1)
         print("1. Loading mutation catalog...")
-        catalog = pd.read_csv(args.mutation_catalog, sep='\t', dtype=str)
-        catalog_refs = catalog['reference_accession'].dropna().unique()
+        catalog = pd.read_csv(args.mutation_catalog, sep='\t', dtype=str, keep_default_na=False)
+        catalog_refs = [r for r in catalog['reference_accession'].dropna().unique() if str(r).strip()]
         print(f"Reference accessions in catalog: {list(catalog_refs)}")
-    
-    conn = sqlite3.connect(args.db)
-    
+    else:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        default_hcv_cat = "/home3/oml4h/RABV-gTK/generic/hcv/Tables/generalized_mutation_catalog_evidence_linked.tsv"
+        if 'mutation_catalog' in tables:
+            print("1. Loading mutation catalog from database table...")
+            catalog = pd.read_sql_query("SELECT * FROM mutation_catalog", conn)
+            catalog_refs = (
+                [r for r in catalog['reference_accession'].dropna().unique() if str(r).strip()]
+                if 'reference_accession' in catalog.columns else []
+            )
+            print(f"Reference accessions in catalog: {list(catalog_refs)}")
+        elif resolve_virus_name(args.virus) == 'hcv' and os.path.isfile(default_hcv_cat):
+            print("1. Loading mutation catalog...")
+            catalog = pd.read_csv(default_hcv_cat, sep='\t', dtype=str, keep_default_na=False)
+            catalog_refs = [r for r in catalog['reference_accession'].dropna().unique() if str(r).strip()]
+            print(f"Reference accessions in catalog: {list(catalog_refs)}")
+        else:
+            conn.close()
+            print("Error: --mutation_catalog not provided and no mutation_catalog table found in DB.", file=sys.stderr)
+            sys.exit(1)
+
     try:
         master_accessions = load_master_accessions(conn)
         print(f"Master reference accessions in DB: {list(master_accessions)}")
@@ -434,6 +428,11 @@ def main():
             sampled_df = annotated_df.sample(n=sample_size, random_state=args.seed).reset_index(drop=True)
             print(f"Sampled {sample_size} sequences (seed={args.seed}) for verification.")
 
+        # Detect sequence_alignment columns cleanly (tolerant of missing alignment_name / segment)
+        aln_table_cols = {row[1] for row in conn.execute("PRAGMA table_info(sequence_alignment)")}
+        aln_name_expr = "alignment_name" if "alignment_name" in aln_table_cols else "'' AS alignment_name"
+        seg_expr = "segment" if "segment" in aln_table_cols else "'' AS segment"
+
         # Query alignments for the sampled sequences in chunks
         sampled_accessions = sampled_df['primary_accession'].tolist()
         chunk_size = 500
@@ -442,17 +441,26 @@ def main():
             chunk = sampled_accessions[i : i + chunk_size]
             placeholders = ','.join('?' for _ in chunk)
             chunk_df = pd.read_sql_query(
-                f"SELECT primary_accession, alignment, alignment_name FROM sequence_alignment WHERE primary_accession IN ({placeholders})",
+                f"SELECT primary_accession, alignment, {aln_name_expr}, {seg_expr} FROM sequence_alignment WHERE primary_accession IN ({placeholders})",
                 conn,
                 params=chunk
             )
             alignments_df_list.append(chunk_df)
-        alignments_df = pd.concat(alignments_df_list, ignore_index=True)
-        alignments_map = {row['primary_accession']: row for _, row in alignments_df.iterrows()}
+        alignments_df = pd.concat(alignments_df_list, ignore_index=True) if alignments_df_list else pd.DataFrame(
+            columns=['primary_accession', 'alignment', 'alignment_name', 'segment']
+        )
+        alignments_map = {}
+        acc_to_rows = {}
+        for _, row in alignments_df.iterrows():
+            acc_key = row['primary_accession']
+            alignments_map.setdefault(acc_key, row)
+            acc_to_rows.setdefault(acc_key, []).append(row)
 
         # Preload reference alignments in chunks
         print("Preloading reference alignments...")
-        ref_accessions = set(alignments_df['alignment_name'].dropna().unique())
+        ref_accessions = set(
+            str(v).strip() for v in alignments_df['alignment_name'].dropna().unique() if str(v).strip()
+        )
         for cand in list(master_accessions) + list(catalog_reference_hints):
             for token in extract_accession_tokens(cand):
                 if token:
@@ -464,54 +472,64 @@ def main():
             chunk = ref_accessions_list[i : i + chunk_size]
             ref_placeholders = ','.join('?' for _ in chunk)
             chunk_df = pd.read_sql_query(
-                f"SELECT primary_accession, alignment_name, alignment FROM sequence_alignment WHERE primary_accession IN ({ref_placeholders})",
+                f"SELECT primary_accession, {aln_name_expr}, {seg_expr}, alignment FROM sequence_alignment WHERE primary_accession IN ({ref_placeholders})",
                 conn,
                 params=chunk
             )
             ref_alignments_df_list.append(chunk_df)
-        ref_alignments_df = pd.concat(ref_alignments_df_list, ignore_index=True)
+        ref_alignments_df = pd.concat(ref_alignments_df_list, ignore_index=True) if ref_alignments_df_list else pd.DataFrame(
+            columns=['primary_accession', 'alignment_name', 'segment', 'alignment']
+        )
         ref_alignments_map = {}
+        ref_by_seg = {}
         for _, row in ref_alignments_df.iterrows():
             p_acc = row['primary_accession']
             aln_name = row['alignment_name']
+            seg_norm = normalize_segment(row['segment'])
             aln = row['alignment']
             ref_alignments_map[(p_acc, aln_name)] = aln
             ref_alignments_map[p_acc] = aln
+            ref_by_seg.setdefault(seg_norm, {})[p_acc] = aln
 
         # -------------------------------------------------------------------
-        # Resolve master reference coord map and feature map ONCE, before the
-        # per-sequence loop.  Catalog positions (aa_position) are defined
-        # relative to the master reference, and since ALL padded alignments
-        # share the same column space, the master's column indices apply to
-        # every sequence regardless of which genotype reference it was
-        # locally aligned against.
+        # Resolve master reference coord map and feature map per segment.
+        # In unsegmented DBs there is one segment bucket ('', or '1'); in
+        # segmented DBs (e.g. influenza segments 1..8) each segment has its
+        # own alignment width, master reference, and protein feature map.
         # -------------------------------------------------------------------
-        master_ref_acc_for_coords = next(iter(master_accessions), None)
-        master_coord_map = None
-        master_feature_map = None
-        master_feature_acc = None
+        coord_search_order = list(master_accessions) + catalog_reference_hints
+        seg_masters = {}
+        segment_keys = sorted(ref_by_seg.keys()) if ref_by_seg else ['']
+        multi_segment = len(segment_keys) > 1
 
-        coord_search_order = (
-            list(master_accessions) + catalog_reference_hints
-        )
-        for _cand in coord_search_order:
-            for _token in extract_accession_tokens(_cand):
-                _ref_aln = ref_alignments_map.get(_token)
-                if _ref_aln is None:
-                    continue
-                _fmap_acc, _fmap = resolve_feature_map(
-                    _token, master_accessions, catalog_reference_hints, db_gff_maps
-                )
-                if _fmap is not None:
-                    master_ref_acc_for_coords = _token
-                    master_coord_map = build_alignment_coordinate_map(_ref_aln)
-                    master_feature_map = _fmap
-                    master_feature_acc = _fmap_acc
+        for seg_key in segment_keys:
+            seg_ref_map = ref_by_seg.get(seg_key, {})
+            resolved = None
+            for _cand in coord_search_order:
+                for _token in extract_accession_tokens(_cand):
+                    _ref_aln = seg_ref_map.get(_token)
+                    if _ref_aln is None:
+                        continue
+                    # For segmented DBs, require this reference's own feature map
+                    # rather than borrowing another segment's master feature map.
+                    if multi_segment:
+                        _fmap = db_gff_maps.get(_token)
+                        if _fmap and any(normalize_lookup_key(p) not in {'polyprotein', 'wholegenome'} for p in _fmap):
+                            resolved = (_token, build_alignment_coordinate_map(_ref_aln), _fmap, _token)
+                            break
+                    else:
+                        _fmap_acc, _fmap = resolve_feature_map(
+                            _token, master_accessions, catalog_reference_hints, db_gff_maps
+                        )
+                        if _fmap is not None:
+                            resolved = (_token, build_alignment_coordinate_map(_ref_aln), _fmap, _fmap_acc)
+                            break
+                if resolved is not None:
                     break
-            if master_coord_map is not None:
-                break
+            if resolved is not None:
+                seg_masters[seg_key] = resolved
 
-        if master_coord_map is None:
+        if not seg_masters:
             print(
                 "[ERROR] Could not resolve a master reference alignment for coordinate resolution. "
                 f"Candidates tried: {coord_search_order}",
@@ -519,7 +537,10 @@ def main():
             )
             sys.exit(2)
 
-        print(f"  [INFO] Coordinate reference: {master_ref_acc_for_coords} (used for all catalog position resolution)")
+        default_master_bundle = next(iter(seg_masters.values()))
+        for seg_key, (m_acc, _, _, _) in sorted(seg_masters.items()):
+            seg_label = f"segment {seg_key}" if multi_segment else "all sequences"
+            print(f"  [INFO] Coordinate reference ({seg_label}): {m_acc}")
 
         print("\n4. Verifying mutations against alignments...")
         stats = Counter()
@@ -535,48 +556,19 @@ def main():
 
             mutations = [m.strip() for m in muts_str.split(';') if m.strip()]
             
-            aln_row = alignments_map.get(acc)
-            if aln_row is None:
+            candidate_rows = acc_to_rows.get(acc)
+            if not candidate_rows:
                 print(f"  [ERROR] No alignment found for sequence {acc} in database.")
                 stats['sequence_errors'] += 1
                 continue
 
-            query_alignment = aln_row['alignment']
-            ref_acc = aln_row['alignment_name']
-
-            # Use per-sequence reference alignment only for identity scoring
-            ref_alignment, resolved_ref_acc = get_ref_alignment(ref_acc, master_accessions, ref_alignments_map)
-            if ref_alignment is None:
-                print(f"  [ERROR] Could not resolve reference alignment for group {ref_acc} for sequence {acc}.")
-                stats['reference_alignment_errors'] += 1
-                continue
-
-            # Use master coord_map and feature_map for all codon position resolution
-            ref_coord_map = master_coord_map
-            feature_map = master_feature_map
-            resolved_ref_feature_acc = master_feature_acc
-
-            # Calculate full nucleotide alignment identity directly from the padded alignment in the DB
-            total_nuc_overlap = 0
-            matching_nuc_overlap = 0
-            for q_base, r_base in zip(query_alignment, ref_alignment):
-                q_up = q_base.upper()
-                r_up = r_base.upper()
-                if q_up != '-' and q_up != 'N' and r_up != '-' and r_up != 'N':
-                    total_nuc_overlap += 1
-                    if q_up == r_up:
-                        matching_nuc_overlap += 1
-            
-            overlap_identity = matching_nuc_overlap / total_nuc_overlap if total_nuc_overlap > 0 else 0.0
-            is_alignment_valid = (overlap_identity >= args.min_identity)
-            if not is_alignment_valid:
-                print(f"  [WARNING] Sequence {acc} has low nucleotide identity to reference {resolved_ref_acc}: {overlap_identity:.1%} ({matching_nuc_overlap}/{total_nuc_overlap})")
-                stats['low_identity_alignments'] += 1
+            # Precompute identity validation per alignment row of this accession
+            identity_cache = {}
 
             for mut in mutations:
                 stats['mutations_checked'] += 1
                 
-                match = re.match(r'^([^:]+):(\d+)([A-Z_X])$', mut)
+                match = re.match(r'^([^:]+):(\d+)([A-Z*X-])$', mut)
                 if not match:
                     print(f"  [ERROR] Cannot parse mutation '{mut}' for sequence {acc}.")
                     stats['parse_errors'] += 1
@@ -586,15 +578,70 @@ def main():
                 aa_pos = int(match.group(2))
                 expected_aa = match.group(3)
 
+                # Choose the alignment row & segment master matching this mutation's protein
+                aln_row = candidate_rows[0]
+                if len(candidate_rows) > 1:
+                    for cand_row in candidate_rows:
+                        c_seg = normalize_segment(cand_row['segment'])
+                        c_bundle = seg_masters.get(c_seg)
+                        if c_bundle and protein_name in c_bundle[2]:
+                            aln_row = cand_row
+                            break
+
+                row_seg = normalize_segment(aln_row['segment'])
+                master_bundle = seg_masters.get(row_seg) if multi_segment else default_master_bundle
+                if master_bundle is None:
+                    print(f"  [ERROR] No coordinate reference resolved for segment '{row_seg}' of sequence {acc} (mutation: {mut}).")
+                    stats['reference_alignment_errors'] += 1
+                    continue
+                master_ref_acc_for_coords, master_coord_map, master_feature_map, master_feature_acc = master_bundle
+
+                query_alignment = aln_row['alignment']
+                ref_acc = str(aln_row['alignment_name'] or '').strip() or master_ref_acc_for_coords
+
+                row_cache_key = (row_seg, ref_acc)
+                if row_cache_key not in identity_cache:
+                    ref_alignment, resolved_ref_acc = get_ref_alignment(
+                        ref_acc, [master_ref_acc_for_coords] + list(master_accessions), ref_alignments_map
+                    )
+                    if ref_alignment is None:
+                        identity_cache[row_cache_key] = None
+                    else:
+                        total_nuc_overlap = 0
+                        matching_nuc_overlap = 0
+                        for q_base, r_base in zip(query_alignment, ref_alignment):
+                            q_up = q_base.upper()
+                            r_up = r_base.upper()
+                            if q_up != '-' and q_up != 'N' and r_up != '-' and r_up != 'N':
+                                total_nuc_overlap += 1
+                                if q_up == r_up:
+                                    matching_nuc_overlap += 1
+                        overlap_identity = matching_nuc_overlap / total_nuc_overlap if total_nuc_overlap > 0 else 0.0
+                        is_alignment_valid = (overlap_identity >= args.min_identity)
+                        if not is_alignment_valid:
+                            print(f"  [WARNING] Sequence {acc} has low nucleotide identity to reference {resolved_ref_acc}: {overlap_identity:.1%} ({matching_nuc_overlap}/{total_nuc_overlap})")
+                            stats['low_identity_alignments'] += 1
+                        identity_cache[row_cache_key] = (ref_alignment, resolved_ref_acc, overlap_identity, is_alignment_valid)
+
+                id_info = identity_cache[row_cache_key]
+                if id_info is None:
+                    print(f"  [ERROR] Could not resolve reference alignment for group {ref_acc} for sequence {acc}.")
+                    stats['reference_alignment_errors'] += 1
+                    continue
+                ref_alignment, resolved_ref_acc, overlap_identity, is_alignment_valid = id_info
+
+                feature_map = master_feature_map
+                resolved_ref_feature_acc = master_feature_acc
+
                 gene_entry = feature_map.get(protein_name)
                 if gene_entry is None:
                     print(f"  [ERROR] Protein '{protein_name}' not found in master feature map of {resolved_ref_feature_acc} (mutation: {mut}, sequence: {acc}).")
                     stats['protein_not_found_errors'] += 1
                     continue
 
-                # Always resolve column indices using master reference coordinates
+                # Always resolve column indices using master reference coordinates (including spliced exons)
                 alignment_indices = resolve_aligned_codon_indices(
-                    master_coord_map, gene_entry['cds_start'], aa_pos
+                    master_coord_map, gene_entry['cds_start'], aa_pos, exons=gene_entry.get('exons')
                 )
                 if alignment_indices is None:
                     print(f"  [ERROR] Cannot resolve alignment columns for protein '{protein_name}' pos {aa_pos} (mutation: {mut}, sequence: {acc}).")
@@ -615,12 +662,13 @@ def main():
                     'position': aa_pos,
                     'expected_aa': expected_aa,
                     'sequence_id': acc,
+                    'segment': row_seg,
                     'actual_aa': actual_aa if is_alignment_valid else f"Invalid (Low Identity {overlap_identity:.1%})",
                     'codon': codon,
                     'gene_entry': gene_entry,
                     'ref_coord_map': master_coord_map,
                     'resolved_ref_acc': master_ref_acc_for_coords,
-                    'ref_alignment': ref_alignments_map.get(master_ref_acc_for_coords, ref_alignment),
+                    'ref_alignment': ref_by_seg.get(row_seg, {}).get(master_ref_acc_for_coords, ref_alignments_map.get(master_ref_acc_for_coords, ref_alignment)),
                     'overlap_identity': overlap_identity,
                 })
 
@@ -652,7 +700,7 @@ def main():
 
             stats['sequences_checked'] += 1
 
-        # Select 4 random mutation signatures and print alignment snippets
+        # Select random mutation signatures and print alignment snippets
         if checked_mutations:
             import random
             rng = random.Random(args.seed)
@@ -660,12 +708,11 @@ def main():
             # Group by mutation signature and reference accession to keep coordinates aligned
             grouped_mutations = {}
             for item in checked_mutations:
-                sig_ref_key = (item['protein'], item['position'], item['expected_aa'], item['resolved_ref_acc'])
+                sig_ref_key = (item['protein'], item['position'], item['expected_aa'], item['resolved_ref_acc'], item['segment'])
                 if sig_ref_key not in grouped_mutations:
                     grouped_mutations[sig_ref_key] = []
                 grouped_mutations[sig_ref_key].append(item)
             
-            # Select 4 mutation signature-reference combinations randomly
             if args.hcv_test_ns3_36a:
                 selected_keys = list(grouped_mutations.keys())
             else:
@@ -676,19 +723,17 @@ def main():
             print("====================================================================================================")
             
             for sig_ref_key in selected_keys:
-                protein, position, expected_aa, resolved_ref_acc = sig_ref_key
+                protein, position, expected_aa, resolved_ref_acc, item_seg = sig_ref_key
                 items = grouped_mutations[sig_ref_key]
                 
-                # Use reference sequence and coordinate metadata from first matching item in this group
                 first_item = items[0]
                 gene_entry = first_item['gene_entry']
+                gene_exons = gene_entry.get('exons')
                 ref_coord_map = first_item['ref_coord_map']
                 ref_alignment = first_item['ref_alignment']
                 
-                # Identify mutated sequences in the sampled set for this specific reference
                 mutated_seqs = list(set(item['sequence_id'] for item in items))
                 
-                # Find wild-type / other sequences that share the exact same reference sequence
                 other_seqs = []
                 for s_acc in sampled_df['primary_accession']:
                     if s_acc in mutated_seqs:
@@ -696,19 +741,21 @@ def main():
                     s_aln_row = alignments_map.get(s_acc)
                     if s_aln_row is None:
                         continue
-                    _, s_resolved_ref_acc = get_ref_alignment(s_aln_row['alignment_name'], master_accessions, ref_alignments_map)
+                    if multi_segment and normalize_segment(s_aln_row['segment']) != item_seg:
+                        continue
+                    s_ref_name = str(s_aln_row['alignment_name'] or '').strip() or resolved_ref_acc
+                    _, s_resolved_ref_acc = get_ref_alignment(s_ref_name, [resolved_ref_acc] + list(master_accessions), ref_alignments_map)
                     if s_resolved_ref_acc == resolved_ref_acc:
                         other_seqs.append(s_acc)
                 
-                # Determine AA position window (20 AA window centered around mutation if possible)
-                max_aa = (gene_entry['cds_end'] - gene_entry['cds_start'] + 1) // 3
+                coding_len = feature_coding_length(gene_entry) or (gene_entry['cds_end'] - gene_entry['cds_start'] + 1)
+                max_aa = coding_len // 3
                 start_aa = max(1, position - 9)
                 end_aa = start_aa + 19
                 if end_aa > max_aa:
                     end_aa = max_aa
                     start_aa = max(1, end_aa - 19)
 
-                # Filter sequences by coverage — only show sequences that have real data at the target position
                 covered_mutated = [
                     s_acc for s_acc in mutated_seqs
                     if is_sequence_coverage_sufficient(alignments_map[s_acc]['alignment'], ref_coord_map, gene_entry, start_aa, end_aa, position)
@@ -718,26 +765,21 @@ def main():
                     if is_sequence_coverage_sufficient(alignments_map[s_acc]['alignment'], ref_coord_map, gene_entry, start_aa, end_aa, position)
                 ]
 
-                # Do NOT fall back to uncovered sequences — showing gap-only sequences creates
-                # misleading 0% identity warnings. Only display sequences with real coverage.
                 filtered_mutated = covered_mutated
                 filtered_others = covered_others
 
-                # Display up to 5 comparison query sequences (prioritizing mutated ones, and filling with others)
                 selected_mutated = filtered_mutated[:5]
                 num_needed = 5 - len(selected_mutated)
                 selected_others = rng.sample(filtered_others, min(num_needed, len(filtered_others))) if num_needed > 0 and filtered_others else []
                 display_seqs = selected_mutated + selected_others
 
-                # Skip this signature if no sequences have coverage at the target position
                 if not display_seqs:
                     print(f"\nMutation Signature: {protein}:{position}{expected_aa} [SKIPPED - no covered sequences in sample]")
                     continue
                 
-                # Extract reference alignment window
                 ref_window_data = []
                 for pos in range(start_aa, end_aa + 1):
-                    indices = resolve_aligned_codon_indices(ref_coord_map, gene_entry['cds_start'], pos)
+                    indices = resolve_aligned_codon_indices(ref_coord_map, gene_entry['cds_start'], pos, exons=gene_exons)
                     if indices is None:
                         ref_window_data.append(('X', '---'))
                     else:
@@ -748,14 +790,13 @@ def main():
                             aa = translate_codon(codon)
                             ref_window_data.append((aa, codon))
                 
-                # Extract query alignment windows
                 query_window_data = {}
                 for s_acc in display_seqs:
                     s_aln_row = alignments_map[s_acc]
                     s_alignment = s_aln_row['alignment']
                     s_window = []
                     for pos in range(start_aa, end_aa + 1):
-                        indices = resolve_aligned_codon_indices(ref_coord_map, gene_entry['cds_start'], pos)
+                        indices = resolve_aligned_codon_indices(ref_coord_map, gene_entry['cds_start'], pos, exons=gene_exons)
                         if indices is None:
                             s_window.append(('X', '---'))
                         else:
@@ -774,7 +815,6 @@ def main():
                 print(f"{'Sequence ID':<20} | {'Type':<9} | {'Win Identity':<15} | {'Full Nuc Identity':<18} | {'Amino Acid Window (20 AA)':<60}")
                 print("-" * 135)
                 
-                # Print Reference sequence representation
                 ref_aas = [item[0] for item in ref_window_data]
                 ref_aa_parts = []
                 for i, pos in enumerate(range(start_aa, end_aa + 1)):
@@ -786,11 +826,8 @@ def main():
                         ref_aa_parts.append(f" {aa} ")
                 print(f"{resolved_ref_acc:<20} | {'Reference':<9} | {'100.0% (Ref)':<15} | {'100.0% (Ref)':<18} | {''.join(ref_aa_parts)}")
                 
-                # Compute target-position index in the window list
                 target_window_idx = position - start_aa
 
-                # Print query sequences representations
-                # Verification check: all mutated sequences must have the expected AA at the target position
                 target_mismatches = []
                 target_gaps = []
                 for s_acc in display_seqs:
@@ -798,19 +835,16 @@ def main():
                     s_window = query_window_data[s_acc]
                     q_aas = [item[0] for item in s_window]
 
-                    # Calculate window identity (for informational display)
                     matching = sum(1 for r_aa, q_aa in zip(ref_aas, q_aas) if r_aa == q_aa and r_aa != 'X')
                     total_non_gap = sum(1 for r_aa in ref_aas if r_aa != 'X')
                     identity_percent = (matching / total_non_gap) * 100 if total_non_gap else 0.0
                     identity_str = f"{identity_percent:.1f}% ({matching}/{total_non_gap})"
 
-                    # Retrieve overlap identity from checked_mutations items
                     s_item = next((it for it in items if it['sequence_id'] == s_acc), None)
                     if s_item is not None:
                         full_identity_val = s_item['overlap_identity']
                         full_identity_str = f"{full_identity_val:.1%}"
                     else:
-                        # Fallback calculation if not in checked_mutations (e.g. wild-type/other sequence)
                         s_aln_row = alignments_map.get(s_acc)
                         if s_aln_row is not None:
                             s_alignment = s_aln_row['alignment']
@@ -821,10 +855,9 @@ def main():
                         else:
                             full_identity_str = "N/A"
 
-                    # Check target position specifically
                     target_aa = q_aas[target_window_idx] if 0 <= target_window_idx < len(q_aas) else 'X'
                     if s_type == 'Mutated':
-                        if target_aa in ('X', '-'):
+                        if target_aa == 'X' or (target_aa == '-' and expected_aa != '-'):
                             target_gaps.append(s_acc)
                         elif target_aa != expected_aa:
                             target_mismatches.append((s_acc, target_aa))

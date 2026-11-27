@@ -6,6 +6,8 @@
 // use condaMamba for mamba if installed (check with mamba --version)
 
 scripts_dir     = "${projectDir}/scripts"
+IS_TEST         = (params.test?.toString()?.trim()?.toLowerCase() in ['1', 'true'])
+params.test     = IS_TEST ? '1' : '0'
 
 def parsePositiveInt = { value, paramName ->
     try {
@@ -102,7 +104,8 @@ def scriptDefinedParams = [
     "mutation_publications", "mutation_clinical_trials",
     "gisaid_dir", "previous_db", "conda_path", "test_max_cluster_seqs", "max_threads", "iqtree_mem", "ref_set_aligned",
     "min_seq_length_ratio", "max_aln_gap_proportion", "tree_free", "base_tree_only",
-    "pivot_isolate_key", "pivot_required_segments", "segment_names", "root_outgroup",
+    "pivot_isolate_key", "pivot_required_segments", "segment_names",
+    "host_aliases", "strain_location_aliases", "root_outgroup",
     "mmseqs_two_step", "mmseqs_min_completeness", "iqtree_model",
     "fetch_batch_size", "build_ref_alignment", "ref_aln_min_insertion_support",
     // Divergent run mode (opt-in, default false). These must be listed or the
@@ -327,7 +330,7 @@ process VALIDATE_REF_LIST_DB {
 process TEST_INPUT_DB_VALIDATION {
     publishDir "${params.publish_dir}/tests"
     when:
-        params.test == "1" && params.update_db
+        params.update_db && params.update_db.toString().trim() && params.update_db.toString().trim() != 'null'
     input:
         path sqlite_db
     output:
@@ -367,7 +370,7 @@ process FETCH_GENBANK{
     shell:
     '''
     extra=""
-    if( [ "!{params.test}" -eq "1" ] )
+    if [ "!{params.test}" = "1" ]
     then
         extra="${extra} --test_run --ref_list !{ref_list}"
     fi
@@ -427,7 +430,7 @@ process GENBANK_PARSER{
         
         # Logic: If xml_dir is provided (mimicking old XML_source=XML), apply test flags if needed
         if [ -n "!{params.xml_dir}" ] && [ "!{params.xml_dir}" != "null" ]; then
-            if [ "!{params.test}" -eq "1" ]; then
+            if [ "!{params.test}" = "1" ]; then
                 extra="${extra} --test_run"
             fi
         fi
@@ -440,10 +443,14 @@ process GENBANK_PARSER{
         
             python !{scripts_dir}/GenBankParser.py -r !{ref_list_path} -d !{gen_bank_XML} -o . -b . -s !{params.is_segmented} ${extra} \
             --min_length_ratio !{params.min_seq_length_ratio}
+        EXTRA_HOST_ARG=""
+        if [ "!{params.host_aliases}" != "null" ] && [ -n "!{params.host_aliases}" ] && [ -f "!{params.host_aliases}" ]; then
+            EXTRA_HOST_ARG="--extra_host_mapping !{params.host_aliases}"
+        fi
         python !{scripts_dir}/ValidateMatrix.py -o . -a !{projectDir}/assets -b . \
         -g gB_matrix_raw.tsv \
         -m !{projectDir}/assets/host_mapping.tsv -n !{projectDir}/assets/country_mapping.tsv  \
-        -c !{projectDir}/assets/m49_country.csv
+        -c !{projectDir}/assets/m49_country.csv ${EXTRA_HOST_ARG}
         
     '''
 }
@@ -501,6 +508,31 @@ process MERGE_GISAID {
        '''
 }
 
+process VALIDATE_MERGED_HOSTS {
+    input:
+        path merged_matrix
+        path names_dmp
+        path nodes_dmp
+    output:
+        path "gB_matrix_merged_validated.tsv", emit: validated_matrix
+    shell:
+    '''
+        mkdir -p Taxa
+        cp -L !{names_dmp} Taxa/names.dmp
+        cp -L !{nodes_dmp} Taxa/nodes.dmp
+        cp -L !{merged_matrix} gB_matrix_work.tsv
+        EXTRA_HOST_ARG=""
+        if [ "!{params.host_aliases}" != "null" ] && [ -n "!{params.host_aliases}" ] && [ -f "!{params.host_aliases}" ]; then
+            EXTRA_HOST_ARG="--extra_host_mapping !{params.host_aliases}"
+        fi
+        python !{scripts_dir}/ValidateMatrix.py -o . -a !{projectDir}/assets -b . -t Taxa \
+            -g gB_matrix_work.tsv \
+            -m !{projectDir}/assets/host_mapping.tsv -n !{projectDir}/assets/country_mapping.tsv \
+            -c !{projectDir}/assets/m49_country.csv ${EXTRA_HOST_ARG} --fill_missing_only
+        mv gB_matrix_validated.tsv gB_matrix_merged_validated.tsv
+    '''
+}
+
 process CAT_FASTA {
     input:
         path fa1
@@ -516,14 +548,15 @@ process CAT_FASTA {
 process ADD_MISSING_DATA{
     input:
         path gen_bank_table
+        path fillup_table
     output:
-        path "*.tsv", emit: tsvs_out
+        path "gB_matrix_updated.tsv", emit: tsvs_out
     when:
-        params.extra_info_fill.toBoolean()
+        params.extra_info_fill.toString().toBoolean()
     shell:
     '''
-        python !{scripts_dir}/AddMissingData.py -b !{gen_bank_table} \
-         -t !{params.bulk_fillup_table}  -d . -f !{params.bulk_fillup_table}
+        python !{scripts_dir}/AddMissingData.py -g !{gen_bank_table} \
+         -d . -f !{fillup_table} -o gB_matrix_updated.tsv
     '''
 }
 
@@ -719,6 +752,7 @@ process COLLECT_FILTERED_SEQUENCES {
         --max_gap_proportion !{params.max_aln_gap_proportion} \
         --ref_list !{master_file_opt} \
         --precomputed_ref_dir "!{ref_set_aligned_dir}" \
+        --update_db "!{params.update_db}" \
         --max_filtered_fraction !{params.max_filtered_fraction} \
         --max_gap_filtered_fraction !{params.max_gap_filtered_fraction}
     '''
@@ -738,12 +772,13 @@ process CHECK_SEGMENT_RETENTION {
     # Guard: every segment must keep the sequences BLAST assigned to it. The HA/NA
     # subtype loss showed up here as 0.358 and 0.481 while every healthy segment was
     # above 0.998, and nothing failed the run. Now it does.
+    set -o pipefail
     python !{scripts_dir}/CheckSegmentRetention.py \
         -m !{merged_msa} \
         -t !{tophit_annotated} \
         -s "!{ref_seg_file}" \
         -f !{filtered_ids} \
-        --min_retention !{params.min_segment_retention} | tee segment_retention.txt
+        --min_retention !{params.min_segment_retention} 2>&1 | tee segment_retention.txt
     '''
 }
 
@@ -753,6 +788,7 @@ process DEDUP_STRAIN_ALIGNMENT {
         path meta_tsv
         path msa_files, stageAs: 'in_msa/*'
         path master_file_opt
+        val retention_gate
     output:
         path "dedup_strain_meta.tsv", emit: dedup_meta
         path "clean_msa/*_merged_MSA.fasta", emit: clean_msa
@@ -1090,8 +1126,6 @@ process VERY_FAST_TREE{
     publishDir "${params.publish_dir}"
     cpus { params.is_segmented == 'Y' ? SEGMENT_PARALLEL_THREADS : MAX_THREADS }
     maxForks HEAVY_TASK_MAX_FORKS
-    when: 
-        params.update_db == null
     input:
         path mmseq_cluster_dir
     output:
@@ -1205,14 +1239,21 @@ process HOST_TAXA_TABLE {
         path nodes_dmp
     output:
         path "HostTaxa/Host_taxa.tsv", emit: host_taxa
+        path "HostTaxa/Host_taxa_children.tsv", emit: host_taxa_children
+        path "HostTaxa/Host_taxa_lineage.tsv", emit: host_taxa_lineage
+        path "HostTaxa/Host_taxa_lineage_lookup.tsv", emit: host_taxa_lineage_lookup
     shell:
     '''
+    EXISTING_DB_ARG=""
+    if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ] && [ -f "!{params.update_db}" ]; then
+        EXISTING_DB_ARG="--existing_db !{params.update_db}"
+    fi
     python !{scripts_dir}/HostTaxaTable.py \
         -g !{gb_matrix} \
         -n !{names_dmp} \
         -s !{nodes_dmp} \
         -b . \
-        -o HostTaxa
+        -o HostTaxa ${EXISTING_DB_ARG}
     '''
 }
 
@@ -1224,6 +1265,9 @@ process CREATE_SQLITE_DB {
         path sequence_alignment
         path insertions
         path host_taxa
+        path host_taxa_children
+        path host_taxa_lineage
+        path host_taxa_lineage_lookup
         path software_info
         path fasta_sequences
         path iqtree_dirs, stageAs: 'iqtree_inputs/*'          // Can be multiple directories for segmented viruses
@@ -1347,7 +1391,7 @@ process CREATE_SQLITE_DB {
     UPDATE_ARGS=""
     DB_STATUS="new db"
     if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
-        UPDATE_ARGS="--update --update_db !{params.update_db} --batch_id nf_!{workflow.runName}"
+        UPDATE_ARGS="--update --update_db !{params.update_db}"
         DB_STATUS="last updated"
     fi
 
@@ -1356,13 +1400,19 @@ process CREATE_SQLITE_DB {
         GENE_ARG="-g !{params.gene_info}"
     fi
 
+    STRAIN_ALIAS_ARG=""
+    if [ "!{params.strain_location_aliases}" != "null" ] && [ -n "!{params.strain_location_aliases}" ] && [ -f "!{params.strain_location_aliases}" ]; then
+        STRAIN_ALIAS_ARG="--strain_location_aliases !{params.strain_location_aliases}"
+    fi
+
     set -o pipefail
 
     python !{scripts_dir}/CreateSqliteDB.py -m !{meta_data} \
     -rf !{features} -p !{sequence_alignment} \
     -i !{insertions} -ht !{host_taxa} \
+    -htc !{host_taxa_children} -htl !{host_taxa_lineage} -htll !{host_taxa_lineage_lookup} \
     -s !{software_info} -fa !{fasta_sequences} \
-    ${GENE_ARG} \
+    ${GENE_ARG} ${STRAIN_ALIAS_ARG} \
     -mc !{projectDir}/assets/m49_country.csv \
     -mir !{projectDir}/assets/m49_intermediate_region.csv \
     -mr !{projectDir}/assets/m49_region.csv \
@@ -1436,8 +1486,6 @@ process VERIFY_MUTATIONS {
 
 process TEST_DB_VALIDATION {
     publishDir "${params.publish_dir}/tests", mode: 'copy'
-    when:
-        params.test == "1"
     input:
         path sqlite_db
     output:
@@ -1706,14 +1754,15 @@ workflow {
          // Define column mapping path relative to project
          col_map = file("${projectDir}/generic/influenza/column_mapping.tsv")
          MERGE_GISAID(gb_matrix_ch, gb_seqs_ch, TIDY_GISAID.out.gisaid_meta, TIDY_GISAID.out.gisaid_nuc, col_map)
-         gb_matrix_ch = MERGE_GISAID.out.merged_matrix
+         VALIDATE_MERGED_HOSTS(MERGE_GISAID.out.merged_matrix, GENBANK_PARSER.out.taxa_names, GENBANK_PARSER.out.taxa_nodes)
+         gb_matrix_ch = VALIDATE_MERGED_HOSTS.out.validated_matrix
          
          CAT_FASTA(gb_seqs_ch, MERGE_GISAID.out.gisaid_dedup_nuc)
          gb_seqs_ch = CAT_FASTA.out.combined_fa
     }
 
-    if(params.extra_info_fill){
-        data=ADD_MISSING_DATA(gb_matrix_ch)
+    if(params.extra_info_fill.toString().toBoolean()){
+        data=ADD_MISSING_DATA(gb_matrix_ch, file(params.bulk_fillup_table)).tsvs_out
     }else{
         data=gb_matrix_ch
     }
@@ -1792,21 +1841,26 @@ workflow {
                   ref_backbone_ch,
                   COLLECT_FILTERED_SEQUENCES.out.filtered_ids)
 
-    // Guard: every segment must retain the sequences BLAST assigned to it. Segmented
+    // Guard: every segment must keep the sequences BLAST assigned to it. Segmented
     // builds only - the ratio is per-segment and meaningless for a single-segment virus.
     // Runs before DEDUP so a bad merge is caught before clustering and tree building.
+    def retention_gate_ch
     if( params.is_segmented == 'Y' ){
         CHECK_SEGMENT_RETENTION(PAD_ALIGNMENT.out.merged_msa.collect(),
                                 BLAST_ALIGNMENT.out.query_uniq_tophit_annotated,
                                 effective_ref_list,
                                 COLLECT_FILTERED_SEQUENCES.out.filtered_ids)
+        retention_gate_ch = CHECK_SEGMENT_RETENTION.out.retention_report
+    } else {
+        retention_gate_ch = Channel.value('UNSET')
     }
 
     // Strain-aware 0-mm sequence deduplication gate (handles intra-batch GenBank+GenBank,
     // GISAID+GISAID, cross-DB GenBank+GISAID, and update-mode in both arrival orders).
     DEDUP_STRAIN_ALIGNMENT(data,
                            PAD_ALIGNMENT.out.merged_msa.collect(),
-                           effective_ref_list)
+                           effective_ref_list,
+                           retention_gate_ch)
     data = DEDUP_STRAIN_ALIGNMENT.out.dedup_meta
     def clean_merged_msa_collected = DEDUP_STRAIN_ALIGNMENT.out.clean_msa.collect()
 
@@ -1956,7 +2010,10 @@ workflow {
                      CALC_ALIGNMENT_CORD.out.features, 
                      GENERATE_TABLES.out.sequence_alignment, 
                      GENERATE_TABLES.out.insertions, 
-                     HOST_TAXA_TABLE.out.host_taxa, 
+                     HOST_TAXA_TABLE.out.host_taxa,
+                     HOST_TAXA_TABLE.out.host_taxa_children,
+                     HOST_TAXA_TABLE.out.host_taxa_lineage,
+                     HOST_TAXA_TABLE.out.host_taxa_lineage_lookup,
                      SOFTWARE_VERSION.out.software_info,
                      // gb_seqs_ch, not GENBANK_PARSER.out.sequences_out: with --gisaid_dir
                      // CAT_FASTA rebinds this to GenBank+GISAID. Naming the process output

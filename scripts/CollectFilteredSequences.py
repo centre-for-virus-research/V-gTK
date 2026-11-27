@@ -6,6 +6,7 @@ Reads .errors.csv files from nextalign output and writes a summary of filtered s
 
 import os
 import csv
+import re
 import sys
 import argparse
 from pathlib import Path
@@ -204,30 +205,52 @@ def collect_high_gap_sequences(nextalign_dir: str, max_gap_proportion: float = 0
 def count_query_sequences(nextalign_dir: str) -> int:
     """Total query sequences presented to PadAlignment, for the G1 ratio.
 
-    Counts headers in every ``query_aln/<ref>/<ref>.aligned.fasta`` excluding the
-    reference's own row, which PadAlignment re-inserts from the backbone rather
-    than carrying through. Header-only pass, so it is IO-bound and cheap relative
-    to the gap filter, which already streams the same files in full.
+    Counts unique query accessions across every ``query_aln/<ref>/<ref>.aligned.fasta``
+    (excluding the reference's own row) unioned with failed query accessions in
+    ``query_aln/<ref>/*.errors.csv``. Counting failed ``errors.csv`` queries ensures
+    Guard G1 still fires when 100% of queries fail nextalign and produce an empty
+    aligned FASTA.
     """
-    total = 0
-    for query_ref_dir in Path(nextalign_dir).glob("query_aln/*"):
+    query_ids = set()
+    ref_ids = set()
+    nextalign_path = Path(nextalign_dir)
+
+    for query_ref_dir in nextalign_path.glob("query_aln/*"):
         if not query_ref_dir.is_dir():
             continue
         ref_id = _normalize_accession(query_ref_dir.name)
+        if ref_id:
+            ref_ids.add(ref_id)
         aln_file = query_ref_dir / f"{query_ref_dir.name}.aligned.fasta"
-        if not aln_file.exists():
-            continue
-        try:
-            with open(aln_file, "r", encoding="utf-8", errors="replace") as handle:
-                for line in handle:
-                    if line.startswith(">") and _normalize_accession(line[1:]) != ref_id:
-                        total += 1
-        except OSError as exc:
-            print(f"Warning: Could not count {aln_file}: {exc}")
-    return total
+        if aln_file.exists():
+            try:
+                with open(aln_file, "r", encoding="utf-8", errors="replace") as handle:
+                    for line in handle:
+                        if line.startswith(">"):
+                            seq_id = _normalize_accession(line[1:])
+                            if seq_id and seq_id != ref_id:
+                                query_ids.add(seq_id)
+            except OSError as exc:
+                print(f"Warning: Could not count {aln_file}: {exc}")
+
+        for errors_file in query_ref_dir.glob("*.errors.csv"):
+            try:
+                with open(errors_file, "r", encoding="utf-8", errors="replace") as handle:
+                    reader = csv.DictReader(handle)
+                    if not reader.fieldnames or "seqName" not in reader.fieldnames:
+                        continue
+                    for row in reader:
+                        seq_id = _normalize_accession(row.get("seqName", ""))
+                        err_val = (row.get("errors") or "").strip()
+                        if seq_id and seq_id != ref_id and err_val:
+                            query_ids.add(seq_id)
+            except OSError as exc:
+                print(f"Warning: Could not count errors in {errors_file}: {exc}")
+
+    return len(query_ids - ref_ids) if ref_ids else len(query_ids)
 
 
-def resolve_projectable_ids(nextalign_dir: str, precomputed_ref_dir=None, ref_list=None):
+def resolve_projectable_ids(nextalign_dir: str, precomputed_ref_dir=None, ref_list=None, update_db=None):
     """Return the reference accessions PadAlignment can project, or ``None``.
 
     ``None`` means "caller supplied nothing to resolve backbones with", and the
@@ -240,7 +263,8 @@ def resolve_projectable_ids(nextalign_dir: str, precomputed_ref_dir=None, ref_li
     """
     precomputed_ref_dir = projectability.normalise_optional_path(precomputed_ref_dir)
     ref_list = projectability.normalise_optional_path(ref_list)
-    if not precomputed_ref_dir and not ref_list:
+    update_db = projectability.normalise_optional_path(update_db)
+    if not precomputed_ref_dir and not ref_list and not update_db:
         return None
 
     master_segment_map = projectability.load_master_segment_map(ref_list)
@@ -248,11 +272,12 @@ def resolve_projectable_ids(nextalign_dir: str, precomputed_ref_dir=None, ref_li
         nextalign_dir=nextalign_dir,
         precomputed_ref_dir=precomputed_ref_dir,
         master_segment_map=master_segment_map,
+        update_db=update_db,
     )
     if not ids:
         raise ValueError(
             "Resolved zero projectable reference accessions from "
-            f"precomputed_ref_dir={precomputed_ref_dir!r} ref_list={ref_list!r}. "
+            f"precomputed_ref_dir={precomputed_ref_dir!r} ref_list={ref_list!r} update_db={update_db!r}. "
             "Refusing to mark every query unprojectable."
         )
     print(
@@ -263,7 +288,7 @@ def resolve_projectable_ids(nextalign_dir: str, precomputed_ref_dir=None, ref_li
 
 
 def collect_filtered_sequences(nextalign_dir: str, output_file: str, max_gap_proportion: float = 0.5,
-                               precomputed_ref_dir=None, ref_list=None) -> dict:
+                               precomputed_ref_dir=None, ref_list=None, update_db=None) -> dict:
     """
     Scan nextalign directory for .errors.csv files and collect filtered sequence IDs.
 
@@ -318,7 +343,7 @@ def collect_filtered_sequences(nextalign_dir: str, output_file: str, max_gap_pro
     # Add sequences that would be silently dropped later during PadAlignment
     # because their query reference is absent from every backbone that run opens.
     projectable_ids = resolve_projectable_ids(
-        nextalign_dir, precomputed_ref_dir=precomputed_ref_dir, ref_list=ref_list
+        nextalign_dir, precomputed_ref_dir=precomputed_ref_dir, ref_list=ref_list, update_db=update_db
     )
     unprojectable = collect_unprojectable_queries(nextalign_dir, projectable_ids=projectable_ids)
     for seq_name, info in unprojectable.items():
@@ -344,11 +369,16 @@ def is_gap_filtered(info: dict) -> bool:
     return info.get("error", "").startswith("high_gap_proportion:")
 
 
+def _sidecar_path(output_file: str, tsv_replacement: str, fallback_suffix: str) -> str:
+    """Replace only a trailing ``.tsv`` suffix so directory names are never altered."""
+    if output_file.endswith(".tsv"):
+        return output_file[:-4] + tsv_replacement
+    return output_file + fallback_suffix
+
+
 def write_summary(filtered: dict, output_file: str):
     """Write a compact summary for visibility in published outputs."""
-    summary_file = output_file.replace(".tsv", "_summary.txt")
-    if summary_file == output_file:
-        summary_file = output_file + ".summary.txt"
+    summary_file = _sidecar_path(output_file, "_summary.txt", ".summary.txt")
 
     unprojectable = {
         seq: info for seq, info in filtered.items()
@@ -386,9 +416,7 @@ def write_filtered_list(filtered: dict, output_file: str):
 
 def write_filtered_ids_only(filtered: dict, output_file: str):
     """Write just the filtered sequence IDs, one per line (for easy exclusion)."""
-    ids_file = output_file.replace(".tsv", "_ids.txt")
-    if ids_file == output_file:
-        ids_file = output_file + ".ids.txt"
+    ids_file = _sidecar_path(output_file, "_ids.txt", ".ids.txt")
     
     with open(ids_file, "w", encoding="utf-8") as f:
         for seq_name in sorted(filtered.keys()):
@@ -442,6 +470,14 @@ def main():
         )
     )
     parser.add_argument(
+        "--update_db",
+        default=None,
+        help=(
+            "Existing update SQLite DB. When --precomputed_ref_dir is unset in update mode, "
+            "projectable reference IDs are read from sequence_alignment joined with meta_data."
+        ),
+    )
+    parser.add_argument(
         "--max_filtered_fraction",
         type=float,
         default=1.0,
@@ -476,12 +512,22 @@ def main():
             max_gap_proportion=args.max_gap_proportion,
             precomputed_ref_dir=args.precomputed_ref_dir,
             ref_list=args.ref_list,
+            update_db=args.update_db,
         )
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
 
     print(f"Found {len(filtered)} filtered sequences")
+
+    # Persist artifacts before guard evaluation so aborted runs still leave
+    # inspectable filtered_sequences.{tsv,_ids.txt,_summary.txt} diagnostics.
+    write_filtered_list(filtered, output_path)
+    ids_file = write_filtered_ids_only(filtered, output_path)
+    summary_file = write_summary(filtered, output_path)
+    print(f"Wrote filtered sequences to: {output_path}")
+    print(f"Wrote filtered IDs to: {ids_file}")
+    print(f"Wrote filtered summary to: {summary_file}")
 
     # Guard G1. Losing a sixth of the database used to be a stderr line and exit 0.
     # Gap-filter drops are judged separately: they are deliberate quality filtering
@@ -505,20 +551,12 @@ def main():
                     f"ERROR: {label} filtered fraction {fraction:.4f} exceeds {flag} "
                     f"{limit}. {dropped} of {total_queries} query sequences would be dropped "
                     f"({len(filtered)} filtered in total). Refusing to continue; inspect "
-                    f"{output_path.replace('.tsv', '_summary.txt')}.",
+                    f"{summary_file}.",
                     file=sys.stderr,
                 )
                 sys.exit(3)
 
-
     if filtered:
-        write_filtered_list(filtered, output_path)
-        ids_file = write_filtered_ids_only(filtered, output_path)
-        summary_file = write_summary(filtered, output_path)
-        print(f"Wrote filtered sequences to: {output_path}")
-        print(f"Wrote filtered IDs to: {ids_file}")
-        print(f"Wrote filtered summary to: {summary_file}")
-
         unprojectable_count = sum(
             1
             for info in filtered.values()
@@ -531,7 +569,7 @@ def main():
                 "See filtered_sequences_summary.txt and filtered_sequences.tsv for details.\n".format(unprojectable_count),
                 file=sys.stderr,
             )
-        
+
         # Print summary
         print("\nFiltered sequences:")
         for seq_name, info in sorted(filtered.items()):
@@ -539,10 +577,6 @@ def main():
             error_short = info["error"][:80] + "..." if len(info["error"]) > 80 else info["error"]
             print(f"  {seq_name}: {error_short}")
     else:
-        # Write empty files so downstream processes have something to read
-        write_filtered_list({}, output_path)
-        write_filtered_ids_only({}, output_path)
-        write_summary({}, output_path)
         print("No filtered sequences found")
 
 

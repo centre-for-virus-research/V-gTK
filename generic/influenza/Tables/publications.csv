@@ -1,0 +1,219 @@
+evidence_id,id,data_source,title,authors_short,authors,year,journal,url
+doi:10.1371/journal.pbio.3002916,doi:10.1371/journal.pbio.3002916,publication,Dadonaite et al. PLoS Biol. 2024,Dadonaite et al.,Dadonaite et al.,2024,PLoS Biol,https://doi.org/10.1371/journal.pbio.3002916
+doi:10.1128/JVI.02238-08,doi:10.1128/JVI.02238-08,publication,Reed et al. J. Virol. 2009,Reed et al.,Reed et al.,2009,J. Virol,https://doi.org/10.1128/JVI.02238-08
+doi:10.1038/nature05264,doi:10.1038/nature05264,publication,Yamada et al. Nature 2006,Yamada et al.,Yamada et al.,2006,Nature,https://doi.org/10.1038/nature05264
+doi:10.1007/s00705-008-0255-y,doi:10.1007/s00705-008-0255-y,publication,Su et al. Arch. Virol. 2008,Su et al.,Su et al.,2008,Arch. Virol,https://doi.org/10.1007/s00705-008-0255-y
+doi:10.1126/science.1213362,doi:10.1126/science.1213362,publication,Herfst et al. Science 2012,Herfst et al.,Herfst et al.,2012,Science,https://doi.org/10.1126/science.1213362
+doi:10.1128/jvi.00778-18,doi:10.1128/jvi.00778-18,publication,Wessels et al. J. Virol. 2018,Wessels et al.,Wessels et al.,2018,J. Virol,https://doi.org/10.1128/jvi.00778-18
+doi:10.1128/JVI.00221-10,doi:10.1128/JVI.00221-10,publication,Wang et al. J. Virol. 2010,Wang et al.,Wang et al.,2010,J. Virol,https://doi.org/10.1128/JVI.00221-10
+doi:10.1371/journal.ppat.1002068,doi:10.1371/journal.ppat.1002068,publication,Watanabe et al. PLoS Pathog. 2011,Watanabe et al.,Watanabe et al.,2011,PLoS Pathog,https://doi.org/10.1371/journal.ppat.1002068
+doi:10.1128/JVI.00468-07,doi:10.1128/JVI.00468-07,publication,Auewarakul et al. J. Virol. 2007,Auewarakul et al.,Auewarakul et al.,2007,J. Virol,https://doi.org/10.1128/JVI.00468-07
+doi:10.1126/science.1135165,doi:10.1126/science.1135165,publication,Yang et al. Science 2007,Yang et al.,Yang et al.,2007,Science,https://doi.org/10.1126/science.1135165
+doi:10.1128/AAC.01773-10,doi:10.1128/AAC.01773-10,publication,Naughtin et al. Antimicrob. Agents Chemother. 2011,Naughtin et al.,Naughtin et al.,2011,Antimicrob. Agents Chemother,https://doi.org/10.1128/AAC.01773-10
+doi:10.1099/vir.0.2008/002469-0,doi:10.1099/vir.0.2008/002469-0,publication,Kongchanagul et al. J. Gen. Virol. 2008,Kongchanagul et al.,Kongchanagul et al.,2008,J. Gen. Virol,https://doi.org/10.1099/vir.0.2008/002469-0
+doi:10.1038/ncomms5791,doi:10.1038/ncomms5791,publication,Karlsson et al. Nat. Commun. 2014,Karlsson et al.,Karlsson et al.,2014,Nat. Commun,https://doi.org/10.1038/ncomms5791
+doi:10.1038/nature10831,doi:10.1038/nature10831,publication,Imai et al. Nature 2012,Imai et al.,Imai et al.,2012,Nature,https://doi.org/10.1038/nature10831
+doi:10.1371/journal.ppat.1000043,doi:10.1371/journal.ppat.1000043,publication,Ilyushina et al. PLoS Pathog. 2008,Ilyushina et al.,Ilyushina et al.,2008,PLoS Pathog,https://doi.org/10.1371/journal.ppat.1000043
+doi:10.1371/journal.ppat.1000709,doi:10.1371/journal.ppat.1000709,publication,Gao et al. PLoS Pathog. 2009,Gao et al.,Gao et al.,2009,PLoS Pathog,https://doi.org/10.1371/journal.ppat.1000709
+doi:10.1038/srep03058,doi:10.1038/srep03058,publication,Dortmans et al. Sci. Rep. 2013,Dortmans et al.,Dortmans et al.,2013,Sci. Rep,https://doi.org/10.1038/srep03058
+doi:10.1128/JVI.00235-13,doi:10.1128/JVI.00235-13,publication,Lu et al. J. Virol. 2013,Lu et al.,Lu et al.,2013,J. Virol,https://doi.org/10.1128/JVI.00235-13
+doi:10.1371/journal.ppat.1006390,doi:10.1371/journal.ppat.1006390,publication,de et al. PLoS Pathog. 2017,de et al.,de et al.,2017,PLoS Pathog,https://doi.org/10.1371/journal.ppat.1006390
+doi:10.15252/embj.201590960,doi:10.15252/embj.201590960,publication,Wang et al. EMBO J. 2015,Wang et al.,Wang et al.,2015,EMBO J,https://doi.org/10.15252/embj.201590960
+doi:10.1016/j.virol.2011.10.006,doi:10.1016/j.virol.2011.10.006,publication,Chen et al. Virology 2012,Chen et al.,Chen et al.,2012,Virology,https://doi.org/10.1016/j.virol.2011.10.006
+doi:10.1016/j.virol.2011.02.015,doi:10.1016/j.virol.2011.02.015,publication,Maines et al. Virology 2011,Maines et al.,Maines et al.,2011,Virology,https://doi.org/10.1016/j.virol.2011.02.015
+doi:10.1016/j.virs.2022.09.006,doi:10.1016/j.virs.2022.09.006,publication,Liu et al. Virol. Sin. 2023,Liu et al.,Liu et al.,2023,Virol. Sin,https://doi.org/10.1016/j.virs.2022.09.006
+doi:10.1073/pnas.0900877106,doi:10.1073/pnas.0900877106,publication,Sorrell et al. PNAS 2009,Sorrell et al.,Sorrell et al.,2009,PNAS,https://doi.org/10.1073/pnas.0900877106
+doi:10.1002/jmv.24257,doi:10.1002/jmv.24257,publication,Han et al. J. Med. Virol. 2015,Han et al.,Han et al.,2015,J. Med. Virol,https://doi.org/10.1002/jmv.24257
+doi:10.1016/j.micinf.2017.09.008,doi:10.1016/j.micinf.2017.09.008,publication,Qu et al. Microbes Infect. 2017,Qu et al.,Qu et al.,2017,Microbes Infect,https://doi.org/10.1016/j.micinf.2017.09.008
+doi:10.1128/JVI.01141-16,doi:10.1128/JVI.01141-16,publication,Teng et al. J. Virol. 2016,Teng et al.,Teng et al.,2016,J. Virol,https://doi.org/10.1128/JVI.01141-16
+doi:10.1128/JVI.02125-16,doi:10.1128/JVI.02125-16,publication,Yang et al. J. Virol. 2017,Yang et al.,Yang et al.,2017,J. Virol,https://doi.org/10.1128/JVI.02125-16
+doi:10.1128/JVI.02016-17,doi:10.1128/JVI.02016-17,publication,Peng et al. J. Virol. 2018,Peng et al.,Peng et al.,2018,J. Virol,https://doi.org/10.1128/JVI.02016-17
+doi:10.1080/22221751.2024.2302854,doi:10.1080/22221751.2024.2302854,publication,Jang et al. Emerg. Microbes Infect. 2024,Jang et al.,Jang et al.,2024,Emerg. Microbes Infect,https://doi.org/10.1080/22221751.2024.2302854
+doi:10.1128/JVI.00850-10,doi:10.1128/JVI.00850-10,publication,Mänz et al. J. Virol. 2010,Mänz et al.,Mänz et al.,2010,J. Virol,https://doi.org/10.1128/JVI.00850-10
+doi:10.15252/emmm.201707726,doi:10.15252/emmm.201707726,publication,de et al. EMBO Mol. Med. 2017,de et al.,de et al.,2017,EMBO Mol. Med,https://doi.org/10.15252/emmm.201707726
+doi:10.1128/jvi.00800-17,doi:10.1128/jvi.00800-17,publication,Wang et al. J. Virol. 2017,Wang et al.,Wang et al.,2017,J. Virol,https://doi.org/10.1128/jvi.00800-17
+doi:10.1016/j.celrep.2017.07.028,doi:10.1016/j.celrep.2017.07.028,publication,Song et al. Cell Rep. 2017,Song et al.,Song et al.,2017,Cell Rep,https://doi.org/10.1016/j.celrep.2017.07.028
+doi:10.1038/srep15928,doi:10.1038/srep15928,publication,Sang et al. Sci. Rep. 2015,Sang et al.,Sang et al.,2015,Sci. Rep,https://doi.org/10.1038/srep15928
+doi:10.3389/fmicb.2017.01763,doi:10.3389/fmicb.2017.01763,publication,Zhang et al. Front. Microbiol. 2017,Zhang et al.,Zhang et al.,2017,Front. Microbiol,https://doi.org/10.3389/fmicb.2017.01763
+doi:10.1007/s00705-019-04283-0,doi:10.1007/s00705-019-04283-0,publication,Yu et al. Arch. Virol. 2019,Yu et al.,Yu et al.,2019,Arch. Virol,https://doi.org/10.1007/s00705-019-04283-0
+doi:10.1371/journal.pone.0018577,doi:10.1371/journal.pone.0018577,publication,Krenn et al. PLoS One 2011,Krenn et al.,Krenn et al.,2011,PLoS One,https://doi.org/10.1371/journal.pone.0018577
+doi:10.1128/JVI.06009-11,doi:10.1128/JVI.06009-11,publication,Murakami et al. J. Virol. 2012,Murakami et al.,Murakami et al.,2012,J. Virol,https://doi.org/10.1128/JVI.06009-11
+doi:10.1016/j.virol.2019.07.012,doi:10.1016/j.virol.2019.07.012,publication,Sun et al. Virology 2019,Sun et al.,Sun et al.,2019,Virology,https://doi.org/10.1016/j.virol.2019.07.012
+doi:10.1371/journal.ppat.1003831,doi:10.1371/journal.ppat.1003831,publication,Cotter et al. PLoS Pathog. 2014,Cotter et al.,Cotter et al.,2014,PLoS Pathog,https://doi.org/10.1371/journal.ppat.1003831
+doi:10.1016/j.virusres.2009.04.008,doi:10.1016/j.virusres.2009.04.008,publication,Li et al. Virus Res. 2009,Li et al.,Li et al.,2009,Virus Res,https://doi.org/10.1016/j.virusres.2009.04.008
+pmid:11252668,pmid:11252668,pubmed,Govorkova et al. Acta Virol. 2000,Govorkova et al.,Govorkova et al.,2000,Acta Virol,https://pubmed.ncbi.nlm.nih.gov/11252668/
+doi:10.1007/s12275-015-5329-4,doi:10.1007/s12275-015-5329-4,publication,Park et al. J. Microbiol. 2015,Park et al.,Park et al.,2015,J. Microbiol,https://doi.org/10.1007/s12275-015-5329-4
+doi:10.1007/BF01309872,doi:10.1007/BF01309872,publication,Ward et al. Arch. Virol. 1995,Ward et al.,Ward et al.,1995,Arch. Virol,https://doi.org/10.1007/BF01309872
+doi:10.1371/journal.pone.0137989,doi:10.1371/journal.pone.0137989,publication,Nao et al. PLoS One 2015,Nao et al.,Nao et al.,2015,PLoS One,https://doi.org/10.1371/journal.pone.0137989
+doi:10.1186/1743-422X-8-42,doi:10.1186/1743-422X-8-42,publication,Zhang et al. Virol. J. 2011,Zhang et al.,Zhang et al.,2011,Virol. J,https://doi.org/10.1186/1743-422X-8-42
+doi:10.1371/journal.ppat.1011472,doi:10.1371/journal.ppat.1011472,publication,Lin et al. PLoS Pathog. 2023,Lin et al.,Lin et al.,2023,PLoS Pathog,https://doi.org/10.1371/journal.ppat.1011472
+doi:10.1128/jvi.02765-13,doi:10.1128/jvi.02765-13,publication,Sutton et al. J. Virol. 2014,Sutton et al.,Sutton et al.,2014,J. Virol,https://doi.org/10.1128/jvi.02765-13
+doi:10.1186/1471-2105-9-S1-S18,doi:10.1186/1471-2105-9-S1-S18,publication,Miotto et al. BMC Bioinformatics 2008,Miotto et al.,Miotto et al.,2008,BMC Bioinformatics,https://doi.org/10.1186/1471-2105-9-S1-S18
+doi:10.1016/j.vetmic.2016.02.027,doi:10.1016/j.vetmic.2016.02.027,publication,Zhao et al. Vet. Microbiol. 2016,Zhao et al.,Zhao et al.,2016,Vet. Microbiol,https://doi.org/10.1016/j.vetmic.2016.02.027
+doi:10.1128/JVI.01373-09,doi:10.1128/JVI.01373-09,publication,Song et al. J. Virol. 2009,Song et al.,Song et al.,2009,J. Virol,https://doi.org/10.1128/JVI.01373-09
+doi:10.1016/0168-1702(96)01329-9,doi:10.1016/0168-1702(96)01329-9,publication,Smeenk et al. Virus Res. 1996,Smeenk et al.,Smeenk et al.,1996,Virus Res,https://doi.org/10.1016/0168-1702(96)01329-9
+doi:10.1016/j.meegid.2011.07.025,doi:10.1016/j.meegid.2011.07.025,publication,Zhang et al. Infect. Genet. Evol. 2011,Zhang et al.,Zhang et al.,2011,Infect. Genet. Evol,https://doi.org/10.1016/j.meegid.2011.07.025
+doi:10.1371/journal.pone.0130208,doi:10.1371/journal.pone.0130208,publication,Ainai et al. PLoS One 2015,Ainai et al.,Ainai et al.,2015,PLoS One,https://doi.org/10.1371/journal.pone.0130208
+doi:10.1007/s00705-014-2062-y,doi:10.1007/s00705-014-2062-y,publication,Liu et al. Arch. Virol. 2014,Liu et al.,Liu et al.,2014,Arch. Virol,https://doi.org/10.1007/s00705-014-2062-y
+doi:10.1073/pnas.111165798,doi:10.1073/pnas.111165798,publication,Brown et al. PNAS 2001,Brown et al.,Brown et al.,2001,PNAS,https://doi.org/10.1073/pnas.111165798
+doi:10.1016/j.virusres.2019.06.002,doi:10.1016/j.virusres.2019.06.002,publication,Yu et al. Virus Res. 2019,Yu et al.,Yu et al.,2019,Virus Res,https://doi.org/10.1016/j.virusres.2019.06.002
+doi:10.1186/s12985-019-1227-4,doi:10.1186/s12985-019-1227-4,publication,Hu et al. Virol. J. 2019,Hu et al.,Hu et al.,2019,Virol. J,https://doi.org/10.1186/s12985-019-1227-4
+doi:10.1371/journal.pone.0040752,doi:10.1371/journal.pone.0040752,publication,Wang et al. PLoS One 2012,Wang et al.,Wang et al.,2012,PLoS One,https://doi.org/10.1371/journal.pone.0040752
+doi:10.1016/j.virol.2008.11.044,doi:10.1016/j.virol.2008.11.044,publication,Fan et al. Virology 2009,Fan et al.,Fan et al.,2009,Virology,https://doi.org/10.1016/j.virol.2008.11.044
+doi:10.1016/j.vetmic.2017.05.020,doi:10.1016/j.vetmic.2017.05.020,publication,Yu et al. Vet. Microbiol. 2017,Yu et al.,Yu et al.,2017,Vet. Microbiol,https://doi.org/10.1016/j.vetmic.2017.05.020
+doi:10.1371/journal.pone.0021740,doi:10.1371/journal.pone.0021740,publication,Ping et al. PLoS One 2011,Ping et al.,Ping et al.,2011,PLoS One,https://doi.org/10.1371/journal.pone.0021740
+doi:10.1007/s00705-012-1496-3,doi:10.1007/s00705-012-1496-3,publication,Yao et al. Arch. Virol. 2013,Yao et al.,Yao et al.,2013,Arch. Virol,https://doi.org/10.1007/s00705-012-1496-3
+doi:10.1371/journal.pone.0175267,doi:10.1371/journal.pone.0175267,publication,Mancera et al. PLoS One 2017,Mancera et al.,Mancera et al.,2017,PLoS One,https://doi.org/10.1371/journal.pone.0175267
+doi:10.3390/v10050272,doi:10.3390/v10050272,publication,Slaine et al. Viruses 2018,Slaine et al.,Slaine et al.,2018,Viruses,https://doi.org/10.3390/v10050272
+doi:10.1038/s41467-021-24724-2,doi:10.1038/s41467-021-24724-2,publication,Liu et al. Nat. Commun. 2021,Liu et al.,Liu et al.,2021,Nat. Commun,https://doi.org/10.1038/s41467-021-24724-2
+doi:10.1016/j.virusres.2017.05.021,doi:10.1016/j.virusres.2017.05.021,publication,Ninpan et al. Virus Res. 2017,Ninpan et al.,Ninpan et al.,2017,Virus Res,https://doi.org/10.1016/j.virusres.2017.05.021
+doi:10.1016/j.vetmic.2009.03.010,doi:10.1016/j.vetmic.2009.03.010,publication,Wu et al. Vet. Microbiol. 2009,Wu et al.,Wu et al.,2009,Vet. Microbiol,https://doi.org/10.1016/j.vetmic.2009.03.010
+doi:10.1093/infdis/jir716,doi:10.1093/infdis/jir716,publication,Seyer et al. J. Infect. Dis. 2012,Seyer et al.,Seyer et al.,2012,J. Infect. Dis,https://doi.org/10.1093/infdis/jir716
+doi:10.1016/0042-6822(85)90157-6,doi:10.1016/0042-6822(85)90157-6,publication,Air et al. Virology 1985,Air et al.,Air et al.,1985,Virology,https://doi.org/10.1016/0042-6822(85)90157-6
+doi:10.1016/j.virol.2014.11.031,doi:10.1016/j.virol.2014.11.031,publication,Yu et al. Virology 2015,Yu et al.,Yu et al.,2015,Virology,https://doi.org/10.1016/j.virol.2014.11.031
+doi:10.1371/journal.ppat.1007860,doi:10.1371/journal.ppat.1007860,publication,Du et al. PLoS Pathog. 2019,Du et al.,Du et al.,2019,PLoS Pathog,https://doi.org/10.1371/journal.ppat.1007860
+doi:10.1007/s00705-009-0393-x,doi:10.1007/s00705-009-0393-x,publication,Uhlendorff et al. Arch. Virol. 2009,Uhlendorff et al.,Uhlendorff et al.,2009,Arch. Virol,https://doi.org/10.1007/s00705-009-0393-x
+doi:10.1128/jvi.64.12.5797-5803.1990,doi:10.1128/jvi.64.12.5797-5803.1990,publication,Air et al. J. Virol. 1990,Air et al.,Air et al.,1990,J. Virol,https://doi.org/10.1128/jvi.64.12.5797-5803.1990
+doi:10.1080/22221751.2019.1708214,doi:10.1080/22221751.2019.1708214,publication,Xiong et al. Emerg. Microbes Infect. 2020,Xiong et al.,Xiong et al.,2020,Emerg. Microbes Infect,https://doi.org/10.1080/22221751.2019.1708214
+doi:10.1128/jvi.61.9.2910-2916.1987,doi:10.1128/jvi.61.9.2910-2916.1987,publication,Webster et al. J. Virol. 1987,Webster et al.,Webster et al.,1987,J. Virol,https://doi.org/10.1128/jvi.61.9.2910-2916.1987
+doi:10.2807/1560-7917.ES.2023.28.7.2300085,doi:10.2807/1560-7917.ES.2023.28.7.2300085,publication,de et al. Euro Surveill. 2023,de et al.,de et al.,2023,Euro Surveill,https://doi.org/10.2807/1560-7917.ES.2023.28.7.2300085
+doi:10.1128/JVI.01243-18,doi:10.1128/JVI.01243-18,publication,Du et al. J. Virol. 2018,Du et al.,Du et al.,2018,J. Virol,https://doi.org/10.1128/JVI.01243-18
+doi:10.1111/febs.15668,doi:10.1111/febs.15668,publication,Du et al. FEBS J. 2021,Du et al.,Du et al.,2021,FEBS J,https://doi.org/10.1111/febs.15668
+doi:10.1016/j.vetmic.2015.02.016,doi:10.1016/j.vetmic.2015.02.016,publication,Chen et al. Vet. Microbiol. 2015,Chen et al.,Chen et al.,2015,Vet. Microbiol,https://doi.org/10.1016/j.vetmic.2015.02.016
+doi:10.1128/JVI.00049-17,doi:10.1128/JVI.00049-17,publication,Dai et al. J. Virol. 2017,Dai et al.,Dai et al.,2017,J. Virol,https://doi.org/10.1128/JVI.00049-17
+doi:10.1128/mbio.00287-21,doi:10.1128/mbio.00287-21,publication,Dai et al. MBio 2021,Dai et al.,Dai et al.,2021,MBio,https://doi.org/10.1128/mbio.00287-21
+doi:10.1128/JVI.01093-14,doi:10.1128/JVI.01093-14,publication,Danzy et al. J. Virol. 2014,Danzy et al.,Danzy et al.,2014,J. Virol,https://doi.org/10.1128/JVI.01093-14
+doi:10.1371/journal.ppat.1003279,doi:10.1371/journal.ppat.1003279,publication,Mänz et al. PLoS Pathog. 2013,Mänz et al.,Mänz et al.,2013,PLoS Pathog,https://doi.org/10.1371/journal.ppat.1003279
+doi:10.1186/s12985-015-0304-6,doi:10.1186/s12985-015-0304-6,publication,Zhu et al. Virol. J. 2015,Zhu et al.,Zhu et al.,2015,Virol. J,https://doi.org/10.1186/s12985-015-0304-6
+doi:10.1038/s41586-023-06261-8,doi:10.1038/s41586-023-06261-8,publication,Pinto et al. Nature 2023,Pinto et al.,Pinto et al.,2023,Nature,https://doi.org/10.1038/s41586-023-06261-8
+doi:10.1128/jvi.00997-18,doi:10.1128/jvi.00997-18,publication,Dornfeld et al. J. Virol. 2019,Dornfeld et al.,Dornfeld et al.,2019,J. Virol,https://doi.org/10.1128/jvi.00997-18
+doi:10.1128/JVI.00665-15,doi:10.1128/JVI.00665-15,publication,Otte et al. J. Virol. 2015,Otte et al.,Otte et al.,2015,J. Virol,https://doi.org/10.1128/JVI.00665-15
+doi:10.1128/JVI.00159-10,doi:10.1128/JVI.00159-10,publication,Ilyushina et al. J. Virol. 2010,Ilyushina et al.,Ilyushina et al.,2010,J. Virol,https://doi.org/10.1128/JVI.00159-10
+doi:10.1128/JVI.01648-10,doi:10.1128/JVI.01648-10,publication,Tada et al. J. Virol. 2011,Tada et al.,Tada et al.,2011,J. Virol,https://doi.org/10.1128/JVI.01648-10
+doi:10.1073/pnas.0507415102,doi:10.1073/pnas.0507415102,publication,Gabriel et al. PNAS 2005,Gabriel et al.,Gabriel et al.,2005,PNAS,https://doi.org/10.1073/pnas.0507415102
+doi:10.1016/j.vetmic.2014.06.018,doi:10.1016/j.vetmic.2014.06.018,publication,Li et al. Vet. Microbiol. 2014,Li et al.,Li et al.,2014,Vet. Microbiol,https://doi.org/10.1016/j.vetmic.2014.06.018
+doi:10.1038/s41564-021-00976-y,doi:10.1038/s41564-021-00976-y,publication,Su et al. Nat. Microbiol. 2021,Su et al.,Su et al.,2021,Nat. Microbiol,https://doi.org/10.1038/s41564-021-00976-y
+doi:10.1016/j.meegid.2016.01.022,doi:10.1016/j.meegid.2016.01.022,publication,Prokopyeva et al. Infect. Genet. Evol. 2016,Prokopyeva et al.,Prokopyeva et al.,2016,Infect. Genet. Evol,https://doi.org/10.1016/j.meegid.2016.01.022
+doi:10.1099/vir.0.018143-0,doi:10.1099/vir.0.018143-0,publication,Kim et al. J. Gen. Virol. 2010,Kim et al.,Kim et al.,2010,J. Gen. Virol,https://doi.org/10.1099/vir.0.018143-0
+doi:10.1080/22221751.2019.1635873,doi:10.1080/22221751.2019.1635873,publication,Zhu et al. Emerg. Microbes Infect. 2019,Zhu et al.,Zhu et al.,2019,Emerg. Microbes Infect,https://doi.org/10.1080/22221751.2019.1635873
+doi:10.1038/s41598-017-10749-5,doi:10.1038/s41598-017-10749-5,publication,Huang et al. Sci. Rep. 2017,Huang et al.,Huang et al.,2017,Sci. Rep,https://doi.org/10.1038/s41598-017-10749-5
+doi:10.1016/j.virusres.2011.03.022,doi:10.1016/j.virusres.2011.03.022,publication,Sakabe et al. Virus Res. 2011,Sakabe et al.,Sakabe et al.,2011,Virus Res,https://doi.org/10.1016/j.virusres.2011.03.022
+doi:10.3389/fmicb.2017.01308,doi:10.3389/fmicb.2017.01308,publication,Chen et al. Front. Microbiol. 2017,Chen et al.,Chen et al.,2017,Front. Microbiol,https://doi.org/10.3389/fmicb.2017.01308
+doi:10.3390/v11121114,doi:10.3390/v11121114,publication,Fatima et al. Viruses 2019,Fatima et al.,Fatima et al.,2019,Viruses,https://doi.org/10.3390/v11121114
+doi:10.1371/journal.ppat.1006288,doi:10.1371/journal.ppat.1006288,publication,Ashenberg et al. PLoS Pathog. 2017,Ashenberg et al.,Ashenberg et al.,2017,PLoS Pathog,https://doi.org/10.1371/journal.ppat.1006288
+doi:10.1371/journal.ppat.1011214,doi:10.1371/journal.ppat.1011214,publication,Siegers et al. PLoS Pathog. 2023,Siegers et al.,Siegers et al.,2023,PLoS Pathog,https://doi.org/10.1371/journal.ppat.1011214
+doi:10.1371/journal.pone.0031839,doi:10.1371/journal.pone.0031839,publication,Forbes et al. PLoS One 2012,Forbes et al.,Forbes et al.,2012,PLoS One,https://doi.org/10.1371/journal.pone.0031839
+doi:10.1099/jgv.0.000542,doi:10.1099/jgv.0.000542,publication,Kanrai et al. J. Gen. Virol. 2016,Kanrai et al.,Kanrai et al.,2016,J. Gen. Virol,https://doi.org/10.1099/jgv.0.000542
+doi:10.1128/JVI.01698-07,doi:10.1128/JVI.01698-07,publication,Jiao et al. J. Virol. 2008,Jiao et al.,Jiao et al.,2008,J. Virol,https://doi.org/10.1128/JVI.01698-07
+doi:10.1016/j.virol.2018.04.004,doi:10.1016/j.virol.2018.04.004,publication,Li et al. Virology 2018,Li et al.,Li et al.,2018,Virology,https://doi.org/10.1016/j.virol.2018.04.004
+doi:10.1128/JVI.01039-16,doi:10.1128/JVI.01039-16,publication,DeDiego et al. J. Virol. 2016,DeDiego et al.,DeDiego et al.,2016,J. Virol,https://doi.org/10.1128/JVI.01039-16
+doi:10.1038/nm757,doi:10.1038/nm757,publication,Seo et al. Nat. Med. 2002,Seo et al.,Seo et al.,2002,Nat. Med,https://doi.org/10.1038/nm757
+doi:10.1128/JVI.00417-11,doi:10.1128/JVI.00417-11,publication,Spesock et al. J. Virol. 2011,Spesock et al.,Spesock et al.,2011,J. Virol,https://doi.org/10.1128/JVI.00417-11
+doi:10.1186/1743-422X-8-13,doi:10.1186/1743-422X-8-13,publication,Dankar et al. Virol. J. 2011,Dankar et al.,Dankar et al.,2011,Virol. J,https://doi.org/10.1186/1743-422X-8-13
+doi:10.1128/JVI.01567-14,doi:10.1128/JVI.01567-14,publication,Ayllon et al. J. Virol. 2014,Ayllon et al.,Ayllon et al.,2014,J. Virol,https://doi.org/10.1128/JVI.01567-14
+doi:10.1128/jvi.00081-10,doi:10.1128/jvi.00081-10,publication,Hale et al. J. Virol. 2010,Hale et al.,Hale et al.,2010,J. Virol,https://doi.org/10.1128/jvi.00081-10
+doi:10.1016/j.micinf.2008.09.013,doi:10.1016/j.micinf.2008.09.013,publication,Narasaraju et al. Microbes Infect. 2009,Narasaraju et al.,Narasaraju et al.,2009,Microbes Infect,https://doi.org/10.1016/j.micinf.2008.09.013
+doi:10.1038/emi.2012.38,doi:10.1038/emi.2012.38,publication,Selman et al. Emerg. Microbes Infect. 2012,Selman et al.,Selman et al.,2012,Emerg. Microbes Infect,https://doi.org/10.1038/emi.2012.38
+doi:10.1038/ncomms14751,doi:10.1038/ncomms14751,publication,Huang et al. Nat. Commun. 2017,Huang et al.,Huang et al.,2017,Nat. Commun,https://doi.org/10.1038/ncomms14751
+doi:10.1128/jvi.01875-17,doi:10.1128/jvi.01875-17,publication,Chauché et al. J. Virol. 2018,Chauché et al.,Chauché et al.,2018,J. Virol,https://doi.org/10.1128/jvi.01875-17
+doi:10.1371/journal.ppat.1001106,doi:10.1371/journal.ppat.1001106,publication,Imai et al. PLoS Pathog. 2010,Imai et al.,Imai et al.,2010,PLoS Pathog,https://doi.org/10.1371/journal.ppat.1001106
+doi:10.1128/jvi.01679-14,doi:10.1128/jvi.01679-14,publication,Wei et al. J. Virol. 2014,Wei et al.,Wei et al.,2014,J. Virol,https://doi.org/10.1128/jvi.01679-14
+doi:10.1073/pnas.1713974114,doi:10.1073/pnas.1713974114,publication,Zanin et al. PNAS 2017,Zanin et al.,Zanin et al.,2017,PNAS,https://doi.org/10.1073/pnas.1713974114
+doi:10.1128/jvi.00610-10,doi:10.1128/jvi.00610-10,publication,Zielecki et al. J. Virol. 2010,Zielecki et al.,Zielecki et al.,2010,J. Virol,https://doi.org/10.1128/jvi.00610-10
+doi:10.1186/s12985-016-0612-5,doi:10.1186/s12985-016-0612-5,publication,Wu et al. Virol. J. 2016,Wu et al.,Wu et al.,2016,Virol. J,https://doi.org/10.1186/s12985-016-0612-5
+doi:10.1038/ncomms1804,doi:10.1038/ncomms1804,publication,Mänz et al. Nat. Commun. 2012,Mänz et al.,Mänz et al.,2012,Nat. Commun,https://doi.org/10.1038/ncomms1804
+doi:10.1126/sciadv.adg5175,doi:10.1126/sciadv.adg5175,publication,Sun et al. Sci. Adv. 2023,Sun et al.,Sun et al.,2023,Sci. Adv,https://doi.org/10.1126/sciadv.adg5175
+doi:10.1371/journal.pone.0033383,doi:10.1371/journal.pone.0033383,publication,Zhu et al. PLoS One 2012,Zhu et al.,Zhu et al.,2012,PLoS One,https://doi.org/10.1371/journal.pone.0033383
+doi:10.1128/JVI.01736-14,doi:10.1128/JVI.01736-14,publication,Tan et al. J. Virol. 2014,Tan et al.,Tan et al.,2014,J. Virol,https://doi.org/10.1128/JVI.01736-14
+doi:10.1128/JVI.03532-14,doi:10.1128/JVI.03532-14,publication,Yamaji et al. J. Virol. 2015,Yamaji et al.,Yamaji et al.,2015,J. Virol,https://doi.org/10.1128/JVI.03532-14
+doi:10.1186/s13567-023-01221-6,doi:10.1186/s13567-023-01221-6,publication,Guo et al. Vet. Res. 2023,Guo et al.,Guo et al.,2023,Vet. Res,https://doi.org/10.1186/s13567-023-01221-6
+doi:10.1099/vir.0.82411-0,doi:10.1099/vir.0.82411-0,publication,Shinya et al. J. Gen. Virol. 2007,Shinya et al.,Shinya et al.,2007,J. Gen. Virol,https://doi.org/10.1099/vir.0.82411-0
+doi:10.1128/JVI.00522-11,doi:10.1128/JVI.00522-11,publication,Bussey et al. J. Virol. 2011,Bussey et al.,Bussey et al.,2011,J. Virol,https://doi.org/10.1128/JVI.00522-11
+doi:10.1007/s11262-016-1311-4,doi:10.1007/s11262-016-1311-4,publication,Liu et al. Virus Genes 2016,Liu et al.,Liu et al.,2016,Virus Genes,https://doi.org/10.1007/s11262-016-1311-4
+doi:10.1038/srep40667,doi:10.1038/srep40667,publication,Choi et al. Sci. Rep. 2017,Choi et al.,Choi et al.,2017,Sci. Rep,https://doi.org/10.1038/srep40667
+doi:10.1080/22221751.2019.1575700,doi:10.1080/22221751.2019.1575700,publication,Welkers et al. Emerg. Microbes Infect. 2019,Welkers et al.,Welkers et al.,2019,Emerg. Microbes Infect,https://doi.org/10.1080/22221751.2019.1575700
+doi:10.1007/s00705-015-2722-6,doi:10.1007/s00705-015-2722-6,publication,Wu et al. Arch. Virol. 2016,Wu et al.,Wu et al.,2016,Arch. Virol,https://doi.org/10.1007/s00705-015-2722-6
+doi:10.1016/j.vetmic.2014.09.032,doi:10.1016/j.vetmic.2014.09.032,publication,Yu et al. Vet. Microbiol. 2014,Yu et al.,Yu et al.,2014,Vet. Microbiol,https://doi.org/10.1016/j.vetmic.2014.09.032
+doi:10.1007/s00705-017-3451-9,doi:10.1007/s00705-017-3451-9,publication,Nam et al. Arch. Virol. 2017,Nam et al.,Nam et al.,2017,Arch. Virol,https://doi.org/10.1007/s00705-017-3451-9
+doi:10.3390/v10110653,doi:10.3390/v10110653,publication,Kamiki et al. Viruses 2018,Kamiki et al.,Kamiki et al.,2018,Viruses,https://doi.org/10.3390/v10110653
+doi:10.3390/v14051097,doi:10.3390/v14051097,publication,Liang et al. Viruses 2022,Liang et al.,Liang et al.,2022,Viruses,https://doi.org/10.3390/v14051097
+doi:10.1073/pnas.2203919119,doi:10.1073/pnas.2203919119,publication,Meng et al. PNAS 2022,Meng et al.,Meng et al.,2022,PNAS,https://doi.org/10.1073/pnas.2203919119
+doi:10.1016/j.virol.2016.08.004,doi:10.1016/j.virol.2016.08.004,publication,Zhao et al. Virology 2016,Zhao et al.,Zhao et al.,2016,Virology,https://doi.org/10.1016/j.virol.2016.08.004
+doi:10.1128/jvi.01293-24,doi:10.1128/jvi.01293-24,publication,Yang et al. J. Virol. 2024,Yang et al.,Yang et al.,2024,J. Virol,https://doi.org/10.1128/jvi.01293-24
+doi:10.1128/jvi.00608-09,doi:10.1128/jvi.00608-09,publication,Lycett et al. J. Virol. 2009,Lycett et al.,Lycett et al.,2009,J. Virol,https://doi.org/10.1128/jvi.00608-09
+doi:10.1128/jvi.01081-14,doi:10.1128/jvi.01081-14,publication,Fan et al. J. Virol. 2014,Fan et al.,Fan et al.,2014,J. Virol,https://doi.org/10.1128/jvi.01081-14
+doi:10.1016/j.virol.2016.11.008,doi:10.1016/j.virol.2016.11.008,publication,Hu et al. Virology 2017,Hu et al.,Hu et al.,2017,Virology,https://doi.org/10.1016/j.virol.2016.11.008
+doi:10.1038/srep10510,doi:10.1038/srep10510,publication,Song et al. Sci. Rep. 2015,Song et al.,Song et al.,2015,Sci. Rep,https://doi.org/10.1038/srep10510
+doi:10.1016/j.meegid.2015.10.016,doi:10.1016/j.meegid.2015.10.016,publication,Mei et al. Infect. Genet. Evol. 2016,Mei et al.,Mei et al.,2016,Infect. Genet. Evol,https://doi.org/10.1016/j.meegid.2015.10.016
+doi:10.1016/j.vetmic.2023.109760,doi:10.1016/j.vetmic.2023.109760,publication,Guo et al. Vet. Microbiol. 2023,Guo et al.,Guo et al.,2023,Vet. Microbiol,https://doi.org/10.1016/j.vetmic.2023.109760
+doi:10.1128/JVI.01636-14,doi:10.1128/JVI.01636-14,publication,Elderfield et al. J. Virol. 2014,Elderfield et al.,Elderfield et al.,2014,J. Virol,https://doi.org/10.1128/JVI.01636-14
+doi:10.1007/s00705-016-2826-7,doi:10.1007/s00705-016-2826-7,publication,Peng et al. Arch. Virol. 2016,Peng et al.,Peng et al.,2016,Arch. Virol,https://doi.org/10.1007/s00705-016-2826-7
+doi:10.3389/fmicb.2018.00453,doi:10.3389/fmicb.2018.00453,publication,Peng et al. Front. Microbiol. 2018,Peng et al.,Peng et al.,2018,Front. Microbiol,https://doi.org/10.3389/fmicb.2018.00453
+doi:10.1128/JVI.01557-17,doi:10.1128/JVI.01557-17,publication,Zhong et al. J. Virol. 2018,Zhong et al.,Zhong et al.,2018,J. Virol,https://doi.org/10.1128/JVI.01557-17
+doi:10.3390/v12010065,doi:10.3390/v12010065,publication,Chan et al. Viruses 2020,Chan et al.,Chan et al.,2020,Viruses,https://doi.org/10.3390/v12010065
+doi:10.1128/jvi.00212-09,doi:10.1128/jvi.00212-09,publication,Rolling et al. J. Virol. 2009,Rolling et al.,Rolling et al.,2009,J. Virol,https://doi.org/10.1128/jvi.00212-09
+doi:10.1128/JVI.02891-12,doi:10.1128/JVI.02891-12,publication,Hu et al. J. Virol. 2013,Hu et al.,Hu et al.,2013,J. Virol,https://doi.org/10.1128/JVI.02891-12
+doi:10.1128/JVI.00883-16,doi:10.1128/JVI.00883-16,publication,Xu et al. J. Virol. 2016,Xu et al.,Xu et al.,2016,J. Virol,https://doi.org/10.1128/JVI.00883-16
+doi:10.1128/JVI.06203-11,doi:10.1128/JVI.06203-11,publication,Mehle et al. J. Virol. 2012,Mehle et al.,Mehle et al.,2012,J. Virol,https://doi.org/10.1128/JVI.06203-11
+doi:10.1093/infdis/jiy082,doi:10.1093/infdis/jiy082,publication,Xiang et al. J. Infect. Dis. 2018,Xiang et al.,Xiang et al.,2018,J. Infect. Dis,https://doi.org/10.1093/infdis/jiy082
+doi:10.1016/j.vetmic.2018.05.026,doi:10.1016/j.vetmic.2018.05.026,publication,Lee et al. Vet. Microbiol. 2018,Lee et al.,Lee et al.,2018,Vet. Microbiol,https://doi.org/10.1016/j.vetmic.2018.05.026
+doi:10.1186/s13567-024-01342-6,doi:10.1186/s13567-024-01342-6,publication,Wang et al. Vet. Res. 2024,Wang et al.,Wang et al.,2024,Vet. Res,https://doi.org/10.1186/s13567-024-01342-6
+doi:10.1099/jgv.0.000674,doi:10.1099/jgv.0.000674,publication,Elgendy et al. J. Gen. Virol. 2017,Elgendy et al.,Elgendy et al.,2017,J. Gen. Virol,https://doi.org/10.1099/jgv.0.000674
+doi:10.1038/ncomms8491,doi:10.1038/ncomms8491,publication,Taft et al. Nat. Commun. 2015,Taft et al.,Taft et al.,2015,Nat. Commun,https://doi.org/10.1038/ncomms8491
+doi:10.7554/eLife.83470,doi:10.7554/eLife.83470,publication,Chen et al. Elife 2023,Chen et al.,Chen et al.,2023,Elife,https://doi.org/10.7554/eLife.83470
+doi:10.1016/j.vetmic.2023.109669,doi:10.1016/j.vetmic.2023.109669,publication,Xie et al. Vet. Microbiol. 2023,Xie et al.,Xie et al.,2023,Vet. Microbiol,https://doi.org/10.1016/j.vetmic.2023.109669
+doi:10.1099/vir.0.036434-0,doi:10.1099/vir.0.036434-0,publication,Xu et al. J. Gen. Virol. 2012,Xu et al.,Xu et al.,2012,J. Gen. Virol,https://doi.org/10.1099/vir.0.036434-0
+doi:10.1080/22221751.2021.1912644,doi:10.1080/22221751.2021.1912644,publication,Zhang et al. Emerg. Microbes Infect. 2021,Zhang et al.,Zhang et al.,2021,Emerg. Microbes Infect,https://doi.org/10.1080/22221751.2021.1912644
+doi:10.1128/JVI.02387-15,doi:10.1128/JVI.02387-15,publication,Feng et al. J. Virol. 2016,Feng et al.,Feng et al.,2016,J. Virol,https://doi.org/10.1128/JVI.02387-15
+doi:10.1016/j.jinf.2023.03.007,doi:10.1016/j.jinf.2023.03.007,publication,Shao et al. J. Infect. 2023,Shao et al.,Shao et al.,2023,J. Infect,https://doi.org/10.1016/j.jinf.2023.03.007
+doi:10.7554/eLife.45079,doi:10.7554/eLife.45079,publication,Soh et al. Elife 2019,Soh et al.,Soh et al.,2019,Elife,https://doi.org/10.7554/eLife.45079
+doi:10.1099/0022-1317-81-5-1283,doi:10.1099/0022-1317-81-5-1283,publication,Naffakh et al. J. Gen. Virol. 2000,Naffakh et al.,Naffakh et al.,2000,J. Gen. Virol,https://doi.org/10.1099/0022-1317-81-5-1283
+doi:10.1128/JVI.00130-16,doi:10.1128/JVI.00130-16,publication,Mänz et al. J. Virol. 2016,Mänz et al.,Mänz et al.,2016,J. Virol,https://doi.org/10.1128/JVI.00130-16
+doi:10.3201/eid1209.060276,doi:10.3201/eid1209.060276,publication,Chen et al. Emerg. Infect. Dis. 2006,Chen et al.,Chen et al.,2006,Emerg. Infect. Dis,https://doi.org/10.3201/eid1209.060276
+doi:10.1128/JVI.00921-07,doi:10.1128/JVI.00921-07,publication,Finkelstein et al. J. Virol. 2007,Finkelstein et al.,Finkelstein et al.,2007,J. Virol,https://doi.org/10.1128/JVI.00921-07
+doi:10.1038/s41598-018-31397-3,doi:10.1038/s41598-018-31397-3,publication,Arai et al. Sci. Rep. 2018,Arai et al.,Arai et al.,2018,Sci. Rep,https://doi.org/10.1038/s41598-018-31397-3
+doi:10.1099/jgv.0.001612,doi:10.1099/jgv.0.001612,publication,Elgendy et al. J. Gen. Virol. 2021,Elgendy et al.,Elgendy et al.,2021,J. Gen. Virol,https://doi.org/10.1099/jgv.0.001612
+doi:10.1038/ncomms6021,doi:10.1038/ncomms6021,publication,Fan et al. Nat. Commun. 2014,Fan et al.,Fan et al.,2014,Nat. Commun,https://doi.org/10.1038/ncomms6021
+doi:10.1111/irv.13169,doi:10.1111/irv.13169,publication,Li et al. Influenza Other Respi. Viruses 2023,Li et al.,Li et al.,2023,Influenza Other Respi. Viruses,https://doi.org/10.1111/irv.13169
+doi:10.1128/JVI.02597-12,doi:10.1128/JVI.02597-12,publication,Cauldwell et al. J. Virol. 2013,Cauldwell et al.,Cauldwell et al.,2013,J. Virol,https://doi.org/10.1128/JVI.02597-12
+doi:10.1128/JVI.01694-10,doi:10.1128/JVI.01694-10,publication,Zhou et al. J. Virol. 2011,Zhou et al.,Zhou et al.,2011,J. Virol,https://doi.org/10.1128/JVI.01694-10
+doi:10.1099/jgv.0.000770,doi:10.1099/jgv.0.000770,publication,Zhang et al. J. Gen. Virol. 2017,Zhang et al.,Zhang et al.,2017,J. Gen. Virol,https://doi.org/10.1099/jgv.0.000770
+doi:10.1099/jgv.0.001192,doi:10.1099/jgv.0.001192,publication,Xu et al. J. Gen. Virol. 2020,Xu et al.,Xu et al.,2020,J. Gen. Virol,https://doi.org/10.1099/jgv.0.001192
+doi:10.1016/j.meegid.2019.103918,doi:10.1016/j.meegid.2019.103918,publication,Wu et al. Infect. Genet. Evol. 2019,Wu et al.,Wu et al.,2019,Infect. Genet. Evol,https://doi.org/10.1016/j.meegid.2019.103918
+doi:10.1371/journal.ppat.1005583,doi:10.1371/journal.ppat.1005583,publication,Arai et al. PLoS Pathog. 2016,Arai et al.,Arai et al.,2016,PLoS Pathog,https://doi.org/10.1371/journal.ppat.1005583
+doi:10.1038/nature04230,doi:10.1038/nature04230,publication,Taubenberger et al. Nature 2005,Taubenberger et al.,Taubenberger et al.,2005,Nature,https://doi.org/10.1038/nature04230
+doi:10.1128/JVI.00702-11,doi:10.1128/JVI.00702-11,publication,Mok et al. J. Virol. 2011,Mok et al.,Mok et al.,2011,J. Virol,https://doi.org/10.1128/JVI.00702-11
+doi:10.1128/jvi.01879-08,doi:10.1128/jvi.01879-08,publication,Manzoor et al. J. Virol. 2009,Manzoor et al.,Manzoor et al.,2009,J. Virol,https://doi.org/10.1128/jvi.01879-08
+doi:10.1128/JVI.02642-09,doi:10.1128/JVI.02642-09,publication,Bussey et al. J. Virol. 2010,Bussey et al.,Bussey et al.,2010,J. Virol,https://doi.org/10.1128/JVI.02642-09
+doi:10.1099/vir.0.031492-0,doi:10.1099/vir.0.031492-0,publication,Foeglein et al. J. Gen. Virol. 2011,Foeglein et al.,Foeglein et al.,2011,J. Gen. Virol,https://doi.org/10.1099/vir.0.031492-0
+doi:10.1128/JVI.05699-11,doi:10.1128/JVI.05699-11,publication,Liu et al. J. Virol. 2012,Liu et al.,Liu et al.,2012,J. Virol,https://doi.org/10.1128/JVI.05699-11
+doi:10.1128/JVI.00958-12,doi:10.1128/JVI.00958-12,publication,Zhang et al. J. Virol. 2012,Zhang et al.,Zhang et al.,2012,J. Virol,https://doi.org/10.1128/JVI.00958-12
+doi:10.1128/jvi.00901-15,doi:10.1128/jvi.00901-15,publication,Hayashi et al. J. Virol. 2015,Hayashi et al.,Hayashi et al.,2015,J. Virol,https://doi.org/10.1128/jvi.00901-15
+doi:10.2807/1560-7917.ES.2023.28.3.2300001,doi:10.2807/1560-7917.ES.2023.28.3.2300001,publication,Agüero et al. Euro Surveill. 2023,Agüero et al.,Agüero et al.,2023,Euro Surveill,https://doi.org/10.2807/1560-7917.ES.2023.28.3.2300001
+doi:10.1099/jgv.0.001294,doi:10.1099/jgv.0.001294,publication,Gao et al. J. Gen. Virol. 2019,Gao et al.,Gao et al.,2019,J. Gen. Virol,https://doi.org/10.1099/jgv.0.001294
+doi:10.1111/tbed.14157,doi:10.1111/tbed.14157,publication,Li et al. Transbound. Emerg. Dis. 2022,Li et al.,Li et al.,2022,Transbound. Emerg. Dis,https://doi.org/10.1111/tbed.14157
+doi:10.1016/j.vetmic.2021.109314,doi:10.1016/j.vetmic.2021.109314,publication,Hu et al. Vet. Microbiol. 2022,Hu et al.,Hu et al.,2022,Vet. Microbiol,https://doi.org/10.1016/j.vetmic.2021.109314
+doi:10.1128/jvi.01944-23,doi:10.1128/jvi.01944-23,publication,Zhang et al. J. Virol. 2024,Zhang et al.,Zhang et al.,2024,J. Virol,https://doi.org/10.1128/jvi.01944-23
+doi:10.1016/s0168-1702(99)00027-1,doi:10.1016/s0168-1702(99)00027-1,publication,Brown et al. Virus Res. 1999,Brown et al.,Brown et al.,1999,Virus Res,https://doi.org/10.1016/s0168-1702(99)00027-1
+doi:10.1371/journal.pcbi.1000564,doi:10.1371/journal.pcbi.1000564,publication,Tamuri et al. PLoS Comput. Biol. 2009,Tamuri et al.,Tamuri et al.,2009,PLoS Comput. Biol,https://doi.org/10.1371/journal.pcbi.1000564
+doi:10.1371/journal.pone.0148432,doi:10.1371/journal.pone.0148432,publication,Chen et al. PLoS One 2016,Chen et al.,Chen et al.,2016,PLoS One,https://doi.org/10.1371/journal.pone.0148432
+doi:10.1371/journal.ppat.1007919,doi:10.1371/journal.ppat.1007919,publication,Arai et al. PLoS Pathog. 2019,Arai et al.,Arai et al.,2019,PLoS Pathog,https://doi.org/10.1371/journal.ppat.1007919
+doi:10.1371/journal.pone.0084638,doi:10.1371/journal.pone.0084638,publication,Hu et al. PLoS One 2014,Hu et al.,Hu et al.,2014,PLoS One,https://doi.org/10.1371/journal.pone.0084638
+doi:10.21203/rs.3.rs-1293878/v1,doi:10.21203/rs.3.rs-1293878/v1,publication,Zeng et al.  2022,Zeng et al.,Zeng et al.,2022,,https://doi.org/10.21203/rs.3.rs-1293878/v1
+doi:10.1038/srep19474,doi:10.1038/srep19474,publication,Xiao et al. Sci. Rep. 2016,Xiao et al.,Xiao et al.,2016,Sci. Rep,https://doi.org/10.1038/srep19474
+doi:10.1073/pnas.0911915106,doi:10.1073/pnas.0911915106,publication,Mehle et al. PNAS 2009,Mehle et al.,Mehle et al.,2009,PNAS,https://doi.org/10.1073/pnas.0911915106
+doi:10.1371/journal.ppat.1001034,doi:10.1371/journal.ppat.1001034,publication,Yamada et al. PLoS Pathog. 2010,Yamada et al.,Yamada et al.,2010,PLoS Pathog,https://doi.org/10.1371/journal.ppat.1001034
+doi:10.1371/journal.pone.0162163,doi:10.1371/journal.pone.0162163,publication,Wang et al. PLoS One 2016,Wang et al.,Wang et al.,2016,PLoS One,https://doi.org/10.1371/journal.pone.0162163
+doi:10.1128/JVI.01783-09,doi:10.1128/JVI.01783-09,publication,de et al. J. Virol. 2010,de et al.,de et al.,2010,J. Virol,https://doi.org/10.1128/JVI.01783-09
+doi:10.1128/jvi.67.4.1761-1764.1993,doi:10.1128/jvi.67.4.1761-1764.1993,publication,Subbarao et al. J. Virol. 1993,Subbarao et al.,Subbarao et al.,1993,J. Virol,https://doi.org/10.1128/jvi.67.4.1761-1764.1993
+doi:10.1007/s00705-015-2383-5,doi:10.1007/s00705-015-2383-5,publication,Sang et al. Arch. Virol. 2015,Sang et al.,Sang et al.,2015,Arch. Virol,https://doi.org/10.1007/s00705-015-2383-5
+doi:10.1186/1743-422X-10-276,doi:10.1186/1743-422X-10-276,publication,de et al. Virol. J. 2013,de et al.,de et al.,2013,Virol. J,https://doi.org/10.1186/1743-422X-10-276
+doi:10.1099/vir.0.81843-0,doi:10.1099/vir.0.81843-0,publication,Mase et al. J. Gen. Virol. 2006,Mase et al.,Mase et al.,2006,J. Gen. Virol,https://doi.org/10.1099/vir.0.81843-0
+doi:10.1093/infdis/jiy217,doi:10.1093/infdis/jiy217,publication,Zou et al. J. Infect. Dis. 2018,Zou et al.,Zou et al.,2018,J. Infect. Dis,https://doi.org/10.1093/infdis/jiy217
+doi:10.1016/j.meegid.2017.07.026,doi:10.1016/j.meegid.2017.07.026,publication,Wu et al. Infect. Genet. Evol. 2017,Wu et al.,Wu et al.,2017,Infect. Genet. Evol,https://doi.org/10.1016/j.meegid.2017.07.026
+doi:10.1074/jbc.M110.182964,doi:10.1074/jbc.M110.182964,publication,Boivin et al. J. Biol. Chem. 2011,Boivin et al.,Boivin et al.,2011,J. Biol. Chem,https://doi.org/10.1074/jbc.M110.182964
+doi:10.1007/s00705-022-05536-1,doi:10.1007/s00705-022-05536-1,publication,Yang et al. Arch. Virol. 2022,Yang et al.,Yang et al.,2022,Arch. Virol,https://doi.org/10.1007/s00705-022-05536-1
+doi:10.1038/srep19933,doi:10.1038/srep19933,publication,Katsura et al. Sci. Rep. 2016,Katsura et al.,Katsura et al.,2016,Sci. Rep,https://doi.org/10.1038/srep19933
+doi:10.1128/JVI.00422-14,doi:10.1128/JVI.00422-14,publication,Czudai-Matwich et al. J. Virol. 2014,Czudai-Matwich et al.,Czudai-Matwich et al.,2014,J. Virol,https://doi.org/10.1128/JVI.00422-14
+doi:10.3390/v12010052,doi:10.3390/v12010052,publication,Cai et al. Viruses 2020,Cai et al.,Cai et al.,2020,Viruses,https://doi.org/10.3390/v12010052
+doi:10.2807/1560-7917.ES.2023.28.42.2300526,doi:10.2807/1560-7917.ES.2023.28.42.2300526,publication,Lagan et al. Euro Surveill. 2023,Lagan et al.,Lagan et al.,2023,Euro Surveill,https://doi.org/10.2807/1560-7917.ES.2023.28.42.2300526

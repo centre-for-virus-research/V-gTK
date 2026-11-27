@@ -113,12 +113,26 @@ VIRUS_PROFILES = {
         'product_patterns': [],
     },
     'influenza': {
-        'columns': ['serotypes_tested'],
-        # Canonical IAV protein names, as spelled by the `genes` table of a
-        # real influenza build.  PA-X is listed before PA so the longer name
-        # wins; regex alternation is left-biased.
+        'columns': None,
+        # Canonical IAV protein names, as spelled by the `genes` table and
+        # GenBank GFF3 products of a real influenza build. PA-X is listed
+        # before PA so the longer name wins; regex alternation is left-biased.
+        # Note: 'nucleocapsid protein' (NC_007369) matches NP without matching
+        # 'nucleocapsid core protein'.
         'product_patterns': [
-            (r'\b(PB1-F2|PB2|PB1|PA-X|PA|HA|NP|NA|M1|M2|NS1|NS2|NEP)\b', 'upper'),
+            (r'\b(PB1-F2|PB2|PB1|PA-X|PA|HA|NP|NA|M1|M2|NS1|NEP)\b', 'upper'),
+            (r'\bNS2\b', 'NEP'),
+            (r'\bpolymerase\s+basic\s+protein\s+2\b', 'PB2'),
+            (r'\bpolymerase\s+basic\s+protein\s+1\b', 'PB1'),
+            (r'\bpolymerase\s+acidic\b', 'PA'),
+            (r'\bha?emagglutinin\b', 'HA'),
+            (r'\bnucleocapsid\s+protein\b', 'NP'),
+            (r'\bnucleoprotein\b', 'NP'),
+            (r'\bneuraminidase\b', 'NA'),
+            (r'\bmatrix\s+protein\s+1\b', 'M1'),
+            (r'\bmatrix\s+protein\s+2\b', 'M2'),
+            (r'\bnon[- ]?structural\s+protein\s+1\b', 'NS1'),
+            (r'\b(?:non[- ]?structural\s+protein\s+2|nuclear\s+export\s+protein)\b', 'NEP'),
         ],
     },
 }
@@ -436,6 +450,35 @@ def genotype_of_code(value):
     return match.group(0) if match else ''
 
 
+_FLU_SEROTYPE_RE = re.compile(r'^(h\d+)(n\d+)', re.IGNORECASE)
+
+
+def parent_genotype_tokens(value):
+    """All hierarchical parent keys for a genotype/subtype code.
+
+    For digit-led vocabularies like HCV ('6xd' -> ('6',)), returns a 1-tuple
+    identical to ``parent_genotype_of_code()``. For combined influenza serotypes
+    like 'H5N1' or 'H1N1pdm09', also exposes the broader H/N and base-HxNy
+    tokens (('h5n1', 'h5', 'n1') / ('h1n1pdm09', 'h1n1', 'h1', 'n1')) so a
+    sequence typed 'H5N1' matches a catalog scope/WT bucket keyed on 'H5' or
+    'N1' without cross-matching an unrelated specific subtype like 'H1N1'.
+    """
+    norm = normalize_genotype_code(value)
+    if not norm:
+        return ()
+    digits = genotype_of_code(norm)
+    if digits:
+        return (digits,)
+    tokens = [norm]
+    match = _FLU_SEROTYPE_RE.match(norm)
+    if match:
+        h_part, n_part = match.group(1), match.group(2)
+        for tok in (f'{h_part}{n_part}', h_part, n_part):
+            if tok not in tokens:
+                tokens.append(tok)
+    return tuple(tokens)
+
+
 def parent_genotype_of_code(value):
     """The genotype a subtype code belongs to, for any vocabulary.
 
@@ -558,12 +601,20 @@ def lookup_wild_type_residues(wild_type_tables, subtype_code, genotype, protein,
     """
     by_subtype, by_genotype = wild_type_tables
     subtype_key = normalize_genotype_code(subtype_code)
+    pos_str = str(position)
     if subtype_key:
-        residues = by_subtype.get((subtype_key, protein, str(position)))
+        residues = by_subtype.get((subtype_key, protein, pos_str))
         if residues:
             return residues, SCOPE_TIER_SUBTYPE
     if genotype:
-        residues = by_genotype.get((parent_genotype_of_code(genotype), protein, str(position)))
+        residues = by_genotype.get((parent_genotype_of_code(genotype), protein, pos_str))
+        if residues:
+            return residues, SCOPE_TIER_GENOTYPE
+    # Hierarchical parent fallback for combined serotypes (e.g. H1N1pdm09 -> h1n1 -> h1 / n1)
+    for token in parent_genotype_tokens(subtype_code or genotype):
+        if token == subtype_key:
+            continue
+        residues = by_subtype.get((token, protein, pos_str)) or by_genotype.get((token, protein, pos_str))
         if residues:
             return residues, SCOPE_TIER_GENOTYPE
     return None, ''
@@ -618,7 +669,10 @@ def classify_genotype_scope(scope_codes, genotype, subtype_code):
     Exact subtype wins; otherwise any bucket whose leading digits agree with the
     sequence's genotype counts, because observed subtypes such as 6n, 6xd, 6xc
     and 4v have no catalog bucket of their own and exact matching would throw
-    away nearly every call.  An empty scope means the entry applies anywhere.
+    away nearly every call. For combined serotypes (e.g. 'H5N1'), broader parent
+    buckets ('H5', 'N1') also match at the genotype tier without cross-matching
+    unrelated full subtypes ('H1N1'). An empty scope means the entry applies
+    anywhere.
     """
     if not scope_codes:
         return SCOPE_TIER_UNSCOPED
@@ -627,6 +681,9 @@ def classify_genotype_scope(scope_codes, genotype, subtype_code):
         return SCOPE_TIER_SUBTYPE
     genotype_key = parent_genotype_of_code(genotype)
     if genotype_key and any(parent_genotype_of_code(code) == genotype_key for code in scope_codes):
+        return SCOPE_TIER_GENOTYPE
+    seq_parents = set(parent_genotype_tokens(subtype_code)) | set(parent_genotype_tokens(genotype))
+    if seq_parents and any(code in seq_parents for code in scope_codes):
         return SCOPE_TIER_GENOTYPE
     return SCOPE_TIER_OUT_OF_SCOPE
 
@@ -656,12 +713,17 @@ def build_sequence_genotype_map(meta_data, diagnostics=None):
     subtype_column = next(
         (name for name in ['nearest_reference_subtype', 'subtype'] if name in columns), None
     )
-    if genotype_column is None and subtype_column is None:
+    serotype_column = next(
+        (name for name in ['serotype_validated', 'serotype'] if name in columns), None
+    )
+    if genotype_column is None and subtype_column is None and serotype_column is None:
         return genotype_map
 
     def clean(value):
         text = clean_cell(value)
         return '' if text.lower() in {'', 'nan', 'none', 'null'} else text
+
+    _UNINFORMATIVE_SEROTYPES = {'mixed', 'unknown', 'untyped', 'na', 'n/a', 'unclassified'}
 
     for _, row in meta_data.iterrows():
         accession = clean(row.get('primary_accession'))
@@ -670,6 +732,11 @@ def build_sequence_genotype_map(meta_data, diagnostics=None):
         genotype = clean(row.get(genotype_column)) if genotype_column else ''
         subtype = clean(row.get(subtype_column)) if subtype_column else ''
         subtype_code = build_subtype_code(genotype, subtype)
+        if not genotype and not subtype_code and serotype_column:
+            serotype_val = clean(row.get(serotype_column))
+            if serotype_val and serotype_val.lower() not in _UNINFORMATIVE_SEROTYPES:
+                subtype_code = serotype_val
+                genotype = genotype_of_code(subtype_code) or subtype_code
         if not genotype:
             genotype = genotype_of_code(subtype_code)
         resolved = (genotype, subtype_code)
@@ -807,10 +874,32 @@ def extract_accession_tokens(value):
     return seen
 
 
-def feature_priority(feature_type, product_name):
+def feature_exons(gene_entry):
+    """Sorted 1-based inclusive coding intervals ``[(start, end), ...]``."""
+    exons = gene_entry.get('exons') if gene_entry else None
+    if exons:
+        return sorted((int(s), int(e)) for s, e in exons)
+    return [(int(gene_entry['cds_start']), int(gene_entry['cds_end']))]
+
+
+def feature_coding_length(gene_entry):
+    """Total coding nucleotide length across all exons of a feature, or None."""
+    if not gene_entry:
+        return None
+    exons = gene_entry.get('exons')
+    if exons:
+        return sum(int(e) - int(s) + 1 for s, e in exons)
+    if gene_entry.get('cds_end') is None or gene_entry.get('cds_start') is None:
+        return None
+    return int(gene_entry['cds_end']) - int(gene_entry['cds_start']) + 1
+
+
+def feature_priority(feature_type, product_name, is_multi_exon=False):
     canonical = normalize_lookup_key(product_name)
     if canonical in {'polyprotein', 'wholegenome'}:
         return 99
+    if is_multi_exon and str(feature_type or '').lower() == 'cds':
+        return 0.5
     priorities = {
         'mat_peptide': 0,
         'mature_protein_region_of_CDS': 0,
@@ -824,8 +913,30 @@ def feature_priority(feature_type, product_name):
 def choose_feature_entry(existing_entry, new_entry):
     if existing_entry is None:
         return new_entry
-    existing_priority = feature_priority(existing_entry.get('feature_type', ''), existing_entry.get('product', ''))
-    new_priority = feature_priority(new_entry.get('feature_type', ''), new_entry.get('product', ''))
+    existing_exons = feature_exons(existing_entry)
+    new_exons = feature_exons(new_entry)
+    # Merge strictly disjoint exons of the same feature_type and source
+    # (e.g. spliced M2 / NEP or ribosomal-frameshifted PA-X CDS intervals).
+    if (
+        str(existing_entry.get('feature_type', '')).lower() == str(new_entry.get('feature_type', '')).lower()
+        and existing_entry.get('source', '') == new_entry.get('source', '')
+        and all(e1 < s2 or e2 < s1 for s1, e1 in existing_exons for s2, e2 in new_exons)
+    ):
+        merged_exons = sorted(existing_exons + new_exons)
+        merged = dict(existing_entry)
+        merged['cds_start'] = merged_exons[0][0]
+        merged['cds_end'] = merged_exons[-1][1]
+        merged['exons'] = merged_exons
+        return merged
+
+    existing_priority = feature_priority(
+        existing_entry.get('feature_type', ''), existing_entry.get('product', ''),
+        is_multi_exon=len(existing_exons) > 1,
+    )
+    new_priority = feature_priority(
+        new_entry.get('feature_type', ''), new_entry.get('product', ''),
+        is_multi_exon=len(new_exons) > 1,
+    )
     if new_priority < existing_priority:
         return new_entry
     if new_priority == existing_priority:
@@ -866,7 +977,7 @@ def parse_gff_attributes(attributes_text):
 
 
 def parse_gff_text_to_feature_map(gff_text, reference_accession, alias_lookup, source_label):
-    feature_map = {}
+    by_product_and_type = {}
     for line in str(gff_text or '').splitlines():
         if not line or line.startswith('#'):
             continue
@@ -890,8 +1001,12 @@ def parse_gff_text_to_feature_map(gff_text, reference_accession, alias_lookup, s
         )
         if entry is None:
             continue
-        key = entry['product']
-        feature_map[key] = choose_feature_entry(feature_map.get(key), entry)
+        type_key = (entry['product'], str(feature_type).lower())
+        by_product_and_type[type_key] = choose_feature_entry(by_product_and_type.get(type_key), entry)
+
+    feature_map = {}
+    for (product_key, _), entry in by_product_and_type.items():
+        feature_map[product_key] = choose_feature_entry(feature_map.get(product_key), entry)
     return feature_map
 
 
@@ -1195,18 +1310,39 @@ def prepare_sequence_alignment(seq_aln):
     return seq_aln
 
 
-def resolve_aligned_codon_indices(coord_map, cds_start, aa_pos):
+def resolve_aligned_codon_indices(coord_map, cds_start, aa_pos, exons=None):
     try:
-        cds_start = int(cds_start)
         aa_pos = int(aa_pos)
     except (TypeError, ValueError):
         return None
 
-    if cds_start < 1 or aa_pos < 1:
+    if aa_pos < 1:
         return None
 
-    nuc_start = cds_start + (aa_pos - 1) * 3
-    query_positions = [nuc_start + offset for offset in range(3)]
+    if exons and len(exons) > 1:
+        nuc_positions = []
+        for ex_start, ex_end in exons:
+            try:
+                s, e = int(ex_start), int(ex_end)
+            except (TypeError, ValueError):
+                return None
+            if s < 1 or e < s:
+                return None
+            nuc_positions.extend(range(s, e + 1))
+        base = (aa_pos - 1) * 3
+        if base + 3 > len(nuc_positions):
+            return None
+        query_positions = nuc_positions[base:base + 3]
+    else:
+        try:
+            cds_start = int(cds_start)
+        except (TypeError, ValueError):
+            return None
+        if cds_start < 1:
+            return None
+        nuc_start = cds_start + (aa_pos - 1) * 3
+        query_positions = [nuc_start + offset for offset in range(3)]
+
     alignment_indices = []
     for position in query_positions:
         alignment_index = coord_map.get(position)
@@ -1228,8 +1364,8 @@ def extract_aligned_codon(alignment, alignment_indices):
     return codon
 
 
-def extract_feature_codon(alignment, coord_map, cds_start, aa_pos):
-    alignment_indices = resolve_aligned_codon_indices(coord_map, cds_start, aa_pos)
+def extract_feature_codon(alignment, coord_map, cds_start, aa_pos, exons=None):
+    alignment_indices = resolve_aligned_codon_indices(coord_map, cds_start, aa_pos, exons=exons)
     if alignment_indices is None:
         return None
     return extract_aligned_codon(alignment, alignment_indices)
@@ -1342,17 +1478,25 @@ def build_segment_position_index(catalog, master_coord_map, master_feature_map, 
         # per-reference and can be truncated, and choose_feature_entry() breaks
         # a priority tie by preferring the SHORTEST span, so this is reachable
         # without any curation error at all.
-        feature_end = gene_entry.get('cds_end')
-        if feature_end is not None:
-            last_nucleotide = gene_entry['cds_start'] + aa_pos * 3 - 1
-            if last_nucleotide > feature_end:
+        exons = gene_entry.get('exons')
+        if exons and len(exons) > 1:
+            coding_len = feature_coding_length(gene_entry)
+            if coding_len is not None and aa_pos * 3 > coding_len:
                 diagnostics['catalog_position_past_feature_end'] += 1
                 continue
+        else:
+            feature_end = gene_entry.get('cds_end')
+            if feature_end is not None:
+                last_nucleotide = gene_entry['cds_start'] + aa_pos * 3 - 1
+                if last_nucleotide > feature_end:
+                    diagnostics['catalog_position_past_feature_end'] += 1
+                    continue
 
         alignment_indices = resolve_aligned_codon_indices(
             master_coord_map,
             gene_entry['cds_start'],
             aa_pos,
+            exons=exons,
         )
         if alignment_indices is None:
             diagnostics['reference_coordinate_missing_in_alignment'] += 1
@@ -1372,6 +1516,171 @@ def build_segment_position_index(catalog, master_coord_map, master_feature_map, 
         position_catalog.setdefault(row['_alt_residue_norm'], []).append(row)
 
     return grouped_positions, mappable_catalog_rows
+
+
+def _annotate_single_alignment_row(
+    *,
+    primary_accession,
+    alignment,
+    segment_norm,
+    coord_ref_acc,
+    grouped_positions,
+    protein_grids,
+    master_alignment,
+    record_lookup,
+    sequence_genotypes,
+    wild_type_tables,
+    signature_scope,
+    segment_aware,
+    diagnostics,
+    mutations_found,
+    call_evidence=None,
+    frame_scan=None,
+):
+    """Evaluate all catalogued positions for a single aligned sequence row."""
+    genotype, subtype_code = sequence_genotypes.get(str(primary_accession).strip(), ('', ''))
+    if not genotype:
+        diagnostics['sequences_without_genotype'] += 1
+    covered_span = alignment_covered_span(alignment)
+    if covered_span is None:
+        # No non-gap column anywhere: this row reports no bases at all,
+        # so it is evidence for nothing.  It has to be stopped here
+        # rather than in residue_from_aligned_codon(), which reads a
+        # missing covered span as 'the caller gave me a bare codon' and
+        # answers with the deletion residue - which would fire every
+        # catalogued deletion against the one sequence carrying no data
+        # whatsoever.
+        diagnostics['sequences_without_sequenced_bases'] += 1
+        return
+
+    mapping = None
+    frames = {}
+    corrected_codons, guarded_codons = Counter(), Counter()
+    if protein_grids and record_lookup is not None:
+        record = record_lookup(primary_accession, segment_norm)
+        if not record:
+            diagnostics['sequences_without_record'] += 1
+        else:
+            mapping = reading_frame.RecordMapping(alignment, record)
+            if not mapping.mapped:
+                # The row's bases are not a subsequence of its own record,
+                # so nothing can be placed; the columns are all there is.
+                diagnostics['sequences_record_not_placeable'] += 1
+
+    for (protein_name, aa_pos, alignment_indices), alt_lookup in grouped_positions.items():
+        codon = extract_aligned_codon(alignment, alignment_indices)
+        if codon is None:
+            diagnostics['codon_out_of_bounds'] += 1
+            continue
+        aa = residue_from_aligned_codon(codon, covered_span, alignment_indices)
+        codon_read = 'alignment'
+        if mapping is not None and mapping.mapped and protein_name in protein_grids:
+            frame = frames.get(protein_name)
+            if frame is None:
+                frame = frames[protein_name] = reading_frame.ProteinFrame(
+                    mapping, protein_grids[protein_name], translate_codon,
+                    UNKNOWN_RESIDUE, master_alignment)
+            record_aa, verdict = frame.read(alignment_indices)
+            if verdict in reading_frame.GUARDS:
+                diagnostics[f'codon_{verdict}'] += 1
+                guarded_codons[protein_name] += 1
+                aa = record_aa
+            elif verdict != reading_frame.DEFER:
+                codon_read = 'record'
+                if record_aa != aa:
+                    diagnostics['codon_corrected_from_record'] += 1
+                    corrected_codons[protein_name] += 1
+                    codon_read = 'record_corrected'
+                aa = record_aa
+        if aa == UNKNOWN_RESIDUE:
+            # 'X' is the absence of a reading, not a residue.  Letting it
+            # match meant any catalogue row spelled 'X' - a shape the
+            # normaliser's [A-Z*] token grammar admits - fired on every
+            # unsequenced or ambiguous codon, flagging the worst-covered
+            # records the hardest.
+            diagnostics['codon_residue_unresolved'] += 1
+            continue
+        matched_rows = alt_lookup.get(aa, [])
+        if not matched_rows:
+            continue
+
+        wild_type_residues, wild_type_tier = lookup_wild_type_residues(
+            wild_type_tables, subtype_code, genotype, protein_name, aa_pos
+        )
+        for row in matched_rows:
+            signature_id = clean_cell(row.get('signature_id', ''))
+            scope_codes = signature_scope.get(signature_id, frozenset())
+            scope_tier = classify_genotype_scope(scope_codes, genotype, subtype_code)
+
+            if wild_type_residues is None:
+                residue_status = RESIDUE_STATUS_WT_UNKNOWN
+            elif aa in wild_type_residues:
+                residue_status = RESIDUE_STATUS_ANCHOR
+            else:
+                residue_status = RESIDUE_STATUS_CHANGE
+
+            if scope_tier == SCOPE_TIER_OUT_OF_SCOPE:
+                call_status = CALL_STATUS_SUPPRESSED_OUT_OF_SCOPE
+            elif residue_status == RESIDUE_STATUS_ANCHOR:
+                call_status = CALL_STATUS_SUPPRESSED_WILD_TYPE
+            else:
+                call_status = CALL_STATUS_EMITTED
+
+            record = {
+                'primary_accession': primary_accession,
+                'mutation_id': row['mutation_id'],
+                'protein_name': protein_name,
+                'segment': row['_segment_norm'],
+                'aa_position': aa_pos,
+                'alt_residue': row['_alt_residue_norm'],
+                'combination_id': clean_cell(row.get('combination_id', '')),
+                'signature_id': signature_id,
+                'signature_kind': clean_cell(row.get('signature_kind', '')),
+                'observed_residue': aa,
+                'sequence_genotype': genotype,
+                'sequence_subtype': subtype_code,
+                'relevant_genotypes': ','.join(sorted(scope_codes)),
+                'scope_tier': scope_tier,
+                'wild_type_residues': ''.join(sorted(wild_type_residues)) if wild_type_residues else '',
+                'wild_type_scope_tier': wild_type_tier,
+                'residue_status': residue_status,
+                'call_status': call_status,
+                'codon_read': codon_read,
+            }
+            if call_evidence is not None:
+                call_evidence.append(record)
+
+            if call_status != CALL_STATUS_EMITTED:
+                diagnostics[call_status] += 1
+                continue
+
+            mutations_found.append(record)
+            diagnostics['mutation_hits'] += 1
+            if segment_aware and not row['_segment_norm']:
+                # This build has several segments and the catalogue row
+                # named none, so it was tried against every one of them.
+                # The call is not wrong, but which segment it came from
+                # rests on an assumption rather than on the catalogue.
+                diagnostics['emitted_from_segment_unstated_catalog_row'] += 1
+            diagnostics[f'emitted_{scope_tier}'] += 1
+            diagnostics[f'emitted_{residue_status}'] += 1
+            if aa == DELETION_RESIDUE:
+                diagnostics['emitted_deletions'] += 1
+
+    if frame_scan is not None:
+        for protein_name, frame in frames.items():
+            if not (frame.has_issue or corrected_codons[protein_name] or guarded_codons[protein_name]):
+                continue
+            diagnostics['frame_scan_rows'] += 1
+            frame_scan.append({
+                'primary_accession': primary_accession,
+                'segment': segment_norm,
+                'protein_name': protein_name,
+                'master_accession': coord_ref_acc,
+                **frame.scan_row(),
+                'catalogue_codons_corrected': corrected_codons[protein_name],
+                'catalogue_codons_guarded': guarded_codons[protein_name],
+            })
 
 
 def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_lookup, db_gff_maps, allow_genbank_reference_gff, call_evidence=None,
@@ -1402,6 +1711,28 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
 
     catalog_reference_hints = [value for value in catalog['reference_accession'].dropna().astype(str).str.strip().unique().tolist() if value]
     seq_aln = seq_aln.copy()
+    if meta_data is not None and not meta_data.empty and {'primary_accession', 'exclusion_status'}.issubset(meta_data.columns):
+        excl_status = meta_data['exclusion_status'].fillna('').astype(str).str.strip().str.lower()
+        excluded_meta = meta_data[~excl_status.isin({'', '0', 'false', 'no', 'na', 'none', 'nan'})]
+        if not excluded_meta.empty:
+            seq_col = 'sequence_id' if 'sequence_id' in seq_aln.columns else 'primary_accession'
+            if 'segment' in excluded_meta.columns and 'segment' in seq_aln.columns:
+                excl_pairs = {
+                    (str(acc).strip(), normalize_segment(seg))
+                    for acc, seg in zip(excluded_meta['primary_accession'], excluded_meta['segment'])
+                    if str(acc).strip()
+                }
+                keep_mask = [
+                    (str(acc).strip(), normalize_segment(seg)) not in excl_pairs
+                    for acc, seg in zip(seq_aln[seq_col], seq_aln['segment'])
+                ]
+            else:
+                excl_accs = {str(acc).strip() for acc in excluded_meta['primary_accession'] if str(acc).strip()}
+                keep_mask = [str(acc).strip() not in excl_accs for acc in seq_aln[seq_col]]
+            dropped_excl = len(seq_aln) - sum(keep_mask)
+            if dropped_excl:
+                print(f'[AnnotateMutations] Excluded {dropped_excl} sequence_alignment row(s) flagged in meta_data.exclusion_status')
+            seq_aln = seq_aln.loc[keep_mask].copy()
     seq_aln['_reference_id'] = seq_aln['alignment_name'].fillna('').astype(str).str.strip()
 
     if (seq_aln['_reference_id'] == '').any():
@@ -1573,154 +1904,29 @@ def annotate_from_reference_coordinates(catalog, seq_aln, meta_data, alias_looku
                     last_position = max(pos for name, pos, _ in grouped_positions if name == protein_name)
                     feature_end = gene_entry['cds_start'] + last_position * 3 - 1
                 protein_grids[protein_name] = reading_frame.codon_grid(
-                    coord_map, gene_entry['cds_start'], feature_end)
+                    coord_map, gene_entry['cds_start'], feature_end,
+                    exons=gene_entry.get('exons'),
+                )
 
         for _, seq_row in segment_aln.iterrows():
-            alignment = seq_row['alignment']
-            primary_accession = seq_row['sequence_id']
-            genotype, subtype_code = sequence_genotypes.get(str(primary_accession).strip(), ('', ''))
-            if not genotype:
-                diagnostics['sequences_without_genotype'] += 1
-            covered_span = alignment_covered_span(alignment)
-            if covered_span is None:
-                # No non-gap column anywhere: this row reports no bases at all,
-                # so it is evidence for nothing.  It has to be stopped here
-                # rather than in residue_from_aligned_codon(), which reads a
-                # missing covered span as 'the caller gave me a bare codon' and
-                # answers with the deletion residue - which would fire every
-                # catalogued deletion against the one sequence carrying no data
-                # whatsoever.
-                diagnostics['sequences_without_sequenced_bases'] += 1
-                continue
-
-            mapping = None
-            frames = {}
-            corrected_codons, guarded_codons = Counter(), Counter()
-            if protein_grids:
-                record = record_lookup(primary_accession, seq_row['_segment_norm'])
-                if not record:
-                    diagnostics['sequences_without_record'] += 1
-                else:
-                    mapping = reading_frame.RecordMapping(alignment, record)
-                    if not mapping.mapped:
-                        # The row's bases are not a subsequence of its own record,
-                        # so nothing can be placed; the columns are all there is.
-                        diagnostics['sequences_record_not_placeable'] += 1
-
-            for (protein_name, aa_pos, alignment_indices), alt_lookup in grouped_positions.items():
-                codon = extract_aligned_codon(alignment, alignment_indices)
-                if codon is None:
-                    diagnostics['codon_out_of_bounds'] += 1
-                    continue
-                aa = residue_from_aligned_codon(codon, covered_span, alignment_indices)
-                codon_read = 'alignment'
-                if mapping is not None and mapping.mapped and protein_name in protein_grids:
-                    frame = frames.get(protein_name)
-                    if frame is None:
-                        frame = frames[protein_name] = reading_frame.ProteinFrame(
-                            mapping, protein_grids[protein_name], translate_codon,
-                            UNKNOWN_RESIDUE, master_alignment)
-                    record_aa, verdict = frame.read(alignment_indices)
-                    if verdict in reading_frame.GUARDS:
-                        diagnostics[f'codon_{verdict}'] += 1
-                        guarded_codons[protein_name] += 1
-                        aa = record_aa
-                    elif verdict != reading_frame.DEFER:
-                        codon_read = 'record'
-                        if record_aa != aa:
-                            diagnostics['codon_corrected_from_record'] += 1
-                            corrected_codons[protein_name] += 1
-                            codon_read = 'record_corrected'
-                        aa = record_aa
-                if aa == UNKNOWN_RESIDUE:
-                    # 'X' is the absence of a reading, not a residue.  Letting it
-                    # match meant any catalogue row spelled 'X' - a shape the
-                    # normaliser's [A-Z*] token grammar admits - fired on every
-                    # unsequenced or ambiguous codon, flagging the worst-covered
-                    # records the hardest.
-                    diagnostics['codon_residue_unresolved'] += 1
-                    continue
-                matched_rows = alt_lookup.get(aa, [])
-                if not matched_rows:
-                    continue
-
-                wild_type_residues, wild_type_tier = lookup_wild_type_residues(
-                    wild_type_tables, subtype_code, genotype, protein_name, aa_pos
-                )
-                for row in matched_rows:
-                    signature_id = clean_cell(row.get('signature_id', ''))
-                    scope_codes = signature_scope.get(signature_id, frozenset())
-                    scope_tier = classify_genotype_scope(scope_codes, genotype, subtype_code)
-
-                    if wild_type_residues is None:
-                        residue_status = RESIDUE_STATUS_WT_UNKNOWN
-                    elif aa in wild_type_residues:
-                        residue_status = RESIDUE_STATUS_ANCHOR
-                    else:
-                        residue_status = RESIDUE_STATUS_CHANGE
-
-                    if scope_tier == SCOPE_TIER_OUT_OF_SCOPE:
-                        call_status = CALL_STATUS_SUPPRESSED_OUT_OF_SCOPE
-                    elif residue_status == RESIDUE_STATUS_ANCHOR:
-                        call_status = CALL_STATUS_SUPPRESSED_WILD_TYPE
-                    else:
-                        call_status = CALL_STATUS_EMITTED
-
-                    record = {
-                        'primary_accession': primary_accession,
-                        'mutation_id': row['mutation_id'],
-                        'protein_name': protein_name,
-                        'segment': row['_segment_norm'],
-                        'aa_position': aa_pos,
-                        'alt_residue': row['_alt_residue_norm'],
-                        'combination_id': clean_cell(row.get('combination_id', '')),
-                        'signature_id': signature_id,
-                        'signature_kind': clean_cell(row.get('signature_kind', '')),
-                        'observed_residue': aa,
-                        'sequence_genotype': genotype,
-                        'sequence_subtype': subtype_code,
-                        'relevant_genotypes': ','.join(sorted(scope_codes)),
-                        'scope_tier': scope_tier,
-                        'wild_type_residues': ''.join(sorted(wild_type_residues)) if wild_type_residues else '',
-                        'wild_type_scope_tier': wild_type_tier,
-                        'residue_status': residue_status,
-                        'call_status': call_status,
-                        'codon_read': codon_read,
-                    }
-                    if call_evidence is not None:
-                        call_evidence.append(record)
-
-                    if call_status != CALL_STATUS_EMITTED:
-                        diagnostics[call_status] += 1
-                        continue
-
-                    mutations_found.append(record)
-                    diagnostics['mutation_hits'] += 1
-                    if segment_aware and not row['_segment_norm']:
-                        # This build has several segments and the catalogue row
-                        # named none, so it was tried against every one of them.
-                        # The call is not wrong, but which segment it came from
-                        # rests on an assumption rather than on the catalogue.
-                        diagnostics['emitted_from_segment_unstated_catalog_row'] += 1
-                    diagnostics[f'emitted_{scope_tier}'] += 1
-                    diagnostics[f'emitted_{residue_status}'] += 1
-                    if aa == DELETION_RESIDUE:
-                        diagnostics['emitted_deletions'] += 1
-
-            if frame_scan is not None:
-                for protein_name, frame in frames.items():
-                    if not (frame.has_issue or corrected_codons[protein_name] or guarded_codons[protein_name]):
-                        continue
-                    diagnostics['frame_scan_rows'] += 1
-                    frame_scan.append({
-                        'primary_accession': primary_accession,
-                        'segment': seq_row['_segment_norm'],
-                        'protein_name': protein_name,
-                        'master_accession': coord_ref_acc,
-                        **frame.scan_row(),
-                        'catalogue_codons_corrected': corrected_codons[protein_name],
-                        'catalogue_codons_guarded': guarded_codons[protein_name],
-                    })
+            _annotate_single_alignment_row(
+                primary_accession=seq_row['sequence_id'],
+                alignment=seq_row['alignment'],
+                segment_norm=seq_row['_segment_norm'],
+                coord_ref_acc=coord_ref_acc,
+                grouped_positions=grouped_positions,
+                protein_grids=protein_grids,
+                master_alignment=master_alignment,
+                record_lookup=record_lookup,
+                sequence_genotypes=sequence_genotypes,
+                wild_type_tables=wild_type_tables,
+                signature_scope=signature_scope,
+                segment_aware=segment_aware,
+                diagnostics=diagnostics,
+                mutations_found=mutations_found,
+                call_evidence=call_evidence,
+                frame_scan=frame_scan,
+            )
 
     if not resolved_maps:
         message = (
@@ -2026,13 +2232,10 @@ def load_publications_table(publications_path):
     """Publication metadata, one row per ``evidence_id``.
 
     ``mutation_catalog.evidence_id`` holds a publication reference on rows whose
-    ``data_source`` is ``pubmed`` or ``conference_abstract``.  A bare reference
-    is not usable evidence on its own - nothing in the database says what
-    27773808 is - so this loads title / authors / year / journal / url.
-
-    8 of PHDR's 128 references are conference abstracts with no PMID
-    (AASLD_2017_Abs_1176); ``data_source`` says which is which, so nothing has
-    to parse the id as an integer to find out.
+    ``data_source`` is ``pubmed``, ``doi``, ``literature``, or
+    ``conference_abstract``. Accepts either HCV's PHDR CSV header
+    (``id``, ``title``, ``authors_short``, ``year``, ``journal``, ``url``) or
+    generalized headers using ``evidence_id`` / ``citation`` / ``authors``.
 
     Optional.  Without it the references are present but unresolvable.
     """
@@ -2041,14 +2244,14 @@ def load_publications_table(publications_path):
     rows = []
     with open(publications_path, newline='', encoding='utf-8', errors='replace') as handle:
         for row in csv.DictReader(handle):
-            evidence_id = (row.get('id') or '').strip()
+            evidence_id = (row.get('evidence_id') or row.get('id') or '').strip()
             if not evidence_id:
                 continue
             rows.append({
                 'evidence_id': evidence_id,
-                'data_source': publication_source(evidence_id),
-                'title': (row.get('title') or '').strip(),
-                'authors': (row.get('authors_short') or '').strip(),
+                'data_source': (row.get('data_source') or '').strip() or publication_source(evidence_id),
+                'title': (row.get('title') or row.get('citation') or '').strip(),
+                'authors': (row.get('authors_short') or row.get('authors') or '').strip(),
                 'year': (row.get('year') or '').strip(),
                 'journal': (row.get('journal') or '').strip(),
                 'url': (row.get('url') or '').strip(),
@@ -2056,10 +2259,630 @@ def load_publications_table(publications_path):
     return pd.DataFrame(rows) if rows else None
 
 
+def _load_lightweight_meta_data(conn):
+    """Load only the columns of meta_data needed for exclusion, masters, and typing."""
+    wanted = [
+        'primary_accession', 'accession_type', 'segment', 'exclusion_status',
+        'nearest_reference_genotype', 'genotype',
+        'nearest_reference_subtype', 'subtype',
+        'serotype_validated', 'serotype',
+    ]
+    try:
+        existing = [row[1] for row in conn.execute('PRAGMA table_info(meta_data)')]
+    except sqlite3.DatabaseError:
+        return None
+    selected = [col for col in wanted if col in existing]
+    if not selected:
+        return None
+    cols_sql = ', '.join(f'"{col}"' for col in selected)
+    return pd.read_sql_query(f'SELECT {cols_sql} FROM meta_data', conn)
+
+
+def _build_exclusion_filter(meta_data, has_aln_segment):
+    """Return ``(excl_pairs, excl_accs)`` from ``meta_data.exclusion_status``."""
+    if meta_data is None or meta_data.empty or not {'primary_accession', 'exclusion_status'}.issubset(meta_data.columns):
+        return None, None
+    excl_status = meta_data['exclusion_status'].fillna('').astype(str).str.strip().str.lower()
+    excluded_meta = meta_data[~excl_status.isin({'', '0', 'false', 'no', 'na', 'none', 'nan'})]
+    if excluded_meta.empty:
+        return None, None
+    if 'segment' in excluded_meta.columns and has_aln_segment:
+        excl_pairs = {
+            (str(acc).strip(), normalize_segment(seg))
+            for acc, seg in zip(excluded_meta['primary_accession'], excluded_meta['segment'])
+            if str(acc).strip()
+        }
+        return excl_pairs, None
+    excl_accs = {str(acc).strip() for acc in excluded_meta['primary_accession'] if str(acc).strip()}
+    return None, excl_accs
+
+
+def _segment_sql_predicate(raw_values):
+    """Return ``(where_clause, params)`` matching a bucket of raw SQLite segment values."""
+    if raw_values is None:
+        return '', []
+    has_null = any(v is None for v in raw_values)
+    non_null = [v for v in raw_values if v is not None]
+    clauses = []
+    params = []
+    if non_null:
+        placeholders = ','.join('?' for _ in non_null)
+        clauses.append(f'segment IN ({placeholders})')
+        params.extend(non_null)
+    if has_null:
+        clauses.append('segment IS NULL')
+    if not clauses:
+        return '', []
+    return '(' + ' OR '.join(clauses) + ')', params
+
+
+def _batch_fetch_sequences_map(conn, accessions, seq_has_segment):
+    """Fetch submitted sequences for a chunk of accessions in bounded SQLite queries."""
+    records = defaultdict(list)
+    unique_accs = sorted({str(acc).strip() for acc in accessions if str(acc).strip()})
+    if not unique_accs:
+        return records
+    sql_tpl = (
+        'SELECT header, sequence, segment FROM sequences WHERE header IN ({ph})'
+        if seq_has_segment
+        else 'SELECT header, sequence, NULL FROM sequences WHERE header IN ({ph})'
+    )
+    batch_size = 900
+    for i in range(0, len(unique_accs), batch_size):
+        batch = unique_accs[i:i + batch_size]
+        ph = ','.join('?' for _ in batch)
+        for header, seq, seg in conn.execute(sql_tpl.format(ph=ph), batch):
+            if header is not None:
+                records[str(header).strip()].append((seq, seg))
+    return records
+
+
+def _write_catalog_and_lookup_tables(conn, catalog, catalog_column_profile, publications=None, clinical_trials=None):
+    cursor = conn.cursor()
+    print('Writing mutation_catalog table...')
+    df_catalog = build_catalog_reference_table(catalog, catalog_column_profile)
+    cursor.execute('DROP TABLE IF EXISTS mutation_catalog')
+    df_catalog.to_sql('mutation_catalog', conn, if_exists='replace', index=False)
+    if 'mutation_id' in df_catalog.columns:
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_mut_catalog_mutid ON mutation_catalog(mutation_id)')
+    if 'protein_name' in df_catalog.columns and 'segment' in df_catalog.columns:
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_mut_catalog_seg_prot ON mutation_catalog(segment, protein_name)')
+    if 'combination_id' in df_catalog.columns:
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_mut_catalog_comb ON mutation_catalog(combination_id)')
+    if 'evidence_id' in df_catalog.columns:
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_mut_catalog_evidence ON mutation_catalog(evidence_id)')
+
+    for name, table in (('publications', publications), ('clinical_trials', clinical_trials)):
+        if table is None or table.empty:
+            continue
+        print(f'Writing {name} table ({len(table)} rows)...')
+        duplicates = table.loc[table['evidence_id'].duplicated(), 'evidence_id'].tolist()
+        if duplicates:
+            raise ValueError(f'{name} must be one row per evidence_id before it is written; '
+                             f'repeated: {", ".join(sorted(set(duplicates)))}')
+        cursor.execute(f'DROP TABLE IF EXISTS {name}')
+        table.to_sql(name, conn, if_exists='replace', index=False)
+        cursor.execute(f'CREATE UNIQUE INDEX IF NOT EXISTS idx_{name}_evidence ON {name}(evidence_id)')
+
+
+def annotate_database_streaming(
+    conn,
+    catalog,
+    catalog_column_profile,
+    alias_lookup,
+    db_gff_maps,
+    allow_genbank_reference_gff,
+    chunk_size=25000,
+    publications=None,
+    clinical_trials=None,
+):
+    """Per-segment chunked SQLite streaming annotation with bounded RAM usage.
+
+    Produces identical outputs to ``annotate_from_reference_coordinates`` +
+    ``write_mutation_tables`` while never calling ``SELECT * FROM sequence_alignment``
+    or ``SELECT * FROM meta_data`` so multi-million-row builds (e.g. 2.94M IAV
+    sequences) run cleanly in a few hundred MB of RAM.
+    """
+    aln_cols = [row[1] for row in conn.execute('PRAGMA table_info(sequence_alignment)')]
+    if 'alignment' not in aln_cols:
+        raise AnnotationMappingError('sequence_alignment must contain an alignment column')
+    seq_col = 'sequence_id' if 'sequence_id' in aln_cols else ('primary_accession' if 'primary_accession' in aln_cols else None)
+    acc_col = 'primary_accession' if 'primary_accession' in aln_cols else seq_col
+    if seq_col is None:
+        raise AnnotationMappingError('sequence_alignment must contain sequence_id or primary_accession')
+    has_aln_name = 'alignment_name' in aln_cols
+    has_aln_seg = 'segment' in aln_cols
+
+    total_aln_rows = conn.execute('SELECT COUNT(*) FROM sequence_alignment').fetchone()[0]
+    if total_aln_rows == 0:
+        raise AnnotationMappingError('No usable reference identifiers were found in sequence_alignment.alignment_name.')
+
+    meta_data = _load_lightweight_meta_data(conn)
+    master_candidates = []
+    if meta_data is not None and not meta_data.empty and {'primary_accession', 'accession_type'}.issubset(meta_data.columns):
+        master_candidates = meta_data[
+            meta_data['accession_type'].fillna('').str.strip().str.lower() == 'master'
+        ]['primary_accession'].dropna().astype(str).str.strip().unique().tolist()
+
+    catalog_reference_hints = [
+        value for value in catalog['reference_accession'].dropna().astype(str).str.strip().unique().tolist() if value
+    ]
+    coord_candidates = []
+    for cand in list(master_candidates) + catalog_reference_hints:
+        for token in extract_accession_tokens(cand):
+            if token and token not in coord_candidates:
+                coord_candidates.append(token)
+
+    excl_pairs, excl_accs = _build_exclusion_filter(meta_data, has_aln_seg)
+
+    # Check submitted sequences table availability once
+    try:
+        seq_table_cols = {row[1] for row in conn.execute('PRAGMA table_info(sequences)')}
+    except sqlite3.DatabaseError:
+        seq_table_cols = set()
+    has_seq_table = {'header', 'sequence'} <= seq_table_cols
+    seq_table_has_seg = 'segment' in seq_table_cols
+    if not has_seq_table:
+        print('[AnnotateMutations][warn] No sequences table: codons are read from alignment '
+              'columns alone, with no reading-frame check against the submitted records')
+
+    # Group raw SQLite segment values by normalize_segment() so '4' and '4.0' stay together
+    raw_segs_by_norm = defaultdict(list)
+    if has_aln_seg:
+        for (raw_seg,) in conn.execute('SELECT DISTINCT segment FROM sequence_alignment'):
+            raw_segs_by_norm[normalize_segment(raw_seg)].append(raw_seg)
+    else:
+        raw_segs_by_norm[''] = None
+    segment_keys = sorted(raw_segs_by_norm.keys())
+    segment_aware = len(segment_keys) > 1
+
+    diagnostics = Counter()
+    signature_scope = build_signature_genotype_scope(catalog)
+    wild_type_tables = build_wild_type_tables(catalog)
+    sequence_genotypes = build_sequence_genotype_map(meta_data, diagnostics)
+
+    if segment_aware:
+        catalog_segments = set(catalog['_segment_norm'].tolist())
+        stranded = {value for value in catalog_segments if value and value not in set(segment_keys)}
+        if stranded:
+            stranded_rows = int(catalog['_segment_norm'].isin(stranded).sum())
+            diagnostics['catalog_rows_without_matching_segment'] += stranded_rows
+            print(
+                '[AnnotateMutations][warn] '
+                f'{stranded_rows} catalog row(s) name segment(s) '
+                f"{', '.join(sorted(stranded))}, which no sequence in this build carries"
+            )
+
+    def _fetch_reference_candidates_df(seg_where, seg_params):
+        aln_name_expr = f'"{ "alignment_name" }"' if has_aln_name else "''"
+        seg_expr = 'segment' if has_aln_seg else "''"
+        select_prefix = f'SELECT "{seq_col}" AS sequence_id, "{acc_col}" AS primary_accession, {aln_name_expr} AS alignment_name, {seg_expr} AS segment, alignment FROM sequence_alignment'
+        rows = []
+        seen_ids = set()
+
+        def _add_query_rows(where_parts, params):
+            sql = select_prefix + (' WHERE ' + ' AND '.join(where_parts) if where_parts else '')
+            for r in conn.execute(sql, params):
+                key = (str(r[0] or '').strip(), normalize_segment(r[3]))
+                if key in seen_ids:
+                    continue
+                if excl_pairs is not None and key in excl_pairs:
+                    continue
+                if excl_accs is not None and key[0] in excl_accs:
+                    continue
+                seen_ids.add(key)
+                rows.append({
+                    'sequence_id': r[0],
+                    'primary_accession': r[1],
+                    'alignment_name': r[2] if r[2] is not None else '',
+                    'segment': r[3] if r[3] is not None else '',
+                    'alignment': r[4],
+                })
+
+        if coord_candidates:
+            batch_size = 400
+            for i in range(0, len(coord_candidates), batch_size):
+                batch = coord_candidates[i:i + batch_size]
+                ph = ','.join('?' for _ in batch)
+                parts = ([seg_where] if seg_where else []) + [f'("{seq_col}" IN ({ph}) OR "{acc_col}" IN ({ph}))']
+                _add_query_rows(parts, list(seg_params) + batch + batch)
+
+        if has_aln_name:
+            dist_sql = f'SELECT DISTINCT alignment_name FROM sequence_alignment' + (f' WHERE {seg_where}' if seg_where else '')
+            ref_names = [str(r[0]).strip() for r in conn.execute(dist_sql, seg_params) if r[0] is not None and str(r[0]).strip()]
+            if ref_names:
+                batch_size = 400
+                for i in range(0, len(ref_names), batch_size):
+                    batch = ref_names[i:i + batch_size]
+                    ph = ','.join('?' for _ in batch)
+                    parts = ([seg_where] if seg_where else []) + [f'("{seq_col}" IN ({ph}) OR "{acc_col}" IN ({ph}))']
+                    _add_query_rows(parts, list(seg_params) + batch + batch)
+
+        if not rows:
+            parts = [seg_where] if seg_where else []
+            sql = select_prefix + (' WHERE ' + ' AND '.join(parts) if parts else '') + ' LIMIT 5'
+            for r in conn.execute(sql, seg_params):
+                rows.append({
+                    'sequence_id': r[0],
+                    'primary_accession': r[1],
+                    'alignment_name': r[2] if r[2] is not None else '',
+                    'segment': r[3] if r[3] is not None else '',
+                    'alignment': r[4],
+                })
+
+        if not rows:
+            return pd.DataFrame(columns=['sequence_id', 'primary_accession', 'alignment_name', 'segment', 'alignment', '_reference_id'])
+        df = pd.DataFrame(rows)
+        df['_reference_id'] = df['alignment_name'].fillna('').astype(str).str.strip()
+        blank = df['_reference_id'] == ''
+        if blank.any():
+            fallback_ref = master_candidates[0] if len(master_candidates) == 1 else str(df['sequence_id'].iloc[0])
+            df.loc[blank, '_reference_id'] = fallback_ref
+        return df
+
+    # Phase 1: Resolve coordinate reference maps and position indexes for all segments
+    resolved_maps = {}
+    protein_miss_counts = Counter()
+    proteins_resolved = set()
+    mappable_catalog_rows = 0
+    segment_plans = []
+
+    for segment_key in segment_keys:
+        if segment_aware:
+            segment_catalog = catalog[catalog['_segment_norm'].isin({segment_key, ''})]
+        else:
+            segment_catalog = catalog
+
+        label = f'segment {segment_key}' if segment_aware else 'all sequences'
+        if segment_catalog.empty:
+            diagnostics['segments_without_catalog_rows'] += 1
+            print(f'[AnnotateMutations][warn] No catalog rows apply to {label}')
+            continue
+
+        seg_where, seg_params = _segment_sql_predicate(raw_segs_by_norm[segment_key])
+        ref_df = _fetch_reference_candidates_df(seg_where, seg_params)
+        if ref_df.empty:
+            diagnostics['segments_without_reference_coordinates'] += 1
+            print(
+                f'[AnnotateMutations][warn] Could not resolve a reference coordinate space for '
+                f'{label}; its sequences are not annotated'
+            )
+            continue
+
+        coord_ref_acc, coord_map, feature_map = resolve_master_coordinate_space(
+            ref_df, coord_candidates, db_gff_maps, alias_lookup, allow_genbank_reference_gff
+        )
+        if coord_map is None or feature_map is None:
+            diagnostics['segments_without_reference_coordinates'] += 1
+            print(
+                f'[AnnotateMutations][warn] Could not resolve a reference coordinate space for '
+                f'{label}; its sequences are not annotated'
+            )
+            continue
+
+        seg_count_sql = 'SELECT COUNT(*) FROM sequence_alignment' + (f' WHERE {seg_where}' if seg_where else '')
+        seg_row_count = conn.execute(seg_count_sql, seg_params).fetchone()[0]
+        if segment_aware:
+            print(
+                f'[AnnotateMutations] Coordinate reference for segment {segment_key}: '
+                f'{coord_ref_acc} ({seg_row_count} sequences)'
+            )
+        else:
+            print(
+                f'[AnnotateMutations] Coordinate reference: {coord_ref_acc} '
+                f"(all catalog positions resolved using this sequence's alignment column space)"
+            )
+
+        grouped_positions, segment_mappable = build_segment_position_index(
+            segment_catalog, coord_map, feature_map, diagnostics,
+            protein_miss_counts, proteins_resolved,
+        )
+        mappable_catalog_rows += segment_mappable
+        resolved_maps[coord_ref_acc] = {
+            'resolved_accession': coord_ref_acc,
+            'feature_map': feature_map,
+            'attempted': coord_candidates,
+            'source': 'master_coord_ref',
+            'segment': segment_key,
+            'aligned_reference_accession': coord_ref_acc,
+            'aligned_reference_map': coord_map,
+        }
+        if not grouped_positions:
+            continue
+
+        protein_grids = {}
+        master_alignment = None
+        if has_seq_table:
+            master_rows = ref_df[
+                (ref_df['sequence_id'].astype(str).str.strip() == str(coord_ref_acc))
+                | (ref_df['primary_accession'].astype(str).str.strip() == str(coord_ref_acc))
+            ]
+            if not master_rows.empty:
+                master_alignment = master_rows.iloc[0]['alignment']
+            for protein_name in {key[0] for key in grouped_positions}:
+                gene_entry = feature_map[protein_name]
+                feature_end = gene_entry.get('cds_end')
+                if feature_end is None:
+                    last_position = max(pos for name, pos, _ in grouped_positions if name == protein_name)
+                    feature_end = gene_entry['cds_start'] + last_position * 3 - 1
+                protein_grids[protein_name] = reading_frame.codon_grid(
+                    coord_map, gene_entry['cds_start'], feature_end,
+                    exons=gene_entry.get('exons'),
+                )
+
+        segment_plans.append({
+            'segment_key': segment_key,
+            'seg_where': seg_where,
+            'seg_params': seg_params,
+            'seg_row_count': seg_row_count,
+            'coord_ref_acc': coord_ref_acc,
+            'grouped_positions': grouped_positions,
+            'protein_grids': protein_grids,
+            'master_alignment': master_alignment,
+        })
+
+    if not resolved_maps:
+        message = (
+            'Could not resolve a master reference alignment + feature map. '
+            f'Candidates tried: {coord_candidates}.'
+        )
+        if not allow_genbank_reference_gff:
+            message += ' Re-run with --allow_genbank_reference_gff to fetch from NCBI.'
+        raise AnnotationMappingError(message)
+
+    proteins_missing_from_reference = Counter({
+        protein: count for protein, count in protein_miss_counts.items()
+        if protein not in proteins_resolved
+    })
+
+    if mappable_catalog_rows == 0:
+        missing_summary = ', '.join(
+            protein for protein, _ in proteins_missing_from_reference.most_common(10)
+        )
+        if not proteins_resolved:
+            raise AnnotationMappingError(
+                'No catalog coordinates could be mapped onto master reference CDS annotations. '
+                f'Proteins not found in master feature map: {missing_summary}'
+            )
+        print(
+            '[AnnotateMutations][warn] Every catalog row was rejected before annotation; '
+            'see the mapping summary for the reason'
+        )
+
+    if proteins_missing_from_reference:
+        diagnostics['catalog_rows_without_reference_feature'] = sum(
+            proteins_missing_from_reference.values()
+        )
+        diagnostics['proteins_without_reference_feature'] = len(proteins_missing_from_reference)
+        preview = ', '.join(
+            protein for protein, _ in proteins_missing_from_reference.most_common(10)
+        )
+        print(f'[AnnotateMutations][warn] Missing protein annotations in master feature map: {preview}')
+
+    # Phase 2: Stream per-segment in chunks and write output tables incrementally
+    cursor = conn.cursor()
+    cursor.execute('DROP TABLE IF EXISTS sequence_mutations')
+    cursor.execute('DROP TABLE IF EXISTS sequence_drug_resistance')
+    cursor.execute('DROP TABLE IF EXISTS sequence_mutation_calls')
+    cursor.execute('DROP TABLE IF EXISTS sequence_relevant_mutation_summary')
+    cursor.execute('DROP TABLE IF EXISTS completed_signatures_only')
+    if has_seq_table:
+        cursor.execute('DROP TABLE IF EXISTS sequence_reading_frame_scan')
+
+    df_catalog_for_layouts = catalog.fillna('').drop(
+        columns=[c for c in EVIDENCE_COLUMNS if c in catalog.columns]
+    ).drop_duplicates()
+
+    written_calls = False
+    written_summary = False
+    written_completed = False
+    written_frame_scan = False
+    total_dropped_excl = 0
+    total_frame_scan_rows = 0
+    seen_call_accs = set()
+    overlap_call_accs = set()
+
+    seg_expr = 'segment' if has_aln_seg else "''"
+    for plan in segment_plans:
+        segment_key = plan['segment_key']
+        seg_where = plan['seg_where']
+        seg_params = plan['seg_params']
+        coord_ref_acc = plan['coord_ref_acc']
+        grouped_positions = plan['grouped_positions']
+        protein_grids = plan['protein_grids']
+        master_alignment = plan['master_alignment']
+
+        last_rowid = 0
+        processed_seg = 0
+        while True:
+            where_parts = ['rowid > ?']
+            params = [last_rowid]
+            if seg_where:
+                where_parts.append(seg_where)
+                params.extend(seg_params)
+            sql = (
+                f'SELECT rowid, "{seq_col}", "{acc_col}", {seg_expr}, alignment '
+                f'FROM sequence_alignment WHERE ' + ' AND '.join(where_parts)
+                + ' ORDER BY rowid LIMIT ?'
+            )
+            params.append(chunk_size)
+            batch_rows = conn.execute(sql, params).fetchall()
+            if not batch_rows:
+                break
+            last_rowid = batch_rows[-1][0]
+
+            filtered_rows = []
+            for _rowid, seq_id, _acc, raw_seg, aln in batch_rows:
+                acc_str = str(seq_id).strip()
+                seg_norm = normalize_segment(raw_seg) if has_aln_seg else ''
+                if excl_pairs is not None and (acc_str, seg_norm) in excl_pairs:
+                    total_dropped_excl += 1
+                    continue
+                if excl_accs is not None and acc_str in excl_accs:
+                    total_dropped_excl += 1
+                    continue
+                filtered_rows.append((seq_id, seg_norm, aln))
+
+            if not filtered_rows:
+                continue
+
+            chunk_record_lookup = None
+            if has_seq_table and protein_grids:
+                chunk_seq_map = _batch_fetch_sequences_map(
+                    conn, [r[0] for r in filtered_rows], seq_table_has_seg
+                )
+
+                def _chunk_lookup(accession, segment, _map=chunk_seq_map):
+                    rows = _map.get(str(accession).strip(), ())
+                    if len(rows) > 1:
+                        norm_s = normalize_segment(segment)
+                        rows = [row for row in rows if normalize_segment(row[1]) == norm_s]
+                    return str(rows[0][0]) if len(rows) == 1 and rows[0][0] else None
+
+                chunk_record_lookup = _chunk_lookup
+
+            chunk_muts = []
+            chunk_evidence = []
+            chunk_frame_scan = [] if has_seq_table else None
+            for seq_id, seg_norm, aln in filtered_rows:
+                _annotate_single_alignment_row(
+                    primary_accession=seq_id,
+                    alignment=aln,
+                    segment_norm=seg_norm,
+                    coord_ref_acc=coord_ref_acc,
+                    grouped_positions=grouped_positions,
+                    protein_grids=protein_grids,
+                    master_alignment=master_alignment,
+                    record_lookup=chunk_record_lookup,
+                    sequence_genotypes=sequence_genotypes,
+                    wild_type_tables=wild_type_tables,
+                    signature_scope=signature_scope,
+                    segment_aware=segment_aware,
+                    diagnostics=diagnostics,
+                    mutations_found=chunk_muts,
+                    call_evidence=chunk_evidence,
+                    frame_scan=chunk_frame_scan,
+                )
+
+            if chunk_evidence:
+                df_calls = build_mutation_call_table(chunk_evidence)
+                if not df_calls.empty:
+                    chunk_accs = set(df_calls['primary_accession'].astype(str))
+                    overlap_call_accs.update(chunk_accs & seen_call_accs)
+                    seen_call_accs.update(chunk_accs)
+                    df_calls.to_sql('sequence_mutation_calls', conn, if_exists='append', index=False)
+                    written_calls = True
+
+            if chunk_muts:
+                df_mut = pd.DataFrame(chunk_muts, columns=MUTATION_CALL_IDENTITY_COLUMNS)
+                df_mut = df_mut.drop_duplicates(subset=MUTATION_CALL_IDENTITY_COLUMNS).fillna('')
+                df_rel = build_sequence_relevant_mutation_summary(df_mut)
+                if not df_rel.empty:
+                    df_rel.to_sql('sequence_relevant_mutation_summary', conn, if_exists='append', index=False)
+                    written_summary = True
+                df_comp = build_completed_signatures_only(df_mut, df_catalog_for_layouts)
+                if not df_comp.empty:
+                    df_comp.to_sql('completed_signatures_only', conn, if_exists='append', index=False)
+                    written_completed = True
+
+            if chunk_frame_scan:
+                pd.DataFrame(chunk_frame_scan, columns=FRAME_SCAN_COLUMNS).to_sql(
+                    'sequence_reading_frame_scan', conn, if_exists='append', index=False
+                )
+                written_frame_scan = True
+                total_frame_scan_rows += len(chunk_frame_scan)
+
+            processed_seg += len(filtered_rows)
+            if plan['seg_row_count'] > chunk_size:
+                print(
+                    f'[AnnotateMutations] Segment {segment_key or "all"}: '
+                    f'processed {processed_seg:,}/{plan["seg_row_count"]:,} rows '
+                    f'(hits={diagnostics.get("mutation_hits", 0):,})',
+                    flush=True,
+                )
+
+    if total_dropped_excl:
+        print(f'[AnnotateMutations] Excluded {total_dropped_excl} sequence_alignment row(s) flagged in meta_data.exclusion_status')
+
+    # Reconcile any accession that appeared across multiple chunks/segments
+    if overlap_call_accs and written_calls:
+        overlap_list = sorted(overlap_call_accs)
+        reloaded_parts = []
+        for i in range(0, len(overlap_list), 900):
+            batch = overlap_list[i:i + 900]
+            ph = ','.join('?' for _ in batch)
+            reloaded_parts.append(
+                pd.read_sql_query(
+                    f'SELECT * FROM sequence_mutation_calls WHERE primary_accession IN ({ph})',
+                    conn, params=batch,
+                )
+            )
+            cursor.execute(f'DELETE FROM sequence_mutation_calls WHERE primary_accession IN ({ph})', batch)
+            if written_summary:
+                cursor.execute(f'DELETE FROM sequence_relevant_mutation_summary WHERE primary_accession IN ({ph})', batch)
+            if written_completed:
+                cursor.execute(f'DELETE FROM completed_signatures_only WHERE primary_accession IN ({ph})', batch)
+        if reloaded_parts:
+            df_ov = pd.concat(reloaded_parts, ignore_index=True)
+            df_ov_clean = build_mutation_call_table(df_ov.to_dict('records'))
+            if not df_ov_clean.empty:
+                df_ov_clean.to_sql('sequence_mutation_calls', conn, if_exists='append', index=False)
+                df_ov_emitted = df_ov_clean[df_ov_clean['call_status'] == CALL_STATUS_EMITTED][MUTATION_CALL_IDENTITY_COLUMNS].drop_duplicates().fillna('')
+                if not df_ov_emitted.empty:
+                    df_rel = build_sequence_relevant_mutation_summary(df_ov_emitted)
+                    if not df_rel.empty:
+                        df_rel.to_sql('sequence_relevant_mutation_summary', conn, if_exists='append', index=False)
+                        written_summary = True
+                    df_comp = build_completed_signatures_only(df_ov_emitted, df_catalog_for_layouts)
+                    if not df_comp.empty:
+                        df_comp.to_sql('completed_signatures_only', conn, if_exists='append', index=False)
+                        written_completed = True
+
+    # Ensure every target table exists with exact schema and indexes
+    _write_catalog_and_lookup_tables(
+        conn, catalog, catalog_column_profile,
+        publications=publications, clinical_trials=clinical_trials,
+    )
+
+    if written_calls:
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_seq_mut_calls_acc ON sequence_mutation_calls(primary_accession)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_seq_mut_calls_status ON sequence_mutation_calls(call_status)')
+    else:
+        cursor.execute(
+            'CREATE TABLE sequence_mutation_calls ('
+            + ', '.join(f'{column} TEXT' for column in MUTATION_CALL_COLUMNS)
+            + ')'
+        )
+
+    if written_summary:
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_seq_rel_mut_acc ON sequence_relevant_mutation_summary(primary_accession)')
+    else:
+        cursor.execute('CREATE TABLE sequence_relevant_mutation_summary (primary_accession TEXT, relevant_mutations_present TEXT, total_relevant_mutation_count INTEGER)')
+
+    if written_completed:
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_completed_sig_acc_sig ON completed_signatures_only(primary_accession, signature_id)')
+    else:
+        cursor.execute('CREATE TABLE completed_signatures_only (primary_accession TEXT, signature_id TEXT, signature_kind TEXT)')
+
+    if has_seq_table:
+        if not written_frame_scan:
+            pd.DataFrame([], columns=FRAME_SCAN_COLUMNS).to_sql(
+                'sequence_reading_frame_scan', conn, if_exists='replace', index=False
+            )
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_frame_scan_acc ON sequence_reading_frame_scan(primary_accession)')
+        print(f'Writing reading-frame scan ({total_frame_scan_rows} rows)...')
+
+    conn.commit()
+    return diagnostics, resolved_maps
+
+
 def main():
     parser = argparse.ArgumentParser(description="Annotate mutations and drug resistance.")
     parser.add_argument("--db", required=True, help="Path to SQLite database.")
-    parser.add_argument("--mutation_catalog", required=True, help="Path to mutation catalog TSV.")
+    parser.add_argument(
+        "--mutation_catalog", "--catalog", dest="mutation_catalog", required=True,
+        help="Path to mutation catalog TSV.",
+    )
     parser.add_argument(
         "--virus", default="",
         help="Virus this build is for (e.g. HCV, influenza). Selects the protein-name "
@@ -2069,7 +2892,7 @@ def main():
              "the generic profile, which renames no proteins and keeps every catalog column.",
     )
     parser.add_argument("--publications", default=None,
-        help="Optional publication metadata CSV (id/title/authors_short/year/journal/url). "
+        help="Optional publication metadata CSV (id or evidence_id/title/authors_short/year/journal/url). "
              "Loaded into a publications table keyed on evidence_id, so publication references in "
              "mutation_catalog.evidence_id resolve to something readable.")
     parser.add_argument("--clinical_trials", default=None,
@@ -2086,6 +2909,13 @@ def main():
              "'HCV', 'influenza' and 'all_columns'. This used to be required with a fixed "
              "choices list, which made every virus outside that list fail at argument "
              "parsing.",
+    )
+    parser.add_argument(
+        "--chunk_size",
+        type=int,
+        default=25000,
+        help="Rows per SQLite streaming chunk per segment (default: 25000). Set to 0 to load "
+             "the entire sequence_alignment table into memory in one pass.",
     )
     parser.add_argument(
         "--allow_genbank_reference_gff",
@@ -2133,61 +2963,85 @@ def main():
         sys.exit(1)
 
     conn = sqlite3.connect(args.db)
+    conn.execute("PRAGMA cache_size = -262144")
+    conn.execute("PRAGMA temp_store = MEMORY")
 
     try:
-        print('Loading sequence alignments...')
-        seq_aln = prepare_sequence_alignment(pd.read_sql_query('SELECT * FROM sequence_alignment', conn))
-        meta_data = None
-        try:
-            meta_data = pd.read_sql_query('SELECT * FROM meta_data', conn)
-        except Exception:
-            pass
-
         gene_alias_lookup = load_gene_alias_lookup(conn, profile=profile)
         catalog, invalid_positions = prepare_catalog(catalog, gene_alias_lookup)
         if invalid_positions:
             print(f'[AnnotateMutations][warn] Skipping {invalid_positions} catalog rows with invalid aa_position values')
 
         db_gff_maps = load_db_gff_feature_maps(conn, gene_alias_lookup)
-        record_lookup = load_record_lookup(conn)
+        publications = load_publications_table(args.publications)
+        clinical_trials = load_clinical_trials_table(args.clinical_trials)
 
-        print('Extracting mutations...')
-        call_evidence = []
-        frame_scan = [] if record_lookup is not None else None
-        mutations_found, diagnostics, resolved_maps = annotate_from_reference_coordinates(
-            catalog,
-            # `segment` travels with the alignment: dropping it here was what
-            # made a segmented build resolve one coordinate space for every
-            # segment at once.
-            seq_aln[ANNOTATION_ALIGNMENT_COLUMNS].copy(),
-            meta_data,
-            gene_alias_lookup,
-            db_gff_maps,
-            args.allow_genbank_reference_gff,
-            call_evidence=call_evidence,
-            record_lookup=record_lookup,
-            frame_scan=frame_scan,
-        )
-        print(
-            '[AnnotateMutations] Resolved reference coordinate maps for: '
-            + ', '.join(
-                f'{ref}->{info["resolved_accession"]} ({info["source"]}; aligned_ref={info["aligned_reference_accession"]})'
-                for ref, info in resolved_maps.items()
+        if args.chunk_size and args.chunk_size > 0:
+            print(f'Extracting mutations (streaming per segment, chunk_size={args.chunk_size})...')
+            diagnostics, resolved_maps = annotate_database_streaming(
+                conn,
+                catalog,
+                catalog_column_profile,
+                gene_alias_lookup,
+                db_gff_maps,
+                args.allow_genbank_reference_gff,
+                chunk_size=args.chunk_size,
+                publications=publications,
+                clinical_trials=clinical_trials,
             )
-        )
+            print(
+                '[AnnotateMutations] Resolved reference coordinate maps for: '
+                + ', '.join(
+                    f'{ref}->{info["resolved_accession"]} ({info["source"]}; aligned_ref={info["aligned_reference_accession"]})'
+                    for ref, info in resolved_maps.items()
+                )
+            )
+            print('[AnnotateMutations] Mapping summary: ' + ', '.join(f'{key}={value}' for key, value in sorted(diagnostics.items())))
+            if diagnostics.get('mutation_hits', 0) == 0:
+                print('[AnnotateMutations][warn] No mutation hits were found after successful coordinate mapping')
+        else:
+            print('Loading sequence alignments...')
+            seq_aln = prepare_sequence_alignment(pd.read_sql_query('SELECT * FROM sequence_alignment', conn))
+            meta_data = _load_lightweight_meta_data(conn)
+            record_lookup = load_record_lookup(conn)
 
-        print('[AnnotateMutations] Mapping summary: ' + ', '.join(f'{key}={value}' for key, value in sorted(diagnostics.items())))
+            print('Extracting mutations...')
+            call_evidence = []
+            frame_scan = [] if record_lookup is not None else None
+            mutations_found, diagnostics, resolved_maps = annotate_from_reference_coordinates(
+                catalog,
+                # `segment` travels with the alignment: dropping it here was what
+                # made a segmented build resolve one coordinate space for every
+                # segment at once.
+                seq_aln[ANNOTATION_ALIGNMENT_COLUMNS].copy(),
+                meta_data,
+                gene_alias_lookup,
+                db_gff_maps,
+                args.allow_genbank_reference_gff,
+                call_evidence=call_evidence,
+                record_lookup=record_lookup,
+                frame_scan=frame_scan,
+            )
+            print(
+                '[AnnotateMutations] Resolved reference coordinate maps for: '
+                + ', '.join(
+                    f'{ref}->{info["resolved_accession"]} ({info["source"]}; aligned_ref={info["aligned_reference_accession"]})'
+                    for ref, info in resolved_maps.items()
+                )
+            )
 
-        if not mutations_found and diagnostics.get('mutation_hits', 0) == 0:
-            if diagnostics.get('feature_rows_matched', 0) == 0 and diagnostics.get('reference_groups_without_positions', 0) > 0:
-                raise AnnotationMappingError('No mutations were annotated because coordinate mapping failed for all available reference groups.')
-            print('[AnnotateMutations][warn] No mutation hits were found after successful coordinate mapping')
+            print('[AnnotateMutations] Mapping summary: ' + ', '.join(f'{key}={value}' for key, value in sorted(diagnostics.items())))
 
-        write_mutation_tables(conn, catalog, mutations_found, catalog_column_profile,
-                              call_evidence=call_evidence,
-                              publications=load_publications_table(args.publications),
-                              clinical_trials=load_clinical_trials_table(args.clinical_trials),
-                              frame_scan=frame_scan)
+            if not mutations_found and diagnostics.get('mutation_hits', 0) == 0:
+                if diagnostics.get('feature_rows_matched', 0) == 0 and diagnostics.get('reference_groups_without_positions', 0) > 0:
+                    raise AnnotationMappingError('No mutations were annotated because coordinate mapping failed for all available reference groups.')
+                print('[AnnotateMutations][warn] No mutation hits were found after successful coordinate mapping')
+
+            write_mutation_tables(conn, catalog, mutations_found, catalog_column_profile,
+                                  call_evidence=call_evidence,
+                                  publications=publications,
+                                  clinical_trials=clinical_trials,
+                                  frame_scan=frame_scan)
     except AnnotationMappingError as exc:
         print(f'Error: {exc}', file=sys.stderr)
         conn.close()

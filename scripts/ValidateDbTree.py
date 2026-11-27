@@ -329,7 +329,8 @@ def validate_sequence_alignment_vs_meta(conn, expected_accessions, accession_col
             WHERE s.{col} IS NOT NULL AND s.{col} != ''
               AND (
                     m.{accession_column} IS NULL
-                    OR m.{exclusion_column} != ?
+                    OR m.{exclusion_column} IS NULL
+                    OR TRIM(CAST(m.{exclusion_column} AS TEXT)) != ?
                     OR LOWER(COALESCE(m.accession_type, '')) NOT IN ('reference', 'master')
                   )
             """,
@@ -910,10 +911,6 @@ def validate_feature_projection_integrity(conn):
             continue
         cds_start_int = _try_parse_int(cds_start)
         cds_end_int = _try_parse_int(cds_end)
-        # Clamp the projected CDS coordinates to the sequence's actual alignment window
-        if cds_start_int is not None and cds_end_int is not None:
-            cds_start_int = max(cds_start_int, aln_start_int)
-            cds_end_int = min(cds_end_int, aln_end_int)
         
         expected_matches = False
         residue_columns = master_columns.get(master_text)
@@ -969,7 +966,7 @@ def validate_feature_projection_integrity(conn):
 
     return {
         "title": title,
-        "ok": len(offending_rows) == 0 and invalid_aln_rows == 0,
+        "ok": len(offending_rows) == 0 and invalid_aln_rows == 0 and unresolved_master_rows == 0,
         "table": "features",
         "offending_rows": len(offending_rows),
         "invalid_aln_rows": invalid_aln_rows,
@@ -1854,6 +1851,7 @@ def validate_collection_dates(conn, meta_cols, today=None):
     cursor.execute(f"SELECT {', '.join(quote_ident(c) for c in select_cols)} FROM meta_data")
 
     future_dates = []
+    invalid_calendar_dates = []
     implausible = []
     year_disagreements = []
     lost_precision = []
@@ -1865,9 +1863,19 @@ def validate_collection_dates(conn, meta_cols, today=None):
         year, month, day = _parse_collection_date(record.get("collection_date"))
         if year is None:
             continue
-        if year > today.year or (
-            month and day and _datetime.date(year, month, day) > today
-        ):
+        is_invalid_calendar_date = False
+        parsed_day = None
+        if month is not None:
+            if not (1 <= month <= 12):
+                is_invalid_calendar_date = True
+                invalid_calendar_dates.append(f"{accession} collection_date={record.get('collection_date')}")
+            elif day is not None:
+                try:
+                    parsed_day = _datetime.date(year, month, day)
+                except ValueError:
+                    is_invalid_calendar_date = True
+                    invalid_calendar_dates.append(f"{accession} collection_date={record.get('collection_date')}")
+        if not is_invalid_calendar_date and (year > today.year or (parsed_day is not None and parsed_day > today)):
             future_dates.append(f"{accession} collection_date={record.get('collection_date')}")
         if year < 1900:
             implausible.append(f"{accession} collection_date={record.get('collection_date')}")
@@ -1887,6 +1895,7 @@ def validate_collection_dates(conn, meta_cols, today=None):
             )
 
     findings = []
+    add_finding(findings, "invalid_calendar_date", len(invalid_calendar_dates), "collection dates that do not exist on the calendar", invalid_calendar_dates)
     add_finding(findings, "collection_date_in_the_future", len(future_dates), "collection dates later than today", future_dates)
     add_finding(findings, "collection_year_before_1900", len(implausible), "collection years that predate viral sequencing", implausible)
     add_finding(
@@ -1926,23 +1935,6 @@ def validate_strain_sequence_duplicates(
     if not table_exists(conn, "sequence_alignment") and not table_exists(conn, "sequences"):
         return invariant_result(title, skipped=True, reason="Neither sequence_alignment nor sequences table is present.")
 
-    has_dataset_source = "dataset_source" in meta_cols
-    has_insdc_col = any("insdc" in c.lower() for c in meta_cols)
-    if not force:
-        sources = set()
-        if has_dataset_source:
-            for (val,) in conn.execute(
-                'SELECT DISTINCT LOWER(TRIM(COALESCE(CAST("dataset_source" AS TEXT), ""))) FROM meta_data'
-            ):
-                if val:
-                    sources.add(val)
-        if len(sources) < 2 and not has_insdc_col:
-            return invariant_result(
-                title,
-                skipped=True,
-                reason="Single-source DB without multi-repository dataset_source; pass --check-strain-duplicates to force.",
-            )
-
     from accession_utils import normalise_accession
     from cross_db_dedup import (
         aligned_sequences_agree,
@@ -1952,9 +1944,28 @@ def validate_strain_sequence_duplicates(
         extract_insdc_links,
         extract_passage_class,
         is_preferred_source,
+        parse_dataset_sources,
         passages_compatible,
+        sequence_quality_stats,
         unaligned_sequences_agree,
     )
+
+    has_dataset_source = "dataset_source" in meta_cols
+    has_insdc_col = any("insdc" in c.lower() for c in meta_cols)
+    if not force:
+        sources = set()
+        if has_dataset_source:
+            for (val,) in conn.execute(
+                'SELECT DISTINCT LOWER(TRIM(COALESCE(CAST("dataset_source" AS TEXT), ""))) FROM meta_data'
+            ):
+                if val:
+                    sources.update(parse_dataset_sources(val))
+        if len(sources) < 2 and not has_insdc_col:
+            return invariant_result(
+                title,
+                skipped=True,
+                reason="Single-source DB without multi-repository dataset_source; pass --check-strain-duplicates to force.",
+            )
 
     wanted_cols = [
         c for c in (
@@ -2027,100 +2038,66 @@ def validate_strain_sequence_duplicates(
                 shortlist_accs.add(cand["accession"])
                 shortlist_accs.add(w["accession"])
 
-    if not shortlist_accs:
-        return invariant_result(title, [])
-
-    # Load sequences for shortlisted accessions only
-    use_aln = table_exists(conn, "sequence_alignment")
-    seq_map = {}
-    acc_list = sorted(shortlist_accs)
-    if use_aln:
-        aln_cols = get_table_columns(conn, "sequence_alignment")
-        id_col = next((c for c in ("primary_accession", "accession", "sequence_id") if c in aln_cols), None)
-        s_col = next((c for c in ("alignment", "aligned_seq", "sequence") if c in aln_cols), None)
-        aln_has_seg = "segment" in aln_cols
-        if id_col and s_col:
-            for i in range(0, len(acc_list), 900):
-                chunk = acc_list[i:i + 900]
-                ph = ",".join("?" * len(chunk))
-                q = (
-                    f"SELECT {quote_ident(id_col)}, {quote_ident(s_col)}"
-                    + (", segment" if aln_has_seg else "")
-                    + f" FROM sequence_alignment WHERE {quote_ident(id_col)} IN ({ph})"
-                )
-                for r in conn.execute(q, chunk):
-                    a = str(r[0] or "").strip()
-                    s = str(r[1] or "").strip()
-                    sg = str(r[2] or "").strip() if aln_has_seg else "1"
-                    if a and s:
-                        seq_map[(sg if has_seg and aln_has_seg else "1", a)] = s
-                        seq_map.setdefault(("*", a), s)
-    else:
-        seq_cols = get_table_columns(conn, "sequences")
-        id_col = next((c for c in ("header", "primary_accession", "accession") if c in seq_cols), None)
-        if id_col and "sequence" in seq_cols:
-            for i in range(0, len(acc_list), 900):
-                chunk = acc_list[i:i + 900]
-                ph = ",".join("?" * len(chunk))
-                q = f"SELECT {quote_ident(id_col)}, sequence FROM sequences WHERE {quote_ident(id_col)} IN ({ph})"
-                for r in conn.execute(q, chunk):
-                    a = str(r[0] or "").strip()
-                    s = str(r[1] or "").strip()
-                    if a and s:
-                        seq_map[("*", a)] = s
-
-    def _get_seq(sg, a):
-        return seq_map.get((sg, a)) or seq_map.get(("*", a), "")
-
     cross_dups = []
     intra_dups = []
     seen_retired = set()
 
-    # Check explicit INSDC cross-DB links first
-    for seg, cand, links in linked_rows:
-        c_acc = cand["accession"]
-        if (seg, c_acc) in seen_retired or cand["protected"]:
-            continue
-        c_seq = _get_seq(seg, c_acc)
-        if not c_seq:
-            continue
-        c_len = cand["real_length"] or count_acgt(c_seq)
-        for lk in links:
-            w = by_seg_bare.get((seg, lk))
-            if w is None or w["accession"] == c_acc:
-                continue
-            if not passages_compatible(w["passage"], cand["passage"]):
-                continue
-            w_seq = _get_seq(seg, w["accession"])
-            if not w_seq:
-                continue
-            w_len = w["real_length"] or count_acgt(w_seq)
-            if use_aln:
-                ok, _, _ = aligned_sequences_agree(w_seq, c_seq, w_len, c_len, max_mm=2)
-            else:
-                ok, _, _ = unaligned_sequences_agree(w_seq, c_seq, max_mm=2)
-            if ok:
-                seen_retired.add((seg, c_acc))
-                cross_dups.append(f"seg={seg} {c_acc} ({cand['source']}) == {w['accession']} ({w['source']}) [insdc_link]")
-                break
+    if shortlist_accs:
+        # Load sequences for shortlisted accessions only
+        use_aln = table_exists(conn, "sequence_alignment")
+        seq_map = {}
+        acc_list = sorted(shortlist_accs)
+        if use_aln:
+            aln_cols = get_table_columns(conn, "sequence_alignment")
+            id_col = next((c for c in ("primary_accession", "accession", "sequence_id") if c in aln_cols), None)
+            s_col = next((c for c in ("alignment", "aligned_seq", "sequence") if c in aln_cols), None)
+            aln_has_seg = "segment" in aln_cols
+            if id_col and s_col:
+                for i in range(0, len(acc_list), 900):
+                    chunk = acc_list[i:i + 900]
+                    ph = ",".join("?" * len(chunk))
+                    q = (
+                        f"SELECT {quote_ident(id_col)}, {quote_ident(s_col)}"
+                        + (", segment" if aln_has_seg else "")
+                        + f" FROM sequence_alignment WHERE {quote_ident(id_col)} IN ({ph})"
+                    )
+                    for r in conn.execute(q, chunk):
+                        a = str(r[0] or "").strip()
+                        s = str(r[1] or "").strip()
+                        sg = str(r[2] or "").strip() if aln_has_seg else "1"
+                        if a and s:
+                            seq_map[(sg if has_seg and aln_has_seg else "1", a)] = s
+                            seq_map.setdefault(("*", a), s)
+        else:
+            seq_cols = get_table_columns(conn, "sequences")
+            id_col = next((c for c in ("header", "primary_accession", "accession") if c in seq_cols), None)
+            if id_col and "sequence" in seq_cols:
+                for i in range(0, len(acc_list), 900):
+                    chunk = acc_list[i:i + 900]
+                    ph = ",".join("?" * len(chunk))
+                    q = f"SELECT {quote_ident(id_col)}, sequence FROM sequences WHERE {quote_ident(id_col)} IN ({ph})"
+                    for r in conn.execute(q, chunk):
+                        a = str(r[0] or "").strip()
+                        s = str(r[1] or "").strip()
+                        if a and s:
+                            seq_map[("*", a)] = s
 
-    # Check 0-mm same-strain groups
-    for (seg, iso), grp in sorted(by_seg_iso.items()):
-        if len(grp) < 2:
-            continue
-        ordered = sorted(grp, key=lambda item: candidate_winner_sort_key(item, "genbank"))
-        kept = []
-        for cand in ordered:
+        def _get_seq(sg, a):
+            return seq_map.get((sg, a)) or seq_map.get(("*", a), "")
+
+        # Check explicit INSDC cross-DB links first
+        for seg, cand, links in linked_rows:
             c_acc = cand["accession"]
-            if (seg, c_acc) in seen_retired:
+            if (seg, c_acc) in seen_retired or cand["protected"]:
                 continue
             c_seq = _get_seq(seg, c_acc)
-            if not c_seq or cand["protected"]:
-                kept.append(cand)
+            if not c_seq:
                 continue
             c_len = cand["real_length"] or count_acgt(c_seq)
-            matched_w = None
-            for w in kept:
+            for lk in links:
+                w = by_seg_bare.get((seg, lk))
+                if w is None or w["accession"] == c_acc:
+                    continue
                 if not passages_compatible(w["passage"], cand["passage"]):
                     continue
                 w_seq = _get_seq(seg, w["accession"])
@@ -2128,21 +2105,80 @@ def validate_strain_sequence_duplicates(
                     continue
                 w_len = w["real_length"] or count_acgt(w_seq)
                 if use_aln:
-                    ok, _, _ = aligned_sequences_agree(w_seq, c_seq, w_len, c_len, max_mm=0)
+                    ok, _, _ = aligned_sequences_agree(w_seq, c_seq, w_len, c_len, max_mm=2)
                 else:
-                    ok, _, _ = unaligned_sequences_agree(w_seq, c_seq, max_mm=0)
+                    ok, _, _ = unaligned_sequences_agree(w_seq, c_seq, max_mm=2)
                 if ok:
-                    matched_w = w
+                    seen_retired.add((seg, c_acc))
+                    cross_dups.append(f"seg={seg} {c_acc} ({cand['source']}) == {w['accession']} ({w['source']}) [insdc_link]")
                     break
-            if matched_w is None:
-                kept.append(cand)
+
+        # Check 0-mm same-strain groups
+        for (seg, iso), grp in sorted(by_seg_iso.items()):
+            if len(grp) < 2:
                 continue
-            seen_retired.add((seg, c_acc))
-            desc = f"seg={seg} {c_acc} ({cand['source']}) == {matched_w['accession']} ({matched_w['source']}) strain={iso}"
-            if cand["source"] != matched_w["source"]:
-                cross_dups.append(desc)
-            else:
-                intra_dups.append(desc)
+            ordered = sorted(grp, key=lambda item: candidate_winner_sort_key(item, "genbank"))
+            kept = []
+            for cand in ordered:
+                c_acc = cand["accession"]
+                if (seg, c_acc) in seen_retired:
+                    continue
+                c_seq = _get_seq(seg, c_acc)
+                if not c_seq or cand["protected"]:
+                    kept.append(cand)
+                    continue
+                c_len = cand["real_length"] or count_acgt(c_seq)
+                matched_w = None
+                for w in kept:
+                    if not passages_compatible(w["passage"], cand["passage"]):
+                        continue
+                    w_seq = _get_seq(seg, w["accession"])
+                    if not w_seq:
+                        continue
+                    w_len = w["real_length"] or count_acgt(w_seq)
+                    if use_aln:
+                        ok, _, _ = aligned_sequences_agree(w_seq, c_seq, w_len, c_len, max_mm=0)
+                    else:
+                        ok, _, _ = unaligned_sequences_agree(w_seq, c_seq, max_mm=0)
+                    if ok:
+                        matched_w = w
+                        break
+                if matched_w is None:
+                    kept.append(cand)
+                    continue
+                seen_retired.add((seg, c_acc))
+                desc = f"seg={seg} {c_acc} ({cand['source']}) == {matched_w['accession']} ({matched_w['source']}) strain={iso}"
+                if parse_dataset_sources(cand["source"]) != parse_dataset_sources(matched_w["source"]):
+                    cross_dups.append(desc)
+                else:
+                    intra_dups.append(desc)
+
+    missing_dual_source = []
+    if has_dataset_source and "exclusion_criteria" in meta_cols and "canonical_accession" in meta_cols:
+        active_src_by_acc = {}
+        for acc_val, ds_val in conn.execute(
+            f"SELECT {quote_ident(accession_column)}, COALESCE(CAST(dataset_source AS TEXT), '') FROM meta_data"
+            + (f" WHERE {where_clause}" if where_clause else ""),
+            params,
+        ):
+            a = str(acc_val or "").strip()
+            if a:
+                active_src_by_acc[a] = parse_dataset_sources(ds_val)
+        for retired_acc, retired_ds, canon_acc in conn.execute(
+            f"SELECT {quote_ident(accession_column)}, COALESCE(CAST(dataset_source AS TEXT), ''), "
+            "COALESCE(CAST(canonical_accession AS TEXT), '') FROM meta_data "
+            "WHERE LOWER(COALESCE(CAST(exclusion_criteria AS TEXT), '')) LIKE 'cross_db_duplicate_of:%'"
+        ):
+            w = str(canon_acc or "").strip()
+            if not w or w not in active_src_by_acc:
+                continue
+            r_toks = parse_dataset_sources(retired_ds)
+            w_toks = active_src_by_acc[w]
+            if r_toks and not r_toks.issubset(w_toks):
+                missing_dual_source.append(
+                    f"winner={w} (dataset_source={';'.join(sorted(w_toks)) or '<empty>'}) missing retired cross-DB source "
+                    f"{';'.join(sorted(r_toks))} from {retired_acc}"
+                )
 
     findings = []
     add_finding(
@@ -2158,6 +2194,149 @@ def validate_strain_sequence_duplicates(
         len(intra_dups),
         "active intra-repository duplicate uploads of the same strain/segment with identical sequence",
         intra_dups,
+    )
+    add_finding(
+        findings,
+        "missing_dual_dataset_source",
+        len(missing_dual_source),
+        "active cross-DB duplicate winners missing combined dual-source dataset_source flag (e.g. 'genbank;gisaid')",
+        missing_dual_source,
+    )
+    return invariant_result(title, findings)
+
+
+def validate_strain_segment_linkage(
+    conn,
+    meta_cols,
+    accession_column="primary_accession",
+    exclusion_column="exclusion_status",
+    exclude_value="1",
+):
+    """Verify strain_segment_linkage references only active kept meta_data accessions with matching segments."""
+    title = "strain segment linkage"
+    if not table_exists(conn, "strain_segment_linkage"):
+        return invariant_result(title, skipped=True, reason="No strain_segment_linkage table in DB.")
+    if not table_exists(conn, "meta_data") or accession_column not in meta_cols:
+        return invariant_result(title, skipped=True, reason="meta_data not available.")
+
+    ssl_cols = get_table_columns(conn, "strain_segment_linkage")
+    seg_cols = [c for c in ssl_cols if c.startswith("segment_")]
+    if not seg_cols:
+        return invariant_result(title, skipped=True, reason="strain_segment_linkage has no segment_* columns.")
+
+    where_sql, params = get_meta_nonexcluded_filter(meta_cols, exclusion_column, exclude_value)
+    has_seg = "segment" in meta_cols
+    active_seg_by_acc = {}
+    q_meta = f"SELECT {quote_ident(accession_column)}" + (", segment" if has_seg else ", '1'") + " FROM meta_data"
+    if where_sql:
+        q_meta += f" WHERE {where_sql}"
+    for acc_val, seg_val in conn.execute(q_meta, params):
+        a = str(acc_val or "").strip()
+        if a:
+            active_seg_by_acc[a] = str(seg_val or "").strip()
+
+    missing_or_excluded = []
+    wrong_segment = []
+    bad_count = []
+    q_ssl = (
+        'SELECT "strain_accession", '
+        + ", ".join(quote_ident(c) for c in seg_cols)
+        + (', "segments_present", "complete_status"' if "segments_present" in ssl_cols and "complete_status" in ssl_cols else "")
+        + " FROM strain_segment_linkage"
+    )
+    has_summary_cols = "segments_present" in ssl_cols and "complete_status" in ssl_cols
+    for row in conn.execute(q_ssl):
+        strain_acc = str(row[0] or "")
+        seg_vals = row[1 : 1 + len(seg_cols)]
+        present = 0
+        for col, acc in zip(seg_cols, seg_vals):
+            if acc is None or str(acc).strip() == "":
+                continue
+            present += 1
+            acc_s = str(acc).strip()
+            expected_seg = col[len("segment_"):]
+            if acc_s not in active_seg_by_acc:
+                if len(missing_or_excluded) < 20:
+                    missing_or_excluded.append(f"strain={strain_acc} {col}={acc_s} (not active in meta_data)")
+            elif has_seg and active_seg_by_acc[acc_s] != expected_seg:
+                if len(wrong_segment) < 20:
+                    wrong_segment.append(
+                        f"strain={strain_acc} {col}={acc_s} (meta_data.segment={active_seg_by_acc[acc_s]!r} != {expected_seg!r})"
+                    )
+        if has_summary_cols:
+            rep_present = row[1 + len(seg_cols)]
+            rep_status = str(row[2 + len(seg_cols)] or "")
+            exp_status = "Complete" if present == len(seg_cols) else "Incomplete"
+            if rep_present != present or rep_status != exp_status:
+                if len(bad_count) < 20:
+                    bad_count.append(f"strain={strain_acc} present={rep_present}/{present} status={rep_status}/{exp_status}")
+
+    findings = []
+    add_finding(
+        findings,
+        "strain_segment_linkage_missing_or_excluded_accession",
+        len(missing_or_excluded),
+        "strain_segment_linkage references accession missing or excluded from meta_data",
+        missing_or_excluded,
+    )
+    add_finding(
+        findings,
+        "strain_segment_linkage_wrong_segment",
+        len(wrong_segment),
+        "strain_segment_linkage segment column points to accession belonging to a different segment",
+        wrong_segment,
+    )
+    add_finding(
+        findings,
+        "strain_segment_linkage_summary_mismatch",
+        len(bad_count),
+        "strain_segment_linkage segments_present/complete_status disagrees with populated segment columns",
+        bad_count,
+    )
+    return invariant_result(title, findings)
+
+
+def validate_host_taxa_tables(
+    conn,
+    meta_cols,
+    exclusion_column="exclusion_status",
+    exclude_value="1",
+):
+    """Verify referential consistency across the 4 host_taxa* tables when present."""
+    title = "host taxa tables"
+    if not table_exists(conn, "host_taxa"):
+        return invariant_result(title, skipped=True, reason="No host_taxa table in DB.")
+    ht_cols = get_table_columns(conn, "host_taxa")
+    if "taxa_id" not in ht_cols or "host_taxa_id" not in meta_cols:
+        return invariant_result(title, skipped=True, reason="host_taxa.taxa_id or meta_data.host_taxa_id absent.")
+
+    ht_ids = {str(r[0]).strip() for r in conn.execute("SELECT DISTINCT taxa_id FROM host_taxa WHERE taxa_id IS NOT NULL")}
+    where_sql, params = get_meta_nonexcluded_filter(meta_cols, exclusion_column, exclude_value)
+    q = "SELECT DISTINCT TRIM(CAST(host_taxa_id AS TEXT)) FROM meta_data WHERE host_taxa_id IS NOT NULL AND TRIM(CAST(host_taxa_id AS TEXT)) != '' AND UPPER(TRIM(CAST(host_taxa_id AS TEXT))) != 'NA'"
+    if where_sql:
+        q += f" AND ({where_sql})"
+    meta_tids = {str(r[0]).strip() for r in conn.execute(q, params) if str(r[0]).strip()}
+
+    missing_ht = sorted(meta_tids - ht_ids)
+    missing_lin = []
+    if table_exists(conn, "host_taxa_lineage") and "taxa_id" in get_table_columns(conn, "host_taxa_lineage"):
+        lin_ids = {str(r[0]).strip() for r in conn.execute("SELECT DISTINCT taxa_id FROM host_taxa_lineage WHERE taxa_id IS NOT NULL")}
+        missing_lin = sorted(meta_tids - lin_ids)
+
+    findings = []
+    add_finding(
+        findings,
+        "host_taxa_missing_meta_taxid",
+        len(missing_ht),
+        "active meta_data.host_taxa_id not found in host_taxa",
+        missing_ht[:20],
+    )
+    add_finding(
+        findings,
+        "host_taxa_lineage_missing_meta_taxid",
+        len(missing_lin),
+        "active meta_data.host_taxa_id not found in host_taxa_lineage",
+        missing_lin[:20],
     )
     return invariant_result(title, findings)
 
@@ -2190,6 +2369,19 @@ def run_extended_invariant_checks(
             meta_cols,
             force=check_strain_duplicates,
             accession_column=accession_column,
+            exclusion_column=exclusion_column,
+            exclude_value=exclude_value,
+        ),
+        validate_strain_segment_linkage(
+            conn,
+            meta_cols,
+            accession_column=accession_column,
+            exclusion_column=exclusion_column,
+            exclude_value=exclude_value,
+        ),
+        validate_host_taxa_tables(
+            conn,
+            meta_cols,
             exclusion_column=exclusion_column,
             exclude_value=exclude_value,
         ),
@@ -2228,8 +2420,33 @@ def get_extra_tree_label(tree_source):
     return "Extra nodes in tree"
 
 
-def validation_fail(message):
+def _finalize_report_pass(report_path):
+    if not report_path or not os.path.exists(report_path):
+        return
+    with open(report_path, "r", encoding="utf-8", errors="replace") as handle:
+        text = handle.read()
+    if "\nValidation status:" in text:
+        return
+    with open(report_path, "a", encoding="utf-8") as handle:
+        handle.write("\nValidation status: PASS\n")
+
+
+def validation_fail(message, report_path=None):
     print("[info] Validation status: FAIL")
+    if report_path:
+        try:
+            if os.path.exists(report_path):
+                with open(report_path, "r", encoding="utf-8", errors="replace") as handle:
+                    content = handle.read().replace("\nValidation status: PASS\n", "\n")
+                if content and not content.endswith("\n"):
+                    content += "\n"
+            else:
+                content = "=== ValidateDB Summary ===\n"
+            content += f"\nValidation status: FAIL\nFailure reason: {message}\n"
+            with open(report_path, "w", encoding="utf-8") as handle:
+                handle.write(content)
+        except OSError:
+            pass
     raise SystemExit(message)
 
 
@@ -2301,6 +2518,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     os.makedirs(args.outdir, exist_ok=True)
+    report_path = os.path.join(args.outdir, "db_tree_validation.txt")
 
     conn = sqlite3.connect(args.db)
     try:
@@ -2316,7 +2534,7 @@ def main(argv=None):
 
         tree_name, tree_source, newick = fetch_tree_newick(conn)
         if not newick and not args.allow_no_trees:
-            validation_fail("No tree found in DB (trees table is empty)")
+            validation_fail("No tree found in DB (trees table is empty)", report_path=report_path)
 
         tree_available = bool(newick)
         tree = None
@@ -2599,16 +2817,19 @@ def main(argv=None):
             if missing_segment_trees:
                 validation_fail(
                     f"Validation failed: segmented run expects at least one {segment_tree_label} tree per segment "
-                    f"(missing segments={', '.join(missing_segment_trees[:10])})"
+                    f"(missing segments={', '.join(missing_segment_trees[:10])})",
+                    report_path=report_path,
                 )
             if per_segment_missing and not args.test_mode:
-                validation_fail(f"Validation failed: per-segment {segment_tree_label} tree is missing unfiltered accessions")
+                validation_fail(
+                    f"Validation failed: per-segment {segment_tree_label} tree is missing unfiltered accessions",
+                    report_path=report_path,
+                )
             if per_segment_missing and args.test_mode:
                 print(f"[info] Test mode: allowing per-segment {segment_tree_label} trees to be subsampled relative to meta_data accessions")
 
             segmented_validation_ok = True
 
-        report_path = os.path.join(args.outdir, "db_tree_validation.txt")
         missing_tree_path = os.path.join(args.outdir, "missing_in_tree.txt")
         missing_seq_path = os.path.join(args.outdir, "missing_in_sequences.txt")
         missing_meta_path = os.path.join(args.outdir, "missing_in_meta.txt")
@@ -2775,8 +2996,6 @@ def main(argv=None):
                 for result in invariant_results:
                     report.write(format_invariant_result(result))
                     report.write("\n\n")
-
-            report.write("\nValidation status: PASS\n")
 
         if missing_in_tree:
             with open(missing_tree_path, "w", encoding="utf-8") as handle:
@@ -2946,42 +3165,41 @@ def main(argv=None):
         overlap_count = len(meta_set & tree_terminals)
         disjoint_sets = overlap_count == 0 and len(meta_set) > 0 and len(tree_terminals) > 0
 
-        if args.test_mode and tree_source == args.segment_tree_source and disjoint_sets:
-            print(
-                f"[warn] Test mode: tree terminals and meta_data are disjoint for {args.segment_tree_source}; "
-                "treating as no-placeable-queries scenario and not failing validation."
-            )
-            return
-
         if tree_available and args.expect_segment_trees and segment_count is not None and segment_count > 1 and not segmented_validation_ok:
             if segment_tree_count < segment_count:
                 validation_fail(
                     f"Validation failed: segmented run expects at least one {('UShER' if args.segment_tree_source == 'usher' else 'IQ-TREE')} tree per segment "
-                    f"(segments={segment_count}, trees={segment_tree_count})"
+                    f"(segments={segment_count}, trees={segment_tree_count})",
+                    report_path=report_path,
                 )
 
         if args.check_update_integrity:
             if not table_exists(conn, "update_batches") or not table_exists(conn, "update_table_deltas"):
-                validation_fail("Validation failed: update audit tables are missing")
+                validation_fail("Validation failed: update audit tables are missing", report_path=report_path)
             update_batches_cols = get_table_columns(conn, "update_batches")
+            has_finished_at = "finished_at" in update_batches_cols
+            select_fields = ["batch_id"]
             if "mode" in update_batches_cols:
-                cursor.execute("SELECT batch_id, mode FROM update_batches ORDER BY rowid DESC LIMIT 1")
-                row = cursor.fetchone()
-                batch_id = row[0] if row else None
-                mode = row[1] if row else None
-            else:
-                cursor.execute("SELECT batch_id FROM update_batches ORDER BY rowid DESC LIMIT 1")
-                row = cursor.fetchone()
-                batch_id = row[0] if row else None
-                mode = "update"
-            if batch_id:
-                cursor.execute("SELECT table_name, delta FROM update_table_deltas WHERE batch_id=?", (batch_id,))
-                delta_rows = cursor.fetchall()
-                if len(delta_rows) == 0:
-                    validation_fail("Validation failed: no update_table_deltas rows found for latest batch")
-                if str(mode).strip().lower() == "update" and not args.allow_empty_update:
-                    if all(int(delta) == 0 for _table_name, delta in delta_rows):
-                        validation_fail("Validation failed: latest update batch made no DB changes")
+                select_fields.append("mode")
+            if has_finished_at:
+                select_fields.append("finished_at")
+            cursor.execute(f"SELECT {', '.join(select_fields)} FROM update_batches ORDER BY rowid DESC LIMIT 1")
+            row = cursor.fetchone()
+            if not row or not row[0]:
+                validation_fail("Validation failed: update_batches table has no batch records", report_path=report_path)
+            row_map = dict(zip(select_fields, row))
+            batch_id = row_map.get("batch_id")
+            mode = row_map.get("mode", "update")
+            finished_at = row_map.get("finished_at") if has_finished_at else "ok"
+            if has_finished_at and (finished_at is None or str(finished_at).strip() == ""):
+                validation_fail("Validation failed: latest update batch did not complete (finished_at is blank)", report_path=report_path)
+            cursor.execute("SELECT table_name, delta FROM update_table_deltas WHERE batch_id=?", (batch_id,))
+            delta_rows = cursor.fetchall()
+            if len(delta_rows) == 0:
+                validation_fail("Validation failed: no update_table_deltas rows found for latest batch", report_path=report_path)
+            if str(mode).strip().lower() == "update" and not args.allow_empty_update:
+                if all(int(delta) == 0 for _table_name, delta in delta_rows):
+                    validation_fail("Validation failed: latest update batch made no DB changes", report_path=report_path)
             if table_exists(conn, "features") and table_exists(conn, "meta_data"):
                 feature_cols = get_table_columns(conn, "features")
                 if "segment" in feature_cols and "segment" in meta_columns and "accession" in feature_cols:
@@ -2994,14 +3212,15 @@ def main(argv=None):
                         """
                     )
                     if cursor.fetchone()[0] > 0:
-                        validation_fail("Validation failed: segment contamination detected in features table")
+                        validation_fail("Validation failed: segment contamination detected in features table", report_path=report_path)
             if result_failed(feature_integrity_result):
-                validation_fail("Validation failed: feature projection integrity check failed")
+                validation_fail("Validation failed: feature projection integrity check failed", report_path=report_path)
 
         failed_invariant_checks = [result["title"] for result in invariant_results if result_failed(result)]
         if failed_invariant_checks and args.strict_invariants:
             validation_fail(
-                "Validation failed: DB invariant checks failed for " + ", ".join(failed_invariant_checks)
+                "Validation failed: DB invariant checks failed for " + ", ".join(failed_invariant_checks),
+                report_path=report_path,
             )
         if args.check_strain_duplicates:
             strain_dup_failed = [
@@ -3009,19 +3228,26 @@ def main(argv=None):
                 if r.get("title") == "strain sequence deduplication" and result_failed(r)
             ]
             if strain_dup_failed:
-                validation_fail("Validation failed: unretired same-strain duplicate sequences detected")
+                validation_fail("Validation failed: unretired same-strain duplicate sequences detected", report_path=report_path)
 
         failed_consistency_checks = [title for title, result in consistency_results.items() if result_failed(result)]
         failed_mutation_checks = [result["title"] for result in mutation_integrity_results if result_failed(result)]
-        if failed_consistency_checks or failed_mutation_checks:
+        if failed_mutation_checks:
+            validation_fail(
+                "Validation failed: DB consistency checks failed for " + ", ".join(failed_consistency_checks + failed_mutation_checks),
+                report_path=report_path,
+            )
+        if failed_consistency_checks:
             if args.test_mode and args.expect_segment_trees and segment_count is not None and segment_count > 1 and not args.check_update_integrity:
                 print("[info] Test mode: skipping strict DB consistency failures for segmented validation run")
             else:
                 validation_fail(
-                    "Validation failed: DB consistency checks failed for " + ", ".join(failed_consistency_checks + failed_mutation_checks)
+                    "Validation failed: DB consistency checks failed for " + ", ".join(failed_consistency_checks),
+                    report_path=report_path,
                 )
 
         if not tree_available:
+            _finalize_report_pass(report_path)
             return
 
         if references_missing_from_tree:
@@ -3032,14 +3258,27 @@ def main(argv=None):
             validation_fail(
                 f"Validation failed: {len(references_missing_from_tree)} reference/master "
                 f"accessions are absent from the UShER tree "
-                f"(first 10: {', '.join(references_missing_from_tree[:10])})"
+                f"(first 10: {', '.join(references_missing_from_tree[:10])})",
+                report_path=report_path,
             )
+
+        if args.test_mode and tree_source == args.segment_tree_source and disjoint_sets:
+            print(
+                f"[warn] Test mode: tree terminals and meta_data are disjoint for {args.segment_tree_source}; "
+                "treating as no-placeable-queries scenario and not failing validation."
+            )
+            _finalize_report_pass(report_path)
+            return
 
         if tree_source == args.segment_tree_source:
             if segmented_validation_ok:
+                _finalize_report_pass(report_path)
                 return
             if missing_in_tree or missing_in_sequences or missing_in_meta:
-                validation_fail(f"Validation failed: {('UShER' if tree_source == 'usher' else 'IQ-TREE')} tree does not match accessions")
+                validation_fail(
+                    f"Validation failed: {('UShER' if tree_source == 'usher' else 'IQ-TREE')} tree does not match accessions",
+                    report_path=report_path,
+                )
             if cluster_col and extra_in_tree:
                 print(
                     f"[info] {('UShER' if tree_source == 'usher' else 'IQ-TREE')} tree contains non-centroid leaves beyond the MMseqs centroid context "
@@ -3047,10 +3286,11 @@ def main(argv=None):
                 )
         elif cluster_col:
             if missing_centroids_in_tree or extra_in_tree:
-                validation_fail("Validation failed: IQ-TREE does not match centroid set")
+                validation_fail("Validation failed: IQ-TREE does not match centroid set", report_path=report_path)
         else:
             if missing_in_tree or missing_in_sequences or missing_in_meta:
-                validation_fail("Validation failed: missing accessions detected")
+                validation_fail("Validation failed: missing accessions detected", report_path=report_path)
+        _finalize_report_pass(report_path)
 
         print("[info] Validation status: PASS")
 

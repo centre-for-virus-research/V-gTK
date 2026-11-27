@@ -120,11 +120,65 @@ def parse_fasta_file(fasta_path: Optional[str]) -> Dict[str, str]:
 
 
 def count_acgt(seq: Optional[str]) -> int:
-    """Count unambiguous A/C/G/T bases (case-insensitive)."""
+    """Count unambiguous A/C/G/T (and U) bases (case-insensitive)."""
     if not seq or not isinstance(seq, str):
         return 0
     upper = seq.upper()
-    return upper.count("A") + upper.count("C") + upper.count("G") + upper.count("T")
+    return upper.count("A") + upper.count("C") + upper.count("G") + upper.count("T") + upper.count("U")
+
+
+def count_ambig(seq: Optional[str]) -> int:
+    """Count non-gap ambiguous nucleotide bases (N and IUPAC ambiguity codes)."""
+    if not seq or not isinstance(seq, str):
+        return 0
+    ungapped = _strip_alignment_gaps(seq)
+    return max(0, len(ungapped) - count_acgt(ungapped))
+
+
+def sequence_quality_stats(seq: Optional[str]) -> Tuple[int, int]:
+    """Return ``(unambiguous_acgt_count, ambiguous_base_count)`` from actual bases."""
+    if not seq or not isinstance(seq, str):
+        return 0, 0
+    ungapped = _strip_alignment_gaps(seq)
+    acgt = count_acgt(ungapped)
+    return acgt, max(0, len(ungapped) - acgt)
+
+
+def is_external_quality_upgrade(
+    base_seq: Optional[str],
+    ext_seq: Optional[str],
+    *,
+    is_aligned: bool = False,
+    min_ratio: float = 0.94,
+    max_shortfall_bp: int = 90,
+) -> bool:
+    """Return True when ``ext_seq`` is a genuine sequence quality upgrade over ``base_seq``.
+
+    - Post-alignment (``is_aligned=True``): terminal UTRs are already stripped, so
+      strictly more aligned ACGT bases (or equal aligned ACGT with strictly fewer
+      aligned ambiguities) wins. Ties stay with the preferred (GenBank) copy.
+    - Pre-alignment (``is_aligned=False``): avoid churning accessions over minor
+      terminal UTR primer overhangs (<= 90 bp / <= 6%). External wins only if:
+        1. ``base_seq`` fails coverage parity against ``ext_seq`` (e.g. partial
+           GenBank stub vs full-length GISAID), OR
+        2. ``ext_seq`` has strictly fewer ambiguous bases (``N``/IUPAC) AND at
+           least as many unambiguous ACGT bases as ``base_seq``.
+    """
+    b_acgt, b_amb = sequence_quality_stats(base_seq)
+    e_acgt, e_amb = sequence_quality_stats(ext_seq)
+    if e_acgt <= 0:
+        return False
+    if is_aligned:
+        if e_acgt != b_acgt:
+            return e_acgt > b_acgt
+        return e_amb < b_amb
+    if e_acgt > b_acgt and not has_coverage_parity(
+        b_acgt, e_acgt, min_ratio=min_ratio, max_shortfall_bp=max_shortfall_bp
+    ):
+        return True
+    if e_amb < b_amb and e_acgt >= b_acgt:
+        return True
+    return False
 
 
 def normalize_isolate_key(raw: Optional[str], collection_year: Optional[str] = None) -> str:
@@ -536,8 +590,14 @@ def coalesce_winner_metadata(
     existing_alt = str(winner.get("alt_accessions") or "").strip()
     if existing_alt:
         tokens.extend(t.strip() for t in existing_alt.split(";") if t.strip())
+    effective_retired_src = str(retired.get("dataset_source") or retired_source or "").strip()
+    retired_tag_src = (
+        sorted(parse_dataset_sources(effective_retired_src))[0]
+        if parse_dataset_sources(effective_retired_src)
+        else str(retired_source or "").strip().lower()
+    )
     if retired_acc:
-        tag = f"{retired_source}:{retired_acc}" if retired_source else retired_acc
+        tag = f"{retired_tag_src}:{retired_acc}" if retired_tag_src else retired_acc
         if tag not in tokens:
             tokens.append(tag)
     if isolate_id and isolate_id not in tokens:
@@ -547,43 +607,112 @@ def coalesce_winner_metadata(
         if new_alt != existing_alt:
             updates["alt_accessions"] = new_alt
 
+    # Flag dual/multi-source provenance in dataset_source whenever rows from
+    # distinct repositories collapse onto a single winner (regardless of which
+    # repository supplied the kept sequence). Intra-DB duplicates stay single-source.
+    winner_src_raw = str(winner.get("dataset_source") or "").strip()
+    retired_src_raw = str(retired.get("dataset_source") or retired_source or "").strip()
+    if retired_src_raw.lower() == "external":
+        retired_src_raw = ""
+    if winner_src_raw or retired_src_raw:
+        merged_src = merge_dataset_sources(winner_src_raw, retired_src_raw)
+        if merged_src and merged_src != winner_src_raw.strip().lower():
+            updates["dataset_source"] = merged_src
+
     return updates
 
 
 INSDC_SOURCE_NAMES = frozenset({"", "genbank", "ncbi", "insdc", "ena", "ddbj"})
+_NONEMPTY_INSDC_NAMES = frozenset({"genbank", "ncbi", "insdc", "ena", "ddbj"})
+
+
+def parse_dataset_sources(source: Optional[str]) -> frozenset:
+    """Parse a single or semicolon-delimited ``dataset_source`` into canonical lowercase tokens.
+
+    Normalises INSDC aliases (``ncbi``, ``insdc``, ``ena``, ``ddbj``) to ``'genbank'``
+    so dual-source tags are always canonical (e.g. ``'genbank;gisaid'``).
+    """
+    if source is None:
+        return frozenset()
+    text = str(source).strip().lower()
+    if not text:
+        return frozenset()
+    out: Set[str] = set()
+    for part in text.split(";"):
+        tok = part.strip().lower()
+        if not tok:
+            continue
+        if tok in _NONEMPTY_INSDC_NAMES:
+            out.add("genbank")
+        else:
+            out.add(tok)
+    return frozenset(out)
+
+
+def merge_dataset_sources(*sources: Optional[str]) -> str:
+    """Return sorted semicolon-delimited union of repository tokens (e.g. ``'genbank;gisaid'``)."""
+    merged: Set[str] = set()
+    for src in sources:
+        merged.update(parse_dataset_sources(src))
+    return ";".join(sorted(merged))
+
+
+def primary_sequence_source(source: Optional[str], default: str = "genbank") -> str:
+    """Return a single canonical repository token for ``sequence_source``."""
+    toks = parse_dataset_sources(source)
+    if not toks:
+        return default
+    if len(toks) == 1:
+        return next(iter(toks))
+    if "genbank" in toks:
+        return "genbank"
+    return sorted(toks)[0]
 
 
 def is_preferred_source(source: Optional[str], prefer_source: str = "genbank") -> bool:
-    """Return True if ``source`` belongs to the preferred repository class."""
-    src = (source or "genbank").strip().lower()
+    """Return True if ``source`` (single or ``;``-delimited) contains the preferred repository class."""
+    raw = "" if source is None else str(source).strip().lower()
     pref = (prefer_source or "genbank").strip().lower()
+    if not raw:
+        return pref in ("genbank", "ncbi", "insdc", "base")
+    tokens = parse_dataset_sources(raw)
     if pref in ("genbank", "ncbi", "insdc", "base"):
-        return src in INSDC_SOURCE_NAMES
-    return src == pref
+        return "genbank" in tokens
+    return pref in tokens
 
 
 def candidate_winner_sort_key(
     cand: Dict[str, object],
     prefer_source: str = "genbank",
-) -> Tuple[int, int, int, int, int, str]:
+    quality_first: bool = True,
+) -> Tuple[int, ...]:
     """Deterministic sort key (smallest wins) for choosing 1 record per strain.
 
-    Priority:
+    Under Option B (``quality_first=True``, default):
       1. Protected (``master`` / ``reference``) always beats query records.
-      2. Preferred repository (GenBank / INSDC by default) beats external portals.
-      3. Already-committed ``update_db`` record beats a new re-upload within the
-         same source tier so existing database accessions stay stable across updates.
-      4. Longest unambiguous ``real_length`` wins.
+      2. Sequence quality: longest unambiguous aligned ACGT count (``aligned_acgt``,
+         falling back to ``real_length``) wins, then fewest ambiguous bases
+         (``aligned_ambig``, default 0).
+      3. Preferred repository (GenBank / INSDC by default) breaks quality ties
+         (including UTR-only differences where aligned sequences are identical).
+      4. Already-committed ``update_db`` record beats a new re-upload on ties.
       5. Higher collection-date precision (``YYYY-MM-DD`` > ``YYYY-MM`` > ``YYYY``) wins.
       6. Lexicographically earliest accession breaks remaining ties deterministically.
+
+    Under legacy source-first mode (``quality_first=False``):
+      Preferred repository outranks sequence length/quality.
     """
     protected_rank = 0 if bool(cand.get("protected")) else 1
     src_rank = 0 if is_preferred_source(str(cand.get("source") or ""), prefer_source) else 1
     origin_rank = 0 if str(cand.get("origin") or "") == "update_db" else 1
-    real_len = int(cand.get("real_length") or 0)
+    aligned_acgt = cand.get("aligned_acgt")
+    eff_acgt = int(aligned_acgt) if aligned_acgt is not None else int(cand.get("real_length") or 0)
+    eff_ambig = int(cand.get("aligned_ambig") or 0)
     d_rank, _ = date_precision_rank(str(cand.get("collection_date") or ""))
     acc = str(cand.get("accession") or "")
-    return (protected_rank, src_rank, origin_rank, -real_len, -d_rank, acc)
+    if quality_first:
+        return (protected_rank, -eff_acgt, eff_ambig, src_rank, origin_rank, -d_rank, acc)
+    return (protected_rank, src_rank, origin_rank, -eff_acgt, eff_ambig, -d_rank, acc)
 
 
 # ---------------------------------------------------------------------------

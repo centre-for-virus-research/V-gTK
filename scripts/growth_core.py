@@ -80,37 +80,29 @@ def _gamma_series(a: float, x: float) -> float:
 
 
 def _gamma_continued_fraction(a: float, x: float) -> float:
-    """Upper incomplete gamma Q(a, x) = Gamma(a, x)/Gamma(a) via Legendre continued fraction."""
+    """Upper incomplete gamma Q(a, x) = Gamma(a, x)/Gamma(a) via modified Lentz CF."""
     tiny = 1e-30
-    b0 = 0.0
-    c0 = 1.0 / tiny
-    d0 = 0.0
-
-    b1 = x + 1.0 - a
-    c1 = b1
-    d1 = 1.0 / b1 if b1 != 0 else 1.0 / tiny
-
-    f = c1
+    b = x + 1.0 - a
+    c = 1.0 / tiny
+    d = 1.0 / b if abs(b) > tiny else 1.0 / tiny
+    h = d
     for m in range(1, 200):
-        a_m = -m * (m - a)
-        b_m = b1 + 2.0
-        d1 = b_m + a_m * d1
-        if abs(d1) < tiny:
-            d1 = tiny
-        d1 = 1.0 / d1
-
-        c1 = b_m + a_m / c1
-        if abs(c1) < tiny:
-            c1 = tiny
-
-        del_f = c1 * d1
-        f *= del_f
-        b1 = b_m
-        if abs(del_f - 1.0) < 1e-15:
+        an = -m * (m - a)
+        b += 2.0
+        d = an * d + b
+        if abs(d) < tiny:
+            d = tiny
+        c = b + an / c
+        if abs(c) < tiny:
+            c = tiny
+        d = 1.0 / d
+        del_h = d * c
+        h *= del_h
+        if abs(del_h - 1.0) < 1e-15:
             break
 
     log_gamma_a = math.lgamma(a)
-    val = math.exp(-x + a * math.log(x) - log_gamma_a) * (1.0 / f)
+    val = math.exp(-x + a * math.log(x) - log_gamma_a) * h
     return float(np.clip(val, 0.0, 1.0))
 
 
@@ -229,7 +221,7 @@ def parse_collection_date(raw):
         y, mo, d = (int(g) for g in m.groups())
         try:
             return pd.Timestamp(year=y, month=mo, day=d), "day"
-        except ValueError:
+        except (ValueError, OverflowError):
             return None, "none"
     m = _RE_DMY_DAY.match(s)
     if m:
@@ -238,23 +230,32 @@ def parse_collection_date(raw):
             return None, "none"
         try:
             return pd.Timestamp(year=int(y), month=_MONTH_ABBR[mon], day=int(d)), "day"
-        except ValueError:
+        except (ValueError, OverflowError):
             return None, "none"
     m = _RE_ISO_MONTH.match(s)
     if m:
         y, mo = int(m.group(1)), int(m.group(2))
         if not 1 <= mo <= 12:
             return None, "none"
-        return pd.Timestamp(year=y, month=mo, day=1) + pd.Timedelta(days=14), "month"
+        try:
+            return pd.Timestamp(year=y, month=mo, day=1) + pd.Timedelta(days=14), "month"
+        except (ValueError, OverflowError):
+            return None, "none"
     m = _RE_MY_MONTH.match(s)
     if m:
         mon, y = m.group(1).lower(), int(m.group(2))
         if mon not in _MONTH_ABBR:
             return None, "none"
-        return pd.Timestamp(year=y, month=_MONTH_ABBR[mon], day=1) + pd.Timedelta(days=14), "month"
+        try:
+            return pd.Timestamp(year=y, month=_MONTH_ABBR[mon], day=1) + pd.Timedelta(days=14), "month"
+        except (ValueError, OverflowError):
+            return None, "none"
     m = _RE_YEAR.match(s)
     if m:
-        return pd.Timestamp(year=int(m.group(1)), month=7, day=1), "year"
+        try:
+            return pd.Timestamp(year=int(m.group(1)), month=7, day=1), "year"
+        except (ValueError, OverflowError):
+            return None, "none"
     return None, "none"
 
 

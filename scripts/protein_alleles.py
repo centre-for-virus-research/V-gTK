@@ -234,6 +234,8 @@ def load_cohort(conn, genotype_column=None, subtype_column=None, require_date=Tr
 
 	frame['primary_accession'] = frame['primary_accession'].astype(str).str.strip()
 	frame = frame[frame['primary_accession'] != '']
+	if segment is not None and 'segment' in frame.columns:
+		frame = frame[frame['segment'].astype(str).str.strip() == str(segment).strip()]
 	frame = frame.drop_duplicates(subset=['primary_accession'], keep='first')
 
 	dates = [decimal_date(row.get('collection_year'), row.get('collection_mon'),
@@ -260,8 +262,6 @@ def load_cohort(conn, genotype_column=None, subtype_column=None, require_date=Tr
 
 	if accession_types:
 		frame = frame[frame.get('accession_type', '').astype(str).str.strip().isin(set(accession_types))]
-	if segment is not None and 'segment' in frame.columns:
-		frame = frame[frame['segment'].astype(str).str.strip() == str(segment).strip()]
 	if require_date:
 		frame = frame[np.isfinite(frame['decimal_date'])]
 		floor = PRECISION_RANK.get(min_precision, 1)
@@ -315,7 +315,16 @@ def genotype_labels_from_reference_list(conn, reference_tsv, tree_newick):
 def list_proteins(conn):
 	"""Proteins this database can be asked about, and where they come from."""
 	rows = []
-	if table_exists(conn, 'sequence_mutations'):
+	if table_exists(conn, 'sequence_mutation_calls'):
+		for name, sites, calls in conn.execute(
+				"SELECT protein_name, COUNT(DISTINCT aa_position), "
+				"COUNT(DISTINCT primary_accession) FROM sequence_mutation_calls "
+				"WHERE TRIM(COALESCE(call_status, '')) = 'emitted' "
+				'AND protein_name IS NOT NULL AND TRIM(protein_name) != "" '
+				'GROUP BY protein_name'):
+			rows.append({'protein': str(name), 'source': 'catalog',
+						 'n_sites': int(sites), 'n_sequences': int(calls)})
+	elif table_exists(conn, 'sequence_mutations'):
 		for name, sites, calls in conn.execute(
 				'SELECT protein_name, COUNT(DISTINCT aa_position), '
 				'COUNT(DISTINCT primary_accession) FROM sequence_mutations '
@@ -335,16 +344,26 @@ def list_proteins(conn):
 def catalog_alleles(conn, protein):
 	"""Recorded residue calls for one protein, de-duplicated.
 
-	 carries one row per (sequence, mutation, combination),
-	so a sequence appearing in sixty drug combinations has sixty identical rows
-	for the same residue. Counting those as sixty carriers would weight a
-	sequence by how many combinations its catalogue happens to list.
+	Queries ``sequence_mutation_calls WHERE call_status = 'emitted'`` (falling
+	back to ``sequence_mutations`` on legacy DBs).
 	"""
-	if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sequence_mutations'").fetchone():
+	if table_exists(conn, 'sequence_mutation_calls'):
+		frame = pd.read_sql_query(
+			"SELECT DISTINCT primary_accession, mutation_id, protein_name, aa_position, "
+			"alt_residue FROM sequence_mutation_calls "
+			"WHERE protein_name = ? AND TRIM(COALESCE(call_status, '')) = 'emitted'",
+			conn,
+			params=(protein,),
+		)
+	elif table_exists(conn, 'sequence_mutations'):
+		frame = pd.read_sql_query(
+			'SELECT DISTINCT primary_accession, mutation_id, protein_name, aa_position, '
+			'alt_residue FROM sequence_mutations WHERE protein_name = ?',
+			conn,
+			params=(protein,),
+		)
+	else:
 		return pd.DataFrame(columns=['primary_accession', 'mutation_id', 'protein_name', 'aa_position', 'alt_residue'])
-	frame = pd.read_sql_query(
-		'SELECT DISTINCT primary_accession, mutation_id, protein_name, aa_position, '
-		'alt_residue FROM sequence_mutations WHERE protein_name = ?', conn, params=(protein,))
 	if frame.empty:
 		return frame
 	frame['primary_accession'] = frame['primary_accession'].astype(str).str.strip()

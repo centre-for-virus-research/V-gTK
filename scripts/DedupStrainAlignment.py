@@ -52,8 +52,11 @@ from cross_db_dedup import (  # noqa: E402
     extract_canonical_isolate,
     extract_insdc_links,
     extract_passage_class,
+    is_external_quality_upgrade,
     is_preferred_source,
     passages_compatible,
+    primary_sequence_source,
+    sequence_quality_stats,
 )
 
 
@@ -176,10 +179,11 @@ def _load_update_db_active_candidates(
             if not seq:
                 continue
             aln_by_key[(acc, seg)] = seq
-            rlen = count_acgt(seq)
+            aln_acgt, aln_amb = sequence_quality_stats(seq)
             acc_type = row.get("accession_type", "").strip().lower()
             protected = acc_type in ("master", "reference")
             src = (row.get("dataset_source") or "genbank").strip().lower() or "genbank"
+            seq_src = (row.get("sequence_source") or "").strip().lower() or primary_sequence_source(src)
             key = (acc, seg)
             raw_by_key[key] = row
             cand_by_key[key] = {
@@ -188,9 +192,12 @@ def _load_update_db_active_candidates(
                 "segment": seg,
                 "isolate": extract_canonical_isolate(row),
                 "passage": extract_passage_class(row),
-                "real_length": rlen,
+                "real_length": aln_acgt,
+                "aligned_acgt": aln_acgt,
+                "aligned_ambig": aln_amb,
                 "protected": protected,
                 "source": src,
+                "sequence_source": seq_src,
                 "collection_date": row.get("collection_date", ""),
                 "origin": "update_db",
                 "preferred": is_preferred_source(src, prefer_source) or protected,
@@ -307,6 +314,8 @@ def deduplicate_strain_alignments(
         aln_by_key[key] = seq
         protected = acc in protected_ids or str(row_dict.get("accession_type") or "").strip().lower() in ("master", "reference")
         src = (row_dict.get("dataset_source") or "genbank").strip().lower() or "genbank"
+        seq_src = (row_dict.get("sequence_source") or "").strip().lower() or primary_sequence_source(src)
+        aln_acgt, aln_amb = sequence_quality_stats(seq)
         cands_by_seg[cseg].append({
             "accession": acc,
             "bare_upper": acc.upper(),
@@ -314,9 +323,12 @@ def deduplicate_strain_alignments(
             "orig_segment": orig_seg,
             "isolate": extract_canonical_isolate(row_dict),
             "passage": extract_passage_class(row_dict),
-            "real_length": count_acgt(seq),
+            "real_length": aln_acgt,
+            "aligned_acgt": aln_acgt,
+            "aligned_ambig": aln_amb,
             "protected": protected,
             "source": src,
+            "sequence_source": seq_src,
             "collection_date": row_dict.get("collection_date", ""),
             "origin": "batch",
             "preferred": is_preferred_source(src, prefer_source) or protected,
@@ -430,7 +442,7 @@ def deduplicate_strain_alignments(
             for iso in list(pref_by_iso.keys()):
                 pref_by_iso[iso] = [w for w in pref_by_iso[iso] if str(w["accession"]) not in retired_pref]
 
-        # Step 2: Cross-DB deduplication (external vs surviving preferred, in BOTH arrival orders!)
+        # Step 2: Cross-DB deduplication (Option B symmetric quality competition, BOTH arrival orders!)
         retired_ext: Set[str] = set()
         for ext in sorted(externals, key=lambda item: candidate_winner_sort_key(item, prefer_source)):
             if ext["protected"]:
@@ -444,6 +456,7 @@ def deduplicate_strain_alignments(
             links = extract_insdc_links(e_row, segment_hint=cseg)
 
             matched_w = None
+            ext_wins = False
             match_tier = ""
             for lk in links:
                 w = pref_by_bare.get(lk)
@@ -452,11 +465,19 @@ def deduplicate_strain_alignments(
                 if not passages_compatible(str(w["passage"]), str(ext["passage"])):
                     continue
                 w_key = (str(w["accession"]), cseg)
-                ok, _, _ = aligned_sequences_agree(
-                    aln_by_key[w_key], e_seq, int(w["real_length"]), int(ext["real_length"]), max_mm=2
-                )
+                w_seq = aln_by_key[w_key]
+                cand_ext_wins = (not w["protected"]) and is_external_quality_upgrade(w_seq, e_seq, is_aligned=True)
+                if cand_ext_wins:
+                    ok, _, _ = aligned_sequences_agree(
+                        e_seq, w_seq, int(ext["real_length"]), int(w["real_length"]), max_mm=2
+                    )
+                else:
+                    ok, _, _ = aligned_sequences_agree(
+                        w_seq, e_seq, int(w["real_length"]), int(ext["real_length"]), max_mm=2
+                    )
                 if ok:
                     matched_w = w
+                    ext_wins = cand_ext_wins
                     match_tier = "tier1_insdc_link"
                     break
 
@@ -466,43 +487,67 @@ def deduplicate_strain_alignments(
                     key=lambda item: candidate_winner_sort_key(item, prefer_source),
                 )
                 for w in candidates:
+                    if str(w["accession"]) in retired_pref:
+                        continue
                     if not passages_compatible(str(w["passage"]), str(ext["passage"])):
                         continue
                     w_key = (str(w["accession"]), cseg)
-                    ok, _, _ = aligned_sequences_agree(
-                        aln_by_key[w_key], e_seq, int(w["real_length"]), int(ext["real_length"]), max_mm=0
-                    )
+                    w_seq = aln_by_key[w_key]
+                    cand_ext_wins = (not w["protected"]) and is_external_quality_upgrade(w_seq, e_seq, is_aligned=True)
+                    if cand_ext_wins:
+                        ok, _, _ = aligned_sequences_agree(
+                            e_seq, w_seq, int(ext["real_length"]), int(w["real_length"]), max_mm=0
+                        )
+                    else:
+                        ok, _, _ = aligned_sequences_agree(
+                            w_seq, e_seq, int(w["real_length"]), int(ext["real_length"]), max_mm=0
+                        )
                     if ok:
                         matched_w = w
+                        ext_wins = cand_ext_wins
                         match_tier = "tier2_exact_same_strain"
                         break
 
             if matched_w is None:
                 continue
 
-            w_acc = str(matched_w["accession"])
-            w_key = (w_acc, cseg)
-            upd = coalesce_winner_metadata(raw_by_key[w_key], e_row)
-            if upd:
-                raw_by_key[w_key].update(upd)
-                if matched_w["origin"] == "batch":
-                    winner_meta_updates[w_key].update(upd)
-            retired_ext.add(e_acc)
-            reason = f"cross_db_duplicate_of:{w_acc}"
-            if ext["origin"] == "batch":
-                retired_batch_keys[(e_acc, str(ext["orig_segment"]))] = (w_acc, reason)
+            if ext_wins:
+                winner_cand, loser_cand = ext, matched_w
+                retired_pref.add(str(matched_w["accession"]))
             else:
-                # Reverse arrival order: external (e.g. GISAID) was in update_db,
-                # and preferred (GenBank) just arrived in the new batch!
-                retired_update_ids.add(e_acc)
+                winner_cand, loser_cand = matched_w, ext
+                retired_ext.add(e_acc)
+
+            win_acc = str(winner_cand["accession"])
+            win_key = (win_acc, cseg)
+            los_acc = str(loser_cand["accession"])
+            los_key = (los_acc, cseg)
+            upd = coalesce_winner_metadata(
+                raw_by_key[win_key],
+                raw_by_key[los_key],
+                retired_source=str(loser_cand["source"]),
+            )
+            upd.setdefault("sequence_source", str(winner_cand.get("sequence_source") or primary_sequence_source(str(winner_cand["source"]))))
+            if upd:
+                raw_by_key[win_key].update(upd)
+                if "dataset_source" in upd:
+                    winner_cand["source"] = upd["dataset_source"]
+                if winner_cand["origin"] == "batch":
+                    winner_meta_updates[win_key].update(upd)
+            reason = f"cross_db_duplicate_of:{win_acc}"
+            if loser_cand["origin"] == "batch":
+                retired_batch_keys[(los_acc, str(loser_cand["orig_segment"]))] = (win_acc, reason)
+            else:
+                retired_update_ids.add(los_acc)
             audit_pairs.append({
                 "segment": cseg or "1",
-                "retired_accession": e_acc,
-                "retired_origin": str(ext["origin"]),
-                "retired_source": str(ext["source"]),
-                "winner_accession": w_acc,
-                "winner_origin": str(matched_w["origin"]),
-                "winner_source": str(matched_w["source"]),
+                "retired_accession": los_acc,
+                "retired_origin": str(loser_cand["origin"]),
+                "retired_source": str(loser_cand["source"]),
+                "winner_accession": win_acc,
+                "winner_origin": str(winner_cand["origin"]),
+                "winner_source": str(winner_cand["source"]),
+                "sequence_source": str(winner_cand.get("sequence_source") or ""),
                 "match_tier": match_tier,
                 "canonical_isolate": str(ext["isolate"] or matched_w["isolate"]),
             })
@@ -604,7 +649,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         os.makedirs(os.path.dirname(os.path.abspath(args.report_tsv)), exist_ok=True)
         fieldnames = [
             "segment", "retired_accession", "retired_origin", "retired_source",
-            "winner_accession", "winner_origin", "winner_source", "match_tier", "canonical_isolate",
+            "winner_accession", "winner_origin", "winner_source", "sequence_source",
+            "match_tier", "canonical_isolate",
         ]
         with open(args.report_tsv, "w", encoding="utf-8", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=fieldnames, delimiter="\t")

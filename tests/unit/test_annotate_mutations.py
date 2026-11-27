@@ -2223,7 +2223,7 @@ def test_virus_falls_back_to_the_column_profile_and_then_to_generic():
     "profile_name, expected",
     [
         ("HCV", "hcv columns"),
-        ("influenza", ["serotypes_tested"]),
+        ("influenza", None),
         ("all_columns", None),
         ("generic", None),
         ("rabies", None),

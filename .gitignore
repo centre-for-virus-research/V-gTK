@@ -40,3 +40,4 @@ htmlcov/
 .pytest_cache/
 .venv/
 treepatch
+CURRENT_VERSIONS.md

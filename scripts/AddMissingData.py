@@ -5,12 +5,15 @@ from os.path import join
 from itertools import islice
 from argparse import ArgumentParser
 
+from date_utils import split_date_components
+
 class AddMissingData:
-	def __init__(self, tmp_dir, gb_matrix, fillup_file=None, bulk_file=None):
+	def __init__(self, tmp_dir, gb_matrix, fillup_file=None, bulk_file=None, output_file=None):
 		self.tmp_dir = tmp_dir
 		self.gb_matrix = gb_matrix
 		self.fillup_file = fillup_file
 		self.bulk_file = bulk_file
+		self.output_file = output_file
 		os.makedirs(self.tmp_dir, exist_ok=True)
 
 	def get_header(self, file):
@@ -66,13 +69,19 @@ class AddMissingData:
 					for key in key_fields:
 						if not row.get(key):
 							row[key] = fillup_row.get(key, row[key])
+							if key == 'collection_date' and row.get(key):
+								parts = split_date_components(str(row[key]))
+								for src_k, dst_k in (('day', 'collection_day'), ('month', 'collection_mon'), ('year', 'collection_year')):
+									if dst_k in fieldnames and not row.get(dst_k):
+										row[dst_k] = parts[src_k]
 
-			output_file = 'gB_matrix_updated.csv'
-			with open(join(self.tmp_dir, output_file), mode='w', newline='') as output_csv:
+			output_file = self.output_file or 'gB_matrix_updated.csv'
+			out_path = output_file if os.path.isabs(output_file) else join(self.tmp_dir, output_file)
+			with open(out_path, mode='w', newline='') as output_csv:
 				writer = csv.DictWriter(output_csv, fieldnames=fieldnames, delimiter='\t')
 				writer.writeheader()
 				writer.writerows(masterdata_list)
-				print(f"Updated masterdata saved to {self.tmp_dir}/{output_file}")
+				print(f"Updated masterdata saved to {out_path}")
 
 	def bulk_replace(self):
 		if not self.bulk_file:

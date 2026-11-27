@@ -13,7 +13,21 @@ from argparse import ArgumentParser
 
 
 class ValidateMatrix:
-    def __init__(self, url, taxa_path, base_dir, output_dir, gb_matrix, country_file, assets, host_map, country_map):
+    def __init__(
+        self,
+        url,
+        taxa_path,
+        base_dir,
+        output_dir,
+        gb_matrix,
+        country_file,
+        assets,
+        host_map,
+        country_map,
+        extra_host_map=None,
+        extra_country_map=None,
+        fill_missing_only=False,
+    ):
         self.url = url
         self.taxa_path = taxa_path
         self.base_dir = base_dir
@@ -23,6 +37,9 @@ class ValidateMatrix:
         self.assets = assets
         self.host_map_path = host_map
         self.country_map_path = country_map
+        self.extra_host_map_path = extra_host_map if extra_host_map not in (None, "", "null", "None", "UNSET") else None
+        self.extra_country_map_path = extra_country_map if extra_country_map not in (None, "", "null", "None", "UNSET") else None
+        self.fill_missing_only = bool(fill_missing_only)
 
         self.dump_file = "taxadump.tar.gz"
         self.md5_url = f"{self.url}.md5"
@@ -172,12 +189,21 @@ class ValidateMatrix:
         return reader, delim, f
 
     # ---------------- Read mapping files ----------------
-    def read_mapping_file(self, path, key_col, value_col):
+    def read_mapping_file(self, path, key_col, value_col, extra_path=None):
         mapping = {}
-        with open(path) as f:
-            for each_line in islice(f, 1, None):
-                source, replaced_by = each_line.strip().split("\t")
-                mapping[source] = replaced_by
+        for p in (path, extra_path):
+            if not p or not os.path.exists(p):
+                continue
+            with open(p, encoding="utf-8", errors="replace") as f:
+                for each_line in islice(f, 1, None):
+                    parts = each_line.rstrip("\r\n").split("\t")
+                    if len(parts) < 2:
+                        continue
+                    source = parts[0].strip()
+                    replaced_by = parts[1].strip()
+                    if source and replaced_by:
+                        mapping[source] = replaced_by
+                        mapping[source.lower()] = replaced_by
         return mapping
 
     # ---------------- Country dictionary ----------------
@@ -243,25 +269,43 @@ class ValidateMatrix:
         if self._is_na(host_value):
             return ("NA", "NA", "NA", comment)
 
-        host = re.sub(r'\s*\([^)]*\)', '', str(host_value).strip())
-        host_key = host.lower()
+        raw_str = str(host_value).strip()
+        # Try full string (with parenthetical notes stripped), then head before ';'
+        # metadata qualifiers (e.g. 'mallard; gender M; age hatch year').
+        candidates = []
+        cleaned = re.sub(r'\s*\([^)]*\)', '', raw_str).strip()
+        if cleaned:
+            candidates.append(cleaned)
+        if ';' in raw_str:
+            head_raw = raw_str.split(';', 1)[0].strip()
+            head_clean = re.sub(r'\s*\([^)]*\)', '', head_raw).strip()
+            if head_clean and head_clean not in candidates:
+                candidates.append(head_clean)
+        if raw_str not in candidates:
+            candidates.append(raw_str)
 
-        if host_key in taxa_dict:
-            taxaid = taxa_dict[host_key]
-            sci_name = scientific_dict.get(taxaid, "NA")
-            return ("Yes", taxaid, sci_name, comment)
+        # 1. Explicit curated host_map aliases take priority over NCBI common-name defaults
+        #    (e.g. generic GISAID 'Duck' -> 'Anatidae' 8830 instead of mallard 8839).
+        for cand in candidates:
+            cand_key = cand.lower()
+            repl = host_map.get(cand) or host_map.get(cand_key)
+            if repl:
+                self.host_mapped_count += 1
+                comment = f"Host mapped from mapping file: '{cand}' -> '{repl}'"
+                repl_key = repl.lower()
+                if repl_key in taxa_dict:
+                    taxaid = taxa_dict[repl_key]
+                    sci_name = scientific_dict.get(taxaid, "NA")
+                    return ("Yes", taxaid, sci_name, comment)
+                return ("NA", "NA", repl, comment)
 
-        repl = host_map.get(host) or host_map.get(host_key)
-        if repl:
-            self.host_mapped_count += 1
-            comment = f"Host mapped from mapping file: '{host}' -> '{repl}'"
-            repl_key = repl.lower()
-            if repl_key in taxa_dict:
-                taxaid = taxa_dict[repl_key]
+        # 2. Direct NCBI Taxonomy lookup (scientific name, common name, synonym)
+        for cand in candidates:
+            cand_key = cand.lower()
+            if cand_key in taxa_dict:
+                taxaid = taxa_dict[cand_key]
                 sci_name = scientific_dict.get(taxaid, "NA")
                 return ("Yes", taxaid, sci_name, comment)
-            else:
-                return ("NA", "NA", repl, comment)
 
         return ("NA", "NA", "NA", comment)
 
@@ -307,20 +351,27 @@ class ValidateMatrix:
                     else:
                         return f"{existing.strip(' ;|')}; {new_info.strip()}"
 
+                def _has_existing(val):
+                    s = str(val or "").strip()
+                    return s != "" and s.upper() != "NA"
+
                 # Date
-                row['collection_date_validated'] = self._validate_date_str(row.get('collection_date'))
+                if not (self.fill_missing_only and _has_existing(row.get('collection_date_validated'))):
+                    row['collection_date_validated'] = self._validate_date_str(row.get('collection_date'))
 
                 # Country
-                country_validated, country_comment = self.validate_country(row.get('country'), country_dict, country_map)
-                row['country_validated'] = country_validated
-                row_comment = add_unique_comment(row_comment, country_comment)
+                if not (self.fill_missing_only and _has_existing(row.get('country_validated'))):
+                    country_validated, country_comment = self.validate_country(row.get('country'), country_dict, country_map)
+                    row['country_validated'] = country_validated
+                    row_comment = add_unique_comment(row_comment, country_comment)
 
                 # Host
-                host_validated, host_taxid, host_sci, host_comment = self.resolve_host(row.get('host'), taxa_dict, host_map)
-                row['host_validated'] = host_validated
-                row['host_taxa_id'] = host_taxid
-                row['host_scientific_name'] = host_sci
-                row_comment = add_unique_comment(row_comment, host_comment)
+                if not (self.fill_missing_only and _has_existing(row.get('host_taxa_id'))):
+                    host_validated, host_taxid, host_sci, host_comment = self.resolve_host(row.get('host'), taxa_dict, host_map)
+                    row['host_validated'] = host_validated
+                    row['host_taxa_id'] = "" if (self.fill_missing_only and host_taxid == "NA") else host_taxid
+                    row['host_scientific_name'] = "" if (self.fill_missing_only and host_sci == "NA") else host_sci
+                    row_comment = add_unique_comment(row_comment, host_comment)
 
                 # Cleanup
                 row_comment = re.sub(r'(^NA[;| ]*|[;| ]*NA$)', '', row_comment, flags=re.IGNORECASE).strip(' ;|')
@@ -368,14 +419,23 @@ class ValidateMatrix:
             for row in rows:
                 writer.writerow(row)
 
-    def process(self):
+    def validate_matrix(self, skip_download=False):
         country_dict = self.country_to_dict(self.country_file)
-        host_map = self.read_mapping_file(self.host_map_path, "host", "replaced_by")
-        country_map = self.read_mapping_file(self.country_map_path, "country", "replaced_by")
-        self.verify_and_download()
-        self.read_tar()
+        host_map = self.read_mapping_file(
+            self.host_map_path, "host", "replaced_by", extra_path=self.extra_host_map_path
+        )
+        country_map = self.read_mapping_file(
+            self.country_map_path, "country", "replaced_by", extra_path=self.extra_country_map_path
+        )
+        names_local = join(self.base_dir, self.taxa_path, "names.dmp")
+        if not skip_download and not (self.fill_missing_only and os.path.exists(names_local)):
+            self.verify_and_download()
+            self.read_tar()
         taxa_dict = self.taxa_name_dump_to_dict()
         self.read_meta_sheet(country_dict, taxa_dict, host_map, country_map)
+
+    def process(self):
+        self.validate_matrix(skip_download=False)
 
 
 def main():
@@ -389,11 +449,17 @@ def main():
     parser.add_argument('-a', '--assets', default='assets/')
     parser.add_argument('-m', '--host_map', default="generic/rabv/host_mapping.tsv")
     parser.add_argument('-n', '--country_map', default="generic/rabv/country_mapping.tsv")
+    parser.add_argument('--extra_host_mapping', default=None, help='Optional species-specific host aliases TSV merged on top of --host_map')
+    parser.add_argument('--extra_country_mapping', default=None, help='Optional species-specific country aliases TSV merged on top of --country_map')
+    parser.add_argument('--fill_missing_only', action='store_true', help='Only validate rows missing host_taxa_id / country_validated / collection_date_validated; reuses local names.dmp if present')
     args = parser.parse_args()
 
     validator = ValidateMatrix(
         args.url, args.taxa_path, args.base_dir, args.output_dir,
-        args.gb_matrix, args.country, args.assets, args.host_map, args.country_map
+        args.gb_matrix, args.country, args.assets, args.host_map, args.country_map,
+        extra_host_map=args.extra_host_mapping,
+        extra_country_map=args.extra_country_mapping,
+        fill_missing_only=args.fill_missing_only,
     )
     validator.process()
 

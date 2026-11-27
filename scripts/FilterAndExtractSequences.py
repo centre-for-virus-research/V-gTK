@@ -7,6 +7,7 @@ from Bio import SeqIO
 from os.path import join
 from argparse import ArgumentParser
 from ExportRefListFromUpdateDb import load_reference_dict, load_reference_file_dict
+import accession_utils
 
 #genbank_divisions = ['VRL', 'PAT', 'SYN', 'ENV']
 
@@ -31,7 +32,11 @@ class FilterAndExtractSequences:
 	def fasta_to_dict(self):
 		seq_dict = {}
 		for record in SeqIO.parse(self.sequence_file, "fasta"):
-			seq_dict[record.id] = str(record.seq)
+			seq_str = str(record.seq)
+			seq_dict[record.id] = seq_str
+			norm = accession_utils.normalise_accession(record.id)
+			if norm and norm not in seq_dict:
+				seq_dict[norm] = seq_str
 		return seq_dict
 
 	def read_ref_list(self):
@@ -58,13 +63,24 @@ class FilterAndExtractSequences:
 		return True
 
 	@staticmethod
-	def _classify_accession(row, accession, ref_list):
+	def _classify_accession(row, accession, ref_list, raw_accession=None):
+		candidates = [accession]
+		if raw_accession and raw_accession != accession:
+			candidates.append(raw_accession)
+		norm = accession_utils.normalise_accession(accession)
+		if norm and norm not in candidates:
+			candidates.append(norm)
+		for cand in candidates:
+			ref_type = str(ref_list.get(cand, '')).strip().lower()
+			if ref_type in ('master', 'reference', 'exclusion_list'):
+				return ref_type
 		row_type = str(row.get('accession_type', '')).strip().lower()
 		if row_type:
 			return row_type
-		ref_type = str(ref_list.get(accession, '')).strip().lower()
-		if ref_type:
-			return ref_type
+		for cand in candidates:
+			ref_type = str(ref_list.get(cand, '')).strip().lower()
+			if ref_type:
+				return ref_type
 		return 'query'
 
 	def _write_filter_summary(self, total_queries, written_queries, excluded_query_reasons, written_refs):
@@ -98,13 +114,22 @@ class FilterAndExtractSequences:
 	
 		# Both methods now return dict {accession: type}
 		if self.segmented_virus == "Y":
-			ref_list = self.read_ref_list_segmented_virus()
+			raw_ref_list = self.read_ref_list_segmented_virus()
 		else:
-			ref_list = self.read_ref_list()
+			raw_ref_list = self.read_ref_list()
+
+		ref_list = dict(raw_ref_list or {})
+		for acc_key, acc_type in list(ref_list.items()):
+			norm_k = accession_utils.normalise_accession(acc_key)
+			if norm_k and norm_k not in ref_list:
+				ref_list[norm_k] = acc_type
 
 		# Identify which refs are exclusion_list type
-		exclusion_list_refs = {acc for acc, acc_type in ref_list.items() 
-			if acc_type.strip().lower() == 'exclusion_list'}
+		exclusion_list_refs = {
+			accession_utils.normalise_accession(acc) or acc
+			for acc, acc_type in raw_ref_list.items()
+			if str(acc_type).strip().lower() == 'exclusion_list'
+		}
 		if exclusion_list_refs:
 			print(f"Found {len(exclusion_list_refs)} exclusion_list references: {', '.join(sorted(exclusion_list_refs))}")
 			# Write exclusion ref list for downstream use by BlastAlignment
@@ -120,105 +145,113 @@ class FilterAndExtractSequences:
 		written_queries = 0
 		written_refs = 0
 
-		with open(query_seq_file, 'w') as write_query_seq, open(ref_seq_file, 'w') as write_ref_seq:
-			with open(self.genbank_matrix) as file, tempfile.NamedTemporaryFile('w', delete=False, newline='') as tmpfile:
-				csv_reader = csv.DictReader(file, delimiter='\t')
-				fieldnames = csv_reader.fieldnames
+		tmp_path = None
+		try:
+			with open(query_seq_file, 'w') as write_query_seq, open(ref_seq_file, 'w') as write_ref_seq:
+				with open(self.genbank_matrix) as file, tempfile.NamedTemporaryFile('w', delete=False, newline='') as tmpfile:
+					tmp_path = tmpfile.name
+					csv_reader = csv.DictReader(file, delimiter='\t')
+					fieldnames = list(csv_reader.fieldnames or [])
 
-				if 'exclusion_status' not in fieldnames:
-					fieldnames += ['exclusion_status']
-				if 'exclusion_criteria' not in fieldnames:
-					fieldnames += ['exclusion_criteria']
+					if 'exclusion_status' not in fieldnames:
+						fieldnames += ['exclusion_status']
+					if 'exclusion_criteria' not in fieldnames:
+						fieldnames += ['exclusion_criteria']
 
-				writer = csv.DictWriter(tmpfile, fieldnames=fieldnames, delimiter='\t')
-				writer.writeheader()
+					writer = csv.DictWriter(tmpfile, fieldnames=fieldnames, delimiter='\t')
+					writer.writeheader()
 
-				for row in csv_reader:
-					accession = row['gi_number']
-					acc_type = self._classify_accession(row, accession, ref_list)
-					is_query = acc_type == 'query'
-					if is_query:
-						total_queries += 1
-					
-					if str(row.get('exclusion_status', '')).strip() == '1':
+					for row in csv_reader:
+						raw_acc = (row.get('gi_number') or row.get('primary_accession') or '').strip()
+						accession = accession_utils.normalise_accession(raw_acc) or raw_acc
+						acc_type = self._classify_accession(row, accession, ref_list, raw_accession=raw_acc)
+						is_query = acc_type == 'query'
 						if is_query:
-							reason = row.get('exclusion_criteria', '').strip() or 'metadata_exclusion'
-							excluded_query_reasons[reason] += 1
+							total_queries += 1
+
+						if str(row.get('exclusion_status', '')).strip() == '1':
+							if is_query:
+								reason = (row.get('exclusion_criteria') or '').strip() or 'metadata_exclusion'
+								excluded_query_reasons[reason] += 1
+							writer.writerow(row)
+							continue
+
+						gb_division = (row.get('division') or '').strip()
+						data_source = str(row.get('data_source') or row.get('dataset_source') or '').strip().lower()
+						is_genbank_row = data_source in ('', 'ncbi', 'genbank')
+
+						sequence = sequence_dict.get(raw_acc) or sequence_dict.get(accession) or ""
+
+						try:
+							seq_len = int(row['length'])
+						except (ValueError, TypeError, KeyError):
+							seq_len = len(sequence)
+
+						try:
+							n_count = int(row['n'])
+						except (ValueError, TypeError, KeyError):
+							n_count = sequence.upper().count('N') if sequence else 0
+
+						seq_len_without_n = seq_len - n_count
+
+						exclusion_status = 0
+						exclusion_criteria = ""
+						if acc_type == 'exclusion_list':
+							exclusion_status = 1
+							exclusion_criteria = "excluded by reference list exclusion flag"
+						elif not sequence.strip():
+							exclusion_status = 1
+							exclusion_criteria = "missing_or_empty_sequence"
+
+						if is_query and exclusion_status == 0:
+							if is_genbank_row and gb_division:
+								if self.gb_division is not None and gb_division not in self.gb_division:
+									exclusion_status = 1
+									exclusion_criteria = f"GenBank division {gb_division} not in user-defined exclusion list"
+
+								elif self.valid_divisions is not None and gb_division not in self.valid_divisions:
+									exclusion_status = 1
+									exclusion_criteria = f"GenBank division {gb_division} not in valid division list"
+
+							if seq_len < self.total_length:
+								exclusion_status = 1
+								exclusion_criteria = "Sequence length less than total length"
+
+							if seq_len_without_n < self.real_length:
+								exclusion_status = 1
+								exclusion_criteria = "Real sequence length (length - Ns) less than the threshold"
+
+						existing_criteria = (row.get('exclusion_criteria') or '').strip()
+						if existing_criteria:
+							row['exclusion_criteria'] = f"{existing_criteria}; {exclusion_criteria}" if exclusion_criteria else existing_criteria
+						else:
+							row['exclusion_criteria'] = exclusion_criteria
+
+						row['exclusion_status'] = exclusion_status
 						writer.writerow(row)
-						continue
 
-					gb_division = row['division']
-					
-					# Get sequence safely
-					if accession in sequence_dict:
-						sequence = sequence_dict[accession]
-					else:
-						# If sequence is missing but row exists, we might have a problem.
-						# For now, let's treat it as empty string to avoid crashes, 
-						# or if original behavior was to crash, we should maybe duplicate that?
-						# Original: sequence = sequence_dict[accession] -> KeyError
-						# Let's try to be robust. 
-						sequence = ""
+						if exclusion_status == 1:
+							exclusion_dict[accession] = row['exclusion_criteria']
+							if is_query:
+								excluded_query_reasons[row['exclusion_criteria'] or 'metadata_exclusion'] += 1
+							continue
 
-					try:
-						seq_len = int(row['length'])
-					except (ValueError, TypeError):
-						seq_len = len(sequence)
+						if acc_type != 'query':
+							write_ref_seq.write(f">{accession}\n{sequence}\n")
+							written_refs += 1
+						else:
+							write_query_seq.write(f">{accession}\n{sequence}\n")
+							written_queries += 1
 
-					try:
-						n_count = int(row['n'])
-					except (ValueError, TypeError):
-						n_count = sequence.upper().count('N') if sequence else 0
-
-					seq_len_without_n = seq_len - n_count
-
-					exclusion_status = 0
-					exclusion_criteria = ""
-					if acc_type == 'exclusion_list':
-						exclusion_status = 1
-						exclusion_criteria = "excluded by reference list exclusion flag"
-
-					if is_query:
-						if self.gb_division is not None and gb_division not in self.gb_division:
-							exclusion_status = 1
-							exclusion_criteria = f"GenBank division {gb_division} not in user-defined exclusion list"
-
-						elif gb_division not in self.valid_divisions:
-							exclusion_status = 1
-							exclusion_criteria = f"GenBank division {gb_division} not in valid division list"
-
-						if seq_len < self.total_length:
-							exclusion_status = 1
-							exclusion_criteria = "Sequence length less than total length"
-
-						if seq_len_without_n < self.real_length:
-							exclusion_status = 1
-							exclusion_criteria = "Real sequence length (length - Ns) less than the threshold"
-
-					existing_criteria = row.get('exclusion_criteria', '').strip()
-					if existing_criteria:
-						row['exclusion_criteria'] = f"{existing_criteria}; {exclusion_criteria}" if exclusion_criteria else existing_criteria
-					else:
-						row['exclusion_criteria'] = exclusion_criteria
-
-					row['exclusion_status'] = exclusion_status
-					writer.writerow(row)
-
-					if exclusion_status == 1:
-						exclusion_dict[accession] = row['exclusion_criteria']
-						if is_query:
-							excluded_query_reasons[row['exclusion_criteria'] or 'metadata_exclusion'] += 1
-						continue
-
-					if acc_type != 'query':
-						write_ref_seq.write(f">{accession}\n{sequence}\n")
-						written_refs += 1
-					else:
-						write_query_seq.write(f">{accession}\n{sequence}\n")
-						written_queries += 1
-
-		# Replace original matrix file with updated temp file
-		shutil.move(tmpfile.name, self.genbank_matrix)
+			# Replace original matrix file with updated temp file
+			shutil.move(tmp_path, self.genbank_matrix)
+			tmp_path = None
+		finally:
+			if tmp_path and os.path.exists(tmp_path):
+				try:
+					os.remove(tmp_path)
+				except OSError:
+					pass
 		self._write_filter_summary(total_queries, written_queries, excluded_query_reasons, written_refs)
 
 	def process(self):
