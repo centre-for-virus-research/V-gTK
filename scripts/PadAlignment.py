@@ -29,6 +29,7 @@ class PadAlignment:
 		# process_all_masters. Used only to scope the orphan warning run-wide
 		# instead of per-segment; None means 'driven with -r, single backbone'.
 		self.run_projectable_refs = None
+		self._merged_already_deduped = False
 
 	@staticmethod
 	def _load_skip_ids(skip_ids_arg) -> set:
@@ -274,6 +275,7 @@ class PadAlignment:
 		except Exception as exc:
 			print(f"[warn] Could not resolve run-wide projectable references: {exc}")
 			self.run_projectable_refs = None
+		self._merged_already_deduped = False
 
 		for master in master_list:
 			ref_aln_file = None
@@ -326,49 +328,12 @@ class PadAlignment:
 			record.description = canonical_id + description[len(original):]
 		return record
 
-	def insert_gaps(self, reference_aligned, subalignment_seqs, ref_id):
-		ref_aligned_str = str(reference_aligned)
-		# Both sides canonical. This compared a version-stripped record id against
-		# ``ref_id`` exactly as given, so the two only ever agreed when ``ref_id`` was
-		# already bare; a versioned one found no nextalign reference row and dropped
-		# into the index-matching fallback below, which assumes the query and the
-		# master share coordinates and quietly mis-projects when they do not. The
-		# stripping was also wrong in the other direction: a strain name containing a
-		# dot was truncated mid-name and could not match itself.
-		ref_key = accession_utils.normalise_accession(ref_id)
-		nextalign_ref_rec = None
-		if ref_key is not None:
-			for r in subalignment_seqs:
-				if accession_utils.normalise_accession(r.id) == ref_key:
-					nextalign_ref_rec = r
-					break
-		if not nextalign_ref_rec:
-			# Fallback to sequential index matching if reference sequence is not in subalignment
-			ref_with_gaps_list = list(reference_aligned)
-			updated_sequences = []
-			for seq_record in subalignment_seqs:
-				sequence = list(str(seq_record.seq))
-				gapped_sequence = []
-				seq_idx = 0
-				for char in ref_with_gaps_list:
-					if char == '-':
-						gapped_sequence.append('-')
-					else:
-						if seq_idx < len(sequence):
-							gapped_sequence.append(sequence[seq_idx])
-							seq_idx += 1
-						else:
-							gapped_sequence.append('-')
-				gapped_seq_str = ''.join(gapped_sequence)
-				seq_record.seq = Seq(gapped_seq_str)
-				updated_sequences.append(seq_record)
-			return updated_sequences
-
-		nextalign_ref_seq = str(nextalign_ref_rec.seq)
+	@staticmethod
+	def _build_projection_plan(ref_aligned_str, nextalign_ref_seq):
+		"""Compile (is_slice, q_start, q_end, gap_str) runs once per reference backbone row."""
 		master_dq_raw = ref_aligned_str.upper().replace('-', '')
 		query_dq_raw = nextalign_ref_seq.upper().replace('-', '')
 
-		# Map master raw coordinates (subsequence) to nextalign raw coordinates
 		n, m = len(master_dq_raw), len(query_dq_raw)
 		width = max(100, abs(n - m) + 50)
 		dp = [[-999999] * (2 * width + 1) for _ in range(n + 1)]
@@ -413,7 +378,6 @@ class PadAlignment:
 				continue
 			break
 
-		# Map nextalign raw coordinates to nextalign column indices
 		nextalign_raw_to_col = {}
 		raw_idx = 0
 		for col_idx, char in enumerate(nextalign_ref_seq):
@@ -421,26 +385,85 @@ class PadAlignment:
 				nextalign_raw_to_col[raw_idx] = col_idx
 				raw_idx += 1
 
-		updated_sequences = []
-		for seq_record in subalignment_seqs:
-			query_seq = str(seq_record.seq)
-			gapped_sequence = []
-			master_raw_idx = 0
-			for char in ref_aligned_str:
-				if char == '-':
-					gapped_sequence.append('-')
+		col_targets = []
+		master_raw_idx = 0
+		max_col = -1
+		for char in ref_aligned_str:
+			if char == '-':
+				col_targets.append(-1)
+			else:
+				query_raw_idx = mapping.get(master_raw_idx)
+				col_nextalign = nextalign_raw_to_col.get(query_raw_idx) if query_raw_idx is not None else None
+				if col_nextalign is not None:
+					col_targets.append(col_nextalign)
+					if col_nextalign > max_col:
+						max_col = col_nextalign
 				else:
-					query_raw_idx = mapping.get(master_raw_idx)
-					if query_raw_idx is not None:
-						col_nextalign = nextalign_raw_to_col.get(query_raw_idx)
-						if col_nextalign is not None and col_nextalign < len(query_seq):
-							gapped_sequence.append(query_seq[col_nextalign])
+					col_targets.append(-1)
+				master_raw_idx += 1
+
+		plan = []
+		idx = 0
+		total = len(col_targets)
+		while idx < total:
+			c = col_targets[idx]
+			if c == -1:
+				g_end = idx + 1
+				while g_end < total and col_targets[g_end] == -1:
+					g_end += 1
+				plan.append((False, 0, 0, '-' * (g_end - idx)))
+				idx = g_end
+			else:
+				s_start = c
+				s_end = c + 1
+				idx += 1
+				while idx < total and col_targets[idx] == s_end:
+					s_end += 1
+					idx += 1
+				plan.append((True, s_start, s_end, ''))
+		return plan, col_targets, max_col
+
+	@staticmethod
+	def _project_seq_str(query_seq, plan, col_targets, max_col):
+		if len(query_seq) > max_col:
+			return ''.join(query_seq[s:e] if is_slice else gap_str for is_slice, s, e, gap_str in plan)
+		qlen = len(query_seq)
+		return ''.join(query_seq[c] if (c >= 0 and c < qlen) else '-' for c in col_targets)
+
+	def insert_gaps(self, reference_aligned, subalignment_seqs, ref_id):
+		ref_aligned_str = str(reference_aligned)
+		ref_key = accession_utils.normalise_accession(ref_id)
+		nextalign_ref_rec = None
+		if ref_key is not None:
+			for r in subalignment_seqs:
+				if accession_utils.normalise_accession(r.id) == ref_key:
+					nextalign_ref_rec = r
+					break
+		if not nextalign_ref_rec:
+			ref_with_gaps_list = list(reference_aligned)
+			updated_sequences = []
+			for seq_record in subalignment_seqs:
+				sequence = list(str(seq_record.seq))
+				gapped_sequence = []
+				seq_idx = 0
+				for char in ref_with_gaps_list:
+					if char == '-':
+						gapped_sequence.append('-')
+					else:
+						if seq_idx < len(sequence):
+							gapped_sequence.append(sequence[seq_idx])
+							seq_idx += 1
 						else:
 							gapped_sequence.append('-')
-					else:
-						gapped_sequence.append('-')
-					master_raw_idx += 1
-			seq_record.seq = Seq(''.join(gapped_sequence))
+				gapped_seq_str = ''.join(gapped_sequence)
+				seq_record.seq = Seq(gapped_seq_str)
+				updated_sequences.append(seq_record)
+			return updated_sequences
+
+		plan, col_targets, max_col = self._build_projection_plan(ref_aligned_str, str(nextalign_ref_rec.seq))
+		updated_sequences = []
+		for seq_record in subalignment_seqs:
+			seq_record.seq = Seq(self._project_seq_str(str(seq_record.seq), plan, col_targets, max_col))
 			updated_sequences.append(seq_record)
 		return updated_sequences
 
@@ -508,70 +531,162 @@ class PadAlignment:
 
 		return orphans
 
+	@staticmethod
+	def _iter_fasta_raw(fasta_path, chunk_bytes=16 * 1024 * 1024):
+		"""Yield (id_token, full_header_without_gt, seq_str) streaming in 16 MiB blocks."""
+		with open(fasta_path, "r", encoding="utf-8", errors="replace") as fh:
+			carry = ""
+			first_chunk = True
+			while True:
+				chunk = fh.read(chunk_bytes)
+				if not chunk:
+					break
+				data = carry + chunk
+				if first_chunk:
+					gt = data.find(">")
+					if gt == -1:
+						carry = ""
+						continue
+					data = data[gt + 1:]
+					first_chunk = False
+				parts = data.split("\n>")
+				carry = parts[-1]
+				for blk in parts[:-1]:
+					hdr, sep_nl, body = blk.partition("\n")
+					if sep_nl or hdr:
+						h = hdr.strip()
+						rid = h.split(None, 1)[0] if h else ""
+						yield rid, h, body.replace("\n", "").replace("\r", "")
+			if carry and not first_chunk:
+				hdr, sep_nl, body = carry.partition("\n")
+				if sep_nl or hdr:
+					h = hdr.strip()
+					rid = h.split(None, 1)[0] if h else ""
+					yield rid, h, body.replace("\n", "").replace("\r", "")
+
+	@staticmethod
+	def _relabel_header_str(rid, full_header, canonical_id):
+		if not full_header or full_header == rid:
+			return canonical_id
+		if full_header.startswith(rid + " "):
+			return canonical_id + full_header[len(rid):]
+		return canonical_id
+
 	def process_master_alignment(self, reference_alignment_file, input_dir, base_dir, output_dir, keep_intermediate_files=False, segment_value=None):
 		master_alignment = SeqIO.to_dict(SeqIO.parse(reference_alignment_file, "fasta"))
-		merged_sequences = []
-		for record_id, ref_record in master_alignment.items():
-			ref_aligned = ref_record.seq
-			ref_id = accession_utils.normalise_accession(record_id) or record_id
-			# The backbone row was re-emitted below with its *original* header while
-			# every key derived from it here - the subalignment directory, the padded
-			# filename, the skip comparison, the manifest - was canonical. A versioned
-			# refset header therefore put both spellings of one genome into the merged
-			# MSA, once as this backbone row and once as the nextalign reference row of
-			# its own subalignment, and nothing downstream can dedup two spellings by
-			# name. One genome, one id.
-			self._relabel_record(ref_record, ref_id)
-			subalignment_file = os.path.join(input_dir, f"{ref_id}/{ref_id}.aligned.fasta")
-			if os.path.exists(subalignment_file):
-				print(f"Processing subalignment for {ref_id} using {subalignment_file}")
-				subalignment_seqs = list(SeqIO.parse(subalignment_file, "fasta"))
-				if self.skip_ids:
-					before = len(subalignment_seqs)
-					subalignment_seqs = [
-						r for r in subalignment_seqs
-						if accession_utils.normalise_accession(r.id) not in self.skip_ids
-					]
-					skipped = before - len(subalignment_seqs)
-					if skipped:
-						print(f"[skip_ids] Skipped {skipped} sequence(s) from {ref_id} subalignment")
-				updated_seqs = self.insert_gaps(ref_aligned, subalignment_seqs, ref_id)
-				
-				# Add the reference sequence to the list of sequences
-				updated_seqs.insert(0, ref_record)
+		merged_output_file = os.path.join(base_dir, output_dir, os.path.basename(reference_alignment_file).replace(".fasta", "_merged_MSA.fasta"))
+		os.makedirs(join(base_dir, output_dir), exist_ok=True)
+		os.makedirs(join(output_dir), exist_ok=True)
 
-				os.makedirs(join(output_dir), exist_ok=True)
-				output_file = os.path.join(output_dir, f"{ref_id}_aligned_padded.fasta")
-				with open(join(output_file), "w") as output_handle:
-					SeqIO.write(updated_seqs, output_handle, "fasta")
-					print(f"Saved updated alignment to {output_file}")
-				merged_sequences.extend(updated_seqs)
-			else:
-				print(f"Subalignment file {subalignment_file} not found. Adding reference only for {ref_id}.")
-				# Even if no subalignment exists (no queries hit this ref), we must include the ref itself
-				# so it appears in the final merged output.
-				updated_seqs = [ref_record]
-				
-				os.makedirs(join(output_dir), exist_ok=True)
-				output_file = os.path.join(output_dir, f"{ref_id}_aligned_padded.fasta")
-				with open(join(output_file), "w") as output_handle:
-					SeqIO.write(updated_seqs, output_handle, "fasta")
-					print(f"Saved reference-only alignment to {output_file}")
-				merged_sequences.extend(updated_seqs)
+		seg_norm = self._normalize_segment(segment_value) or "0"
+		seen_merged_keys = set()
+		wrote_any_merged = False
+		manifest_direct_file = None
+		manifest_direct_handle = None
+		if getattr(self, "_manifest_out_path", None):
+			manifest_dir = os.path.dirname(self._manifest_out_path)
+			if manifest_dir:
+				os.makedirs(manifest_dir, exist_ok=True)
+			need_hdr = not os.path.exists(self._manifest_out_path) or os.path.getsize(self._manifest_out_path) == 0
+			manifest_direct_handle = open(self._manifest_out_path, "a", encoding="utf-8")
+			if need_hdr:
+				manifest_direct_handle.write("accession\tsegment\toutput_file\n")
+			manifest_direct_file = self._manifest_out_path
 
-		if merged_sequences:
-			merged_output_file = os.path.join(base_dir, output_dir, os.path.basename(reference_alignment_file).replace(".fasta", "_merged_MSA.fasta"))
-			os.makedirs(join(base_dir, output_dir), exist_ok=True)
-			with open(merged_output_file, "w") as merged_output_handle:
-				SeqIO.write(merged_sequences, merged_output_handle, "fasta")
-				print(f"Saved merged alignment to {merged_output_file}")
-			for rec in merged_sequences:
+		def _emit_to_merged(mh, rec_id, header_line, seq_str):
+			nonlocal wrote_any_merged
+			wrote_any_merged = True
+			dedup_key = rec_id.split('|')[0] if '|' in rec_id else rec_id
+			if dedup_key not in seen_merged_keys:
+				seen_merged_keys.add(dedup_key)
+				mh.write(f">{header_line}\n{seq_str}\n")
+			if manifest_direct_handle is not None:
+				manifest_direct_handle.write(f"{rec_id}\t{seg_norm}\t{merged_output_file}\n")
+			elif len(self.segment_manifest_rows) < 250000:
 				self.segment_manifest_rows.append({
-					"accession": rec.id,
-					"segment": self._normalize_segment(segment_value) or "0",
+					"accession": rec_id,
+					"segment": seg_norm,
 					"output_file": merged_output_file,
 				})
+
+		try:
+			with open(merged_output_file, "w", encoding="utf-8") as merged_handle:
+				for record_id, ref_record in master_alignment.items():
+					ref_aligned_str = str(ref_record.seq)
+					ref_id = accession_utils.normalise_accession(record_id) or record_id
+					self._relabel_record(ref_record, ref_id)
+					ref_header_line = ref_record.description if ref_record.description else ref_id
+					subalignment_file = os.path.join(input_dir, f"{ref_id}/{ref_id}.aligned.fasta")
+					output_file = os.path.join(output_dir, f"{ref_id}_aligned_padded.fasta")
+
+					if os.path.exists(subalignment_file):
+						print(f"Processing subalignment for {ref_id} using {subalignment_file}")
+						ref_key = accession_utils.normalise_accession(ref_id)
+						nextalign_ref_seq = None
+						if ref_key is not None:
+							for rid, _, rseq in self._iter_fasta_raw(subalignment_file):
+								if accession_utils.normalise_accession(rid) == ref_key:
+									nextalign_ref_seq = rseq
+									break
+
+						plan_tuple = self._build_projection_plan(ref_aligned_str, nextalign_ref_seq) if nextalign_ref_seq is not None else None
+						ref_chars_fallback = list(ref_aligned_str) if plan_tuple is None else None
+						skipped = 0
+
+						sub_handle = open(output_file, "w", encoding="utf-8") if keep_intermediate_files else None
+						try:
+							if sub_handle is not None:
+								sub_handle.write(f">{ref_header_line}\n{ref_aligned_str}\n")
+							_emit_to_merged(merged_handle, ref_id, ref_header_line, ref_aligned_str)
+
+							for rid, full_hdr, qseq in self._iter_fasta_raw(subalignment_file):
+								norm_rid = accession_utils.normalise_accession(rid)
+								if self.skip_ids and norm_rid in self.skip_ids:
+									skipped += 1
+									continue
+								if plan_tuple is not None:
+									gapped_str = self._project_seq_str(qseq, plan_tuple[0], plan_tuple[1], plan_tuple[2])
+								else:
+									q_idx = 0
+									qlen = len(qseq)
+									out_chars = []
+									for ch in ref_chars_fallback:
+										if ch == '-':
+											out_chars.append('-')
+										elif q_idx < qlen:
+											out_chars.append(qseq[q_idx])
+											q_idx += 1
+										else:
+											out_chars.append('-')
+									gapped_str = ''.join(out_chars)
+								if sub_handle is not None:
+									sub_handle.write(f">{full_hdr}\n{gapped_str}\n")
+								_emit_to_merged(merged_handle, rid, full_hdr, gapped_str)
+						finally:
+							if sub_handle is not None:
+								sub_handle.close()
+
+						if skipped:
+							print(f"[skip_ids] Skipped {skipped} sequence(s) from {ref_id} subalignment")
+						if keep_intermediate_files:
+							print(f"Saved updated alignment to {output_file}")
+					else:
+						print(f"Subalignment file {subalignment_file} not found. Adding reference only for {ref_id}.")
+						if keep_intermediate_files:
+							with open(output_file, "w", encoding="utf-8") as output_handle:
+								output_handle.write(f">{ref_header_line}\n{ref_aligned_str}\n")
+							print(f"Saved reference-only alignment to {output_file}")
+						_emit_to_merged(merged_handle, ref_id, ref_header_line, ref_aligned_str)
+		finally:
+			if manifest_direct_handle is not None:
+				manifest_direct_handle.close()
+
+		if wrote_any_merged:
+			self._merged_already_deduped = True
+			print(f"Saved merged alignment to {merged_output_file}")
 		else:
+			if os.path.exists(merged_output_file):
+				os.remove(merged_output_file)
 			print(f"No sequences found for {reference_alignment_file}, skipping merged file creation.")
 
 		orphan_refs = self.find_orphan_query_references(reference_alignment_file, input_dir)
@@ -586,13 +701,13 @@ class PadAlignment:
 
 		if not keep_intermediate_files:
 			for record_id in master_alignment:
-				# Canonical, because that is the name the file was written under above.
 				ref_id = accession_utils.normalise_accession(record_id) or record_id
 				padded_file = os.path.join(output_dir, f"{ref_id}_aligned_padded.fasta")
 				if os.path.exists(padded_file):
 					os.remove(padded_file)
 					print(f"Deleted intermediate file {padded_file}")
-			shutil.rmtree(output_dir)
+			if os.path.abspath(output_dir) != os.path.abspath(os.path.join(base_dir, output_dir)):
+				shutil.rmtree(output_dir, ignore_errors=True)
 
 	def find_fasta_file(self, input_dir,new_outputfile=False):
 		directory = join(self.base_dir, self.output_dir)
@@ -607,21 +722,26 @@ class PadAlignment:
 			return None
 
 	def remove_redundant_sequences(self):
-		
-		input_file = self.find_fasta_file(join(self.base_dir, self.output_dir),self.new_outputfile) 
+		if getattr(self, "_merged_already_deduped", False):
+			return
+		input_file = self.find_fasta_file(join(self.base_dir, self.output_dir), self.new_outputfile)
 		if not input_file:
 			print(f"No fasta file found in {join(self.base_dir, self.output_dir)} to remove redundant sequences from.")
 			return
 
-		unique_records = {}
+		seen = set()
+		tmp_file = input_file + ".dedup.tmp"
 		try:
-			for record in SeqIO.parse(input_file, "fasta"):
-				accession = record.id.split('|')[0] if '|' in record.id else record.id
-				if accession not in unique_records:
-					unique_records[accession] = record
-			with open(input_file, "w") as output_handle:
-				SeqIO.write(unique_records.values(), output_handle, "fasta")
+			with open(tmp_file, "w", encoding="utf-8") as out_f:
+				for rid, full_hdr, seq_str in self._iter_fasta_raw(input_file):
+					accession = rid.split('|')[0] if '|' in rid else rid
+					if accession not in seen:
+						seen.add(accession)
+						out_f.write(f">{full_hdr}\n{seq_str}\n")
+			os.replace(tmp_file, input_file)
 		except Exception as e:
+			if os.path.exists(tmp_file):
+				os.remove(tmp_file)
 			print(f"Error removing redundant sequences: {e}")
 
 if __name__ == "__main__":
@@ -655,6 +775,10 @@ if __name__ == "__main__":
 		args.skip_ids,
 	)
 
+	if args.segment_manifest_out and os.path.exists(args.segment_manifest_out):
+		os.remove(args.segment_manifest_out)
+	processor._manifest_out_path = args.segment_manifest_out
+
 	if args.master_acc and args.nextalign_dir:
 		masters = processor.get_master_list(args.master_acc)
 		master_segment_map = processor.get_master_segment_map(args.master_acc)
@@ -679,11 +803,25 @@ if __name__ == "__main__":
 	processor.remove_redundant_sequences()
 
 	if args.segment_manifest_out:
-		manifest_dir = os.path.dirname(args.segment_manifest_out)
-		if manifest_dir:
-			os.makedirs(manifest_dir, exist_ok=True)
-		df_manifest = pd.DataFrame(processor.segment_manifest_rows).drop_duplicates()
-		df_manifest.to_csv(args.segment_manifest_out, sep='\t', index=False)
+		if os.path.exists(args.segment_manifest_out):
+			seen_m = set()
+			tmp_m = args.segment_manifest_out + ".tmp"
+			with open(args.segment_manifest_out, "r", encoding="utf-8") as mf_in, \
+			     open(tmp_m, "w", encoding="utf-8") as mf_out:
+				hdr = mf_in.readline()
+				if hdr:
+					mf_out.write(hdr)
+				for line in mf_in:
+					if line not in seen_m:
+						seen_m.add(line)
+						mf_out.write(line)
+			os.replace(tmp_m, args.segment_manifest_out)
+		else:
+			manifest_dir = os.path.dirname(args.segment_manifest_out)
+			if manifest_dir:
+				os.makedirs(manifest_dir, exist_ok=True)
+			df_manifest = pd.DataFrame(processor.segment_manifest_rows).drop_duplicates()
+			df_manifest.to_csv(args.segment_manifest_out, sep='\t', index=False)
 
 # -----------------------------------------------------------------------------
 # UPDATE-MODE PLAN FOR PADALIGNMENT (COMMENT ONLY)

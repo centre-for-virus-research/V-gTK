@@ -170,6 +170,8 @@ def step_reroot(output, workdir, order_node="increase", only_source=None):
 					"--name", row["name"],
 					"--segment-key", row["segment_key"],
 					"--segment", row["segment"],
+					# rerooting keeps the topology, so the stored usher.pb still holds
+					"--keep-usher-assets",
 				],
 				f"store:{row['name']}",
 			)

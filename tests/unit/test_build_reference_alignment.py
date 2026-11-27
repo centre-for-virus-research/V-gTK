@@ -71,6 +71,49 @@ def test_choose_codon_regions_skips_a_master_cds_with_internal_stops():
 	assert skipped[0][1] == "internal stop in the master"
 
 
+def test_choose_codon_regions_trims_coronavirus_frameshift_overlap_in_whole_codons():
+	"""When a downstream frameshifted CDS (like SARS-CoV-2 ORF1b inside ORF1ab)
+	overlaps an upstream CDS at its 5' end, its non-overlapping 3' remainder (>= 30
+	codons) must be trimmed in whole-codon steps so its reading frame stays aligned."""
+	# Upstream ORF1a: 1..120 (40 codons)
+	orf1a_nt = "ATG" + ("GCT" * 38) + "TAA"
+	# Downstream frameshifted block starting at nt 107 (frame +1 relative to ORF1a):
+	# 14 nt overlap (107..120) + 106 nt downstream -> total 120 nt (40 codons) in its own frame
+	# Construct master so 1..120 has no internal stops AND 107..226 (40 codons) has no internal stops.
+	# Repeat 'GCA' -> frame 0 is GCA (Ala), frame +1 is CAG (Gln), frame +2 is AGC (Ser): zero stops in any frame!
+	poly_body = "GCA" * 80  # 240 nt, stop-free in all 3 frames
+	master = "ATG" + poly_body[:114] + "TAA" + poly_body[114:]
+	# Verify upstream 1..120 is clean and downstream 107..226 (120 nt = 40 codons) has no internal stops
+	cds = [
+		{"start": 1, "end": 120, "strand": "+", "phase": "0", "product": "ORF1a"},
+		{"start": 107, "end": 226, "strand": "+", "phase": "0", "product": "ORF1ab_part2"},
+	]
+	chosen, _ = bra.choose_codon_regions(cds, master)
+	assert len(chosen) == 2
+	assert chosen[0]["product"] == "ORF1a" and (chosen[0]["start"], chosen[0]["end"]) == (1, 120)
+	assert chosen[1]["product"] == "ORF1ab_part2"
+	assert chosen[1]["start"] > 120
+	# Trimmed start must preserve the downstream CDS's reading frame (whole-codon step from 107)
+	assert (chosen[1]["start"] - 107) % 3 == 0
+	assert (chosen[1]["end"] - chosen[1]["start"] + 1) % 3 == 0
+
+
+def test_choose_codon_regions_on_shipped_hcv_gff_matches_cached_build_report():
+	"""Guard against choose_codon_regions edits silently changing the codon regions
+	of shipped reference backbones (HCV NC_004102 has a short nested frameshift
+	'protein F' that must stay excluded in favour of the full polyprotein)."""
+	repo_root = Path(__file__).resolve().parents[2]
+	gff_path = repo_root / "generic" / "hcv" / "Gff" / "NC_004102.gff3"
+	backbone_fa = repo_root / "generic" / "hcv" / "ref_set_aligned" / "refset_1_aln.fasta"
+	if not gff_path.exists() or not backbone_fa.exists():
+		pytest.skip("Shipped HCV GFF3 or backbone cache not present")
+	seqs = dict(bra.read_fasta(str(backbone_fa)))
+	master_seq = seqs["NC_004102"].replace("-", "").upper()
+	cds, _ = bra.read_cds(str(gff_path))
+	chosen, _ = bra.choose_codon_regions(cds, master_seq)
+	assert [(c["start"], c["end"], c["product"]) for c in chosen] == [(342, 9377, "polyprotein")]
+
+
 def test_mafft_strategy_uses_linsi_only_within_budget():
 	assert bra.mafft_strategy(10, 1000, protein=False)[0] == "L-INS-i"
 	assert bra.mafft_strategy(238, 9646, protein=False)[0] == "FFT-NS-i"

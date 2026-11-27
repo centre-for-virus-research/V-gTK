@@ -14,6 +14,7 @@ The pipeline has full out-of-the-box support for the following viruses, with pre
 | **Hepatitis C Virus (HCV)** | No | Database updates, mutation catalog annotation & verification (`VerifyMutations`) |
 | **Influenza A Virus (IAV)** | Yes | Segment validation, strain validation, GISAID and GenBank XML merging, cross-DB/strain sequence deduplication |
 | **Human RSV (*Orthopneumovirus hominis*)** | No | RSV-A and RSV-B complete-genome reference backbone (`G` duplications preserved), tree placement |
+| **SARS-CoV-2 (SC2)** | No | High-QC full-genome filtering, Pango lineage references, EpiCoV GISAID & GenBank merging, treeless UShER-recycle builds |
 | **Divergent Virus Families (opt-in)** | Yes / No | Codon-aware per-segment ML backbones + dense-cluster UShER grafting via `--run_divergent_mode` (see [`info_help/divergent_mode.md`](info_help/divergent_mode.md)) |
 
 ---
@@ -56,11 +57,15 @@ The pipeline profiles in `nextflow.config` are grouped by their operational purp
 | | `RSV_test` | RSV | Small scale run validating RSV-A and RSV-B genome backbone |
 | | `segmented_test` / `segmented_xml_test` | IAV | Validation run for segmented influenza mapping (live fetch or frozen XML fixture) |
 | | `flu_gisaid_test` | IAV | Test run incorporating GISAID metadata and cross-DB deduplication |
+| | `SC2_test` | SC2 | Quick validation run with landmark Pango references and strict high-QC filters |
 | | `divergent_test` / `hanta_divergent_test` | Cystoviridae / Hantaviridae | Validation runs for opt-in `--run_divergent_mode` |
 | **Fresh Runs**<br>*(Build full DB from scratch)* | `setup_rabv_full` | RABV | Complete database construction from scratch |
 | | `HCV_full` | HCV | Complete database construction with mutation cataloging |
 | | `RSV_full` | RSV | Complete Human RSV database construction from scratch |
+| | `SC2_ncbi_highqc` | SC2 | 48-thread high-QC full-genome NCBI build in treeless mode (MMseqs deferred) |
+| | `SC2_gisaid_highqc` | SC2 | 48-thread hybrid EpiCoV GISAID + GenBank high-QC build |
 | **Update Runs**<br>*(Incremental updates to existing DB)* | `HCV_update` | HCV | Updates an existing HCV database with new sequences |
+| | `SC2_gisaid_update` | SC2 | Incremental EpiCoV GISAID update onto `SC2_ncbi_highqc.db` |
 | | `setup_rabv_test_update` | RABV | Test run validating incremental rabies database updates |
 | | `update_test` | RABV | Quick regression test checking database updates |
 

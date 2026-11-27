@@ -85,6 +85,14 @@ MIN_SEQ_LENGTH_RATIO="0.05"
 REF_SET_ALIGNED=""                  # curated backbone dir; empty => build one
 BUILD_REF_ALIGNMENT="true"          # mirrors params.build_ref_alignment
 REF_ALN_MIN_INSERTION_SUPPORT="2"   # mirrors params.ref_aln_min_insertion_support
+ENTREZ_FILTER=""
+EFETCH_BATCH_SIZE=""
+EFETCH_WORKERS=""
+FETCH_SLEEP_TIME=""
+MIN_TOTAL_LENGTH=""
+MIN_REAL_LENGTH=""
+MAX_N_COUNT=""
+MAX_AMBIG_FRACTION=""
 
 # ---------------------------------------------------------------------------
 # Parse CLI arguments
@@ -100,6 +108,8 @@ while [[ $# -gt 0 ]]; do
         --update_db)              [[ $# -lt 2 ]] && { echo "[error] --update_db requires a value" >&2; exit 1; }; UPDATE_DB="$2";            shift 2 ;;
         --xml_dir)                [[ $# -lt 2 ]] && { echo "[error] --xml_dir requires a value" >&2; exit 1; }; XML_DIR="$2";              shift 2 ;;
         --tree_free)              TREE_FREE="true";          shift   ;;
+        --skip_clustering)        shift ;;
+        --mmseqs_fast)            shift ;;
         --max_threads)            [[ $# -lt 2 ]] && { echo "[error] --max_threads requires a value" >&2; exit 1; }; MAX_THREADS="$2";          shift 2 ;;
         --iqtree_mem)             [[ $# -lt 2 ]] && { echo "[error] --iqtree_mem requires a value" >&2; exit 1; }; IQTREE_MEM="$2";           shift 2 ;;
         --mmseqs_min_seq_id)      [[ $# -lt 2 ]] && { echo "[error] --mmseqs_min_seq_id requires a value" >&2; exit 1; }; MMSEQS_MIN_SEQ_ID="$2";   shift 2 ;;
@@ -115,6 +125,14 @@ while [[ $# -gt 0 ]]; do
         --ref_set_aligned)        [[ $# -lt 2 ]] && { echo "[error] --ref_set_aligned requires a value" >&2; exit 1; }; REF_SET_ALIGNED="$2";       shift 2 ;;
         --no_build_ref_alignment) BUILD_REF_ALIGNMENT="false"; shift ;;
         --ref_aln_min_insertion_support) [[ $# -lt 2 ]] && { echo "[error] --ref_aln_min_insertion_support requires a value" >&2; exit 1; }; REF_ALN_MIN_INSERTION_SUPPORT="$2"; shift 2 ;;
+        --entrez_filter)          [[ $# -lt 2 ]] && { echo "[error] --entrez_filter requires a value" >&2; exit 1; }; ENTREZ_FILTER="$2"; shift 2 ;;
+        --efetch_batch_size)      [[ $# -lt 2 ]] && { echo "[error] --efetch_batch_size requires a value" >&2; exit 1; }; EFETCH_BATCH_SIZE="$2"; shift 2 ;;
+        --efetch_workers)         [[ $# -lt 2 ]] && { echo "[error] --efetch_workers requires a value" >&2; exit 1; }; EFETCH_WORKERS="$2"; shift 2 ;;
+        --fetch_sleep_time)       [[ $# -lt 2 ]] && { echo "[error] --fetch_sleep_time requires a value" >&2; exit 1; }; FETCH_SLEEP_TIME="$2"; shift 2 ;;
+        --min_total_length)       [[ $# -lt 2 ]] && { echo "[error] --min_total_length requires a value" >&2; exit 1; }; MIN_TOTAL_LENGTH="$2"; shift 2 ;;
+        --min_real_length)        [[ $# -lt 2 ]] && { echo "[error] --min_real_length requires a value" >&2; exit 1; }; MIN_REAL_LENGTH="$2"; shift 2 ;;
+        --max_n_count)            [[ $# -lt 2 ]] && { echo "[error] --max_n_count requires a value" >&2; exit 1; }; MAX_N_COUNT="$2"; shift 2 ;;
+        --max_ambig_fraction)     [[ $# -lt 2 ]] && { echo "[error] --max_ambig_fraction requires a value" >&2; exit 1; }; MAX_AMBIG_FRACTION="$2"; shift 2 ;;
         -h|--help)
             sed -n '3,/^# ===/p' "${BASH_SOURCE[0]}"
             exit 0
@@ -303,10 +321,15 @@ if (( STEP >= START_STEP )); then
     else
         FETCH_EXTRA=()
         [[ "$TEST_MODE" == "1" ]] && FETCH_EXTRA+=( --test_run --ref_list "${REF_LIST}" )
+        [[ "$TEST_MODE" != "1" && "$UPDATE_MODE" != "true" ]] && FETCH_EXTRA+=( --ref_list "${REF_LIST}" )
         [[ "$UPDATE_MODE" == "true" ]] && FETCH_EXTRA+=( --update "${UPDATE_DB}" )
+        [[ -n "$ENTREZ_FILTER" ]] && FETCH_EXTRA+=( --entrez_filter "${ENTREZ_FILTER}" )
+        [[ -n "$EFETCH_BATCH_SIZE" ]] && FETCH_EXTRA+=( --efetch_batch_size "${EFETCH_BATCH_SIZE}" )
+        [[ -n "$EFETCH_WORKERS" ]] && FETCH_EXTRA+=( --efetch_workers "${EFETCH_WORKERS}" )
+        [[ -n "$FETCH_SLEEP_TIME" ]] && FETCH_EXTRA+=( -s "${FETCH_SLEEP_TIME}" )
         run_step "FETCH_GENBANK" \
             python "${SCRIPTS}/GenBankFetcher.py" \
-                --taxid "${TAX_ID}" -b 50 \
+                --taxid "${TAX_ID}" -b 5000 \
                 -e "${EMAIL}" \
                 -o . \
                 "${FETCH_EXTRA[@]+${FETCH_EXTRA[@]}}"
@@ -366,6 +389,10 @@ STEP=$(( STEP + 1 ))
 if (( STEP >= START_STEP )); then
     FILTER_EXTRA=()
     [[ "$UPDATE_MODE" == "true" ]] && FILTER_EXTRA+=( --update_db "${UPDATE_DB}" )
+    [[ -n "$MIN_TOTAL_LENGTH" ]] && FILTER_EXTRA+=( -l "${MIN_TOTAL_LENGTH}" )
+    [[ -n "$MIN_REAL_LENGTH" ]] && FILTER_EXTRA+=( -n "${MIN_REAL_LENGTH}" )
+    [[ -n "$MAX_N_COUNT" ]] && FILTER_EXTRA+=( --max_n_count "${MAX_N_COUNT}" )
+    [[ -n "$MAX_AMBIG_FRACTION" ]] && FILTER_EXTRA+=( --max_ambig_fraction "${MAX_AMBIG_FRACTION}" )
     run_step "FILTER_AND_EXTRACT" \
         python "${SCRIPTS}/FilterAndExtractSequences.py" \
             -b . -o . \

@@ -6,6 +6,8 @@ import gzip
 import requests
 import tarfile
 import hashlib
+import shutil
+import tempfile
 from os.path import join
 from itertools import islice
 from datetime import datetime
@@ -27,6 +29,7 @@ class ValidateMatrix:
         extra_host_map=None,
         extra_country_map=None,
         fill_missing_only=False,
+        skip_download=False,
     ):
         self.url = url
         self.taxa_path = taxa_path
@@ -40,6 +43,7 @@ class ValidateMatrix:
         self.extra_host_map_path = extra_host_map if extra_host_map not in (None, "", "null", "None", "UNSET") else None
         self.extra_country_map_path = extra_country_map if extra_country_map not in (None, "", "null", "None", "UNSET") else None
         self.fill_missing_only = bool(fill_missing_only)
+        self.skip_download = bool(skip_download)
 
         self.dump_file = "taxadump.tar.gz"
         self.md5_url = f"{self.url}.md5"
@@ -243,7 +247,7 @@ class ValidateMatrix:
         s = str(date_str).strip()
         if not s:
             return "NA"
-        for fmt in ('%d-%b-%Y', '%b-%Y', '%Y'):
+        for fmt in ('%d-%b-%Y', '%b-%Y', '%Y', '%Y-%m-%d', '%Y-%m'):
             try:
                 datetime.strptime(s, fmt)
                 return "Yes"
@@ -313,111 +317,116 @@ class ValidateMatrix:
     def read_meta_sheet(self, country_dict, taxa_dict, host_map, country_map):
         print(f"Reading meta data {self.gb_matrix}")
 
-        with open(self.gb_matrix, encoding="utf-8", newline='') as f_in:
-            reader = csv.DictReader(f_in, delimiter='\t')
-            rows = [row for row in reader]
-            in_headers = reader.fieldnames
-
         def is_processed(row):
             val = str(row.get('exclusion_status', '')).strip()
             return val != '1'
 
+        def add_unique_comment(existing, new_info):
+            if not new_info:
+                return existing.strip(' ;|')
+            existing_norm = re.sub(r'\s+', ' ', existing.lower())
+            new_norm = re.sub(r'\s+', ' ', new_info.lower())
+            if new_norm in existing_norm:
+                return existing.strip(' ;|')
+            if existing.strip() == "":
+                return new_info.strip()
+            return f"{existing.strip(' ;|')}; {new_info.strip()}"
+
         validated_cols = ['collection_date_validated', 'country_validated',
                           'host_validated', 'host_taxa_id', 'host_scientific_name']
-        out_headers = [h for h in in_headers if h not in validated_cols] + validated_cols
+        failed_fields = ['primary_accession', 'collection_date_validated', 'host_validated', 'country_validated',
+                         'host', 'host_scientific_name', 'country', 'collection_date']
 
-        total = sum(1 for r in rows if is_processed(r))
-        skipped = len(rows) - total
-        print(f"Processing {total} accessions, skipping {skipped} excluded")
-
-        failed_rows = []
-        for row in rows:
-            row_comment = row.get('comment', '').strip()
-            if is_processed(row):
-                # Clean up NA
-                if row_comment.upper() == "NA":
-                    row_comment = ""
-
-                # Helper to avoid duplicates
-                def add_unique_comment(existing, new_info):
-                    if not new_info:
-                        return existing.strip(' ;|')
-                    existing_norm = re.sub(r'\s+', ' ', existing.lower())
-                    new_norm = re.sub(r'\s+', ' ', new_info.lower())
-                    if new_norm in existing_norm:
-                        return existing.strip(' ;|')
-                    if existing.strip() == "":
-                        return new_info.strip()
-                    else:
-                        return f"{existing.strip(' ;|')}; {new_info.strip()}"
-
-                def _has_existing(val):
-                    s = str(val or "").strip()
-                    return s != "" and s.upper() != "NA"
-
-                # Date
-                if not (self.fill_missing_only and _has_existing(row.get('collection_date_validated'))):
-                    row['collection_date_validated'] = self._validate_date_str(row.get('collection_date'))
-
-                # Country
-                if not (self.fill_missing_only and _has_existing(row.get('country_validated'))):
-                    country_validated, country_comment = self.validate_country(row.get('country'), country_dict, country_map)
-                    row['country_validated'] = country_validated
-                    row_comment = add_unique_comment(row_comment, country_comment)
-
-                # Host
-                if not (self.fill_missing_only and _has_existing(row.get('host_taxa_id'))):
-                    host_validated, host_taxid, host_sci, host_comment = self.resolve_host(row.get('host'), taxa_dict, host_map)
-                    row['host_validated'] = host_validated
-                    row['host_taxa_id'] = "" if (self.fill_missing_only and host_taxid == "NA") else host_taxid
-                    row['host_scientific_name'] = "" if (self.fill_missing_only and host_sci == "NA") else host_sci
-                    row_comment = add_unique_comment(row_comment, host_comment)
-
-                # Cleanup
-                row_comment = re.sub(r'(^NA[;| ]*|[;| ]*NA$)', '', row_comment, flags=re.IGNORECASE).strip(' ;|')
-                row['comment'] = row_comment
-            else:
-                for c in validated_cols:
-                    row[c] = ""
-
-            if is_processed(row):
-                if (row['collection_date_validated'] != "Yes") or \
-                   (row['country_validated'] == "NA") or \
-                   (row['host_validated'] != "Yes"):
-                    failed_rows.append(row)
+        def _has_existing(val):
+            s = str(val or "").strip()
+            return s != "" and s.upper() != "NA"
 
         outdir = join(self.base_dir, self.output_dir)
         os.makedirs(outdir, exist_ok=True)
         validated_path = join(outdir, 'gB_matrix_validated.tsv')
-        with open(validated_path, 'w', encoding='utf-8', newline='') as f_out:
-            writer = csv.DictWriter(f_out, fieldnames=out_headers, delimiter='\t', extrasaction='ignore')
-            writer.writeheader()
-            for row in rows:
-                writer.writerow(row)
-
-        failed_fields = ['primary_accession', 'collection_date_validated', 'host_validated', 'country_validated',
-                         'host', 'host_scientific_name', 'country', 'collection_date']
         failed_path = join(outdir, 'gB_matrix_failed_validation.tsv')
-        with open(failed_path, 'w', encoding='utf-8', newline='') as f_fail:
-            writer = csv.DictWriter(f_fail, fieldnames=failed_fields, delimiter='\t', extrasaction='ignore')
-            writer.writeheader()
-            for row in failed_rows:
-                writer.writerow(row)
+
+        total_rows = 0
+        total = 0
+        failed_count = 0
+
+        tmp_val_fd, tmp_val_path = tempfile.mkstemp(prefix="validated_", suffix=".tsv", dir=outdir)
+        os.close(tmp_val_fd)
+
+        try:
+            with open(self.gb_matrix, encoding="utf-8", newline='') as f_in, \
+                 open(tmp_val_path, 'w', encoding='utf-8', newline='') as f_out, \
+                 open(failed_path, 'w', encoding='utf-8', newline='') as f_fail:
+                reader = csv.DictReader(f_in, delimiter='\t')
+                in_headers = reader.fieldnames or []
+                out_headers = [h for h in in_headers if h not in validated_cols] + validated_cols
+                writer = csv.DictWriter(f_out, fieldnames=out_headers, delimiter='\t', extrasaction='ignore')
+                writer.writeheader()
+                fail_writer = csv.DictWriter(f_fail, fieldnames=failed_fields, delimiter='\t', extrasaction='ignore')
+                fail_writer.writeheader()
+
+                for row in reader:
+                    total_rows += 1
+                    row_comment = (row.get('comment') or '').strip()
+                    if is_processed(row):
+                        total += 1
+                        if (not self.fill_missing_only) and all(str(row.get(c) or '').strip() != '' for c in validated_cols):
+                            if (row['collection_date_validated'] != "Yes") or \
+                               (row['country_validated'] == "NA") or \
+                               (row['host_validated'] != "Yes"):
+                                failed_count += 1
+                                fail_writer.writerow(row)
+                            writer.writerow(row)
+                            continue
+                        if row_comment.upper() == "NA":
+                            row_comment = ""
+
+                        if not (self.fill_missing_only and _has_existing(row.get('collection_date_validated'))):
+                            row['collection_date_validated'] = self._validate_date_str(row.get('collection_date'))
+
+                        if not (self.fill_missing_only and _has_existing(row.get('country_validated'))):
+                            country_validated, country_comment = self.validate_country(row.get('country'), country_dict, country_map)
+                            row['country_validated'] = country_validated
+                            row_comment = add_unique_comment(row_comment, country_comment)
+
+                        if not (self.fill_missing_only and _has_existing(row.get('host_taxa_id'))):
+                            host_validated, host_taxid, host_sci, host_comment = self.resolve_host(row.get('host'), taxa_dict, host_map)
+                            row['host_validated'] = host_validated
+                            row['host_taxa_id'] = "" if (self.fill_missing_only and host_taxid == "NA") else host_taxid
+                            row['host_scientific_name'] = "" if (self.fill_missing_only and host_sci == "NA") else host_sci
+                            row_comment = add_unique_comment(row_comment, host_comment)
+
+                        row_comment = re.sub(r'(^NA[;| ]*|[;| ]*NA$)', '', row_comment, flags=re.IGNORECASE).strip(' ;|')
+                        row['comment'] = row_comment
+
+                        if (row['collection_date_validated'] != "Yes") or \
+                           (row['country_validated'] == "NA") or \
+                           (row['host_validated'] != "Yes"):
+                            failed_count += 1
+                            fail_writer.writerow(row)
+                    else:
+                        for c in validated_cols:
+                            row[c] = ""
+
+                    writer.writerow(row)
+
+            skipped = total_rows - total
+            print(f"Processing {total} accessions, skipping {skipped} excluded")
+            shutil.move(tmp_val_path, validated_path)
+            if os.path.realpath(os.path.abspath(validated_path)) != os.path.realpath(os.path.abspath(self.gb_matrix)):
+                shutil.copyfile(validated_path, self.gb_matrix)
+        finally:
+            if os.path.exists(tmp_val_path):
+                os.remove(tmp_val_path)
 
         print("\n######---Validation summary---######")
-        print(f"Total accessions in file: {len(rows)}")
+        print(f"Total accessions in file: {total_rows}")
         print(f"Processed (not excluded): {total}")
-        print(f"Validated (all three passed): {int(total - len(failed_rows))}")
-        print(f"Missing information (any failed): {len(failed_rows)}")
+        print(f"Validated (all three passed): {int(total - failed_count)}")
+        print(f"Missing information (any failed): {failed_count}")
         print(f"Host names corrected via mapping file: {self.host_mapped_count}")
         print(f"Country names corrected via mapping file: {self.country_mapped_count}")
         print(f"Results saved to {outdir}\n")
-
-        with open(self.gb_matrix, 'w', encoding='utf-8', newline='') as f_overwrite:
-            writer = csv.DictWriter(f_overwrite, fieldnames=out_headers, delimiter='\t', extrasaction='ignore')
-            writer.writeheader()
-            for row in rows:
-                writer.writerow(row)
 
     def validate_matrix(self, skip_download=False):
         country_dict = self.country_to_dict(self.country_file)
@@ -427,15 +436,17 @@ class ValidateMatrix:
         country_map = self.read_mapping_file(
             self.country_map_path, "country", "replaced_by", extra_path=self.extra_country_map_path
         )
-        names_local = join(self.base_dir, self.taxa_path, "names.dmp")
-        if not skip_download and not (self.fill_missing_only and os.path.exists(names_local)):
+        names_file = join(self.base_dir, self.taxa_path, "names.dmp")
+        if (skip_download or self.skip_download or self.fill_missing_only) and os.path.isfile(names_file):
+            print(f"Using pre-staged taxonomy dump: {names_file}")
+        else:
             self.verify_and_download()
             self.read_tar()
         taxa_dict = self.taxa_name_dump_to_dict()
         self.read_meta_sheet(country_dict, taxa_dict, host_map, country_map)
 
     def process(self):
-        self.validate_matrix(skip_download=False)
+        self.validate_matrix(skip_download=self.skip_download)
 
 
 def main():
@@ -452,6 +463,8 @@ def main():
     parser.add_argument('--extra_host_mapping', default=None, help='Optional species-specific host aliases TSV merged on top of --host_map')
     parser.add_argument('--extra_country_mapping', default=None, help='Optional species-specific country aliases TSV merged on top of --country_map')
     parser.add_argument('--fill_missing_only', action='store_true', help='Only validate rows missing host_taxa_id / country_validated / collection_date_validated; reuses local names.dmp if present')
+    parser.add_argument('--skip_download', action='store_true',
+                        help='Use existing names.dmp in --taxa_path instead of downloading taxdump.tar.gz')
     args = parser.parse_args()
 
     validator = ValidateMatrix(
@@ -460,6 +473,7 @@ def main():
         extra_host_map=args.extra_host_mapping,
         extra_country_map=args.extra_country_mapping,
         fill_missing_only=args.fill_missing_only,
+        skip_download=args.skip_download,
     )
     validator.process()
 

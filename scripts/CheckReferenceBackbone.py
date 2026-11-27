@@ -190,19 +190,23 @@ def check(backbone_dir, ref_list, min_insertion_support, is_segmented="N"):
 	return failures, warnings, notes
 
 
-def write_manifest(backbone_dir, ref_list, min_insertion_support, source):
+def write_manifest(backbone_dir, ref_list, min_insertion_support, source, is_segmented="N"):
 	files = backbone_accessions(backbone_dir)
+	if not files:
+		raise ValueError(f"no refset_*_aln.fasta in {backbone_dir}")
 	in_backbone = {acc for accs in files.values() for acc in accs}
-	in_list = reference_accessions(ref_list)
-	if in_backbone != in_list:
-		raise ValueError(f"backbone and reference list disagree ({len(in_list ^ in_backbone)} accessions); "
-						 "refusing to write a manifest for a mismatched cache")
+	missing, extra = coverage(backbone_dir, ref_list, is_segmented)
+	if missing or extra:
+		raise ValueError(
+			f"backbone and reference list disagree ({len(missing)} missing, {len(extra)} extra); "
+			"refusing to write a manifest for a mismatched cache"
+		)
 	rows = {
 		"cached_on": datetime.date.today().isoformat(),
 		"source": source,
 		"reference_list": os.path.basename(ref_list),
-		"reference_count": str(len(in_list)),
-		"reference_accessions_sha256": digest_accessions(in_list),
+		"reference_count": str(len(in_backbone)),
+		"reference_accessions_sha256": digest_accessions(in_backbone),
 		"min_insertion_support": str(min_insertion_support),
 		"builder_sha256": file_sha256(BUILDER),
 		"files": ";".join(files),
@@ -223,7 +227,7 @@ def main(argv=None):
 	args = parser.parse_args(argv)
 
 	if args.write_manifest:
-		write_manifest(args.backbone_dir, args.ref_list, args.min_insertion_support, args.source)
+		write_manifest(args.backbone_dir, args.ref_list, args.min_insertion_support, args.source, args.is_segmented)
 		print(f"Wrote {os.path.join(args.backbone_dir, MANIFEST)}")
 		return 0
 

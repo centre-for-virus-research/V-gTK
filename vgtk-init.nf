@@ -106,8 +106,11 @@ def scriptDefinedParams = [
     "min_seq_length_ratio", "max_aln_gap_proportion", "tree_free", "base_tree_only",
     "pivot_isolate_key", "pivot_required_segments", "segment_names",
     "host_aliases", "strain_location_aliases", "root_outgroup",
-    "mmseqs_two_step", "mmseqs_min_completeness", "iqtree_model",
-    "fetch_batch_size", "build_ref_alignment", "ref_aln_min_insertion_support",
+    "mmseqs_two_step", "mmseqs_min_completeness", "mmseqs_fast", "skip_clustering", "iqtree_model",
+    "fetch_batch_size", "efetch_batch_size", "efetch_workers", "fetch_sleep_time", "entrez_filter", "test_fetch_count",
+    "min_total_length", "min_real_length", "max_n_count", "max_ambig_fraction",
+    "gisaid_col_map", "gisaid_key",
+    "build_ref_alignment", "ref_aln_min_insertion_support",
     // Divergent run mode (opt-in, default false). These must be listed or the
     // unknown-parameter guard below rejects the run; listing them changes
     // nothing on the legacy path.
@@ -369,18 +372,35 @@ process FETCH_GENBANK{
         path 'GenBank-XML', type: 'dir', emit: gen_bank_XML
     shell:
     '''
-    extra=""
-    if [ "!{params.test}" = "1" ]
-    then
-        extra="${extra} --test_run --ref_list !{ref_list}"
+    extra=()
+    if [ "!{params.test}" = "1" ]; then
+        extra+=(--test_run --ref_list "!{ref_list}")
+        if [ "!{params.test_fetch_count}" != "null" ] && [ -n "!{params.test_fetch_count}" ]; then
+            extra+=(--test_fetch_count "!{params.test_fetch_count}")
+        fi
     fi
 
     if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
-        extra="${extra} --update !{params.update_db}"
+        extra+=(--update "!{params.update_db}")
+    elif [ "!{params.test}" != "1" ]; then
+        extra+=(--ref_list "!{ref_list}")
+    fi
+
+    if [ "!{params.entrez_filter}" != "null" ] && [ -n "!{params.entrez_filter}" ]; then
+        extra+=(--entrez_filter "!{params.entrez_filter}")
+    fi
+    if [ "!{params.efetch_batch_size}" != "null" ] && [ -n "!{params.efetch_batch_size}" ]; then
+        extra+=(--efetch_batch_size "!{params.efetch_batch_size}")
+    fi
+    if [ "!{params.efetch_workers}" != "null" ] && [ -n "!{params.efetch_workers}" ]; then
+        extra+=(--efetch_workers "!{params.efetch_workers}")
+    fi
+    if [ "!{params.fetch_sleep_time}" != "null" ] && [ -n "!{params.fetch_sleep_time}" ]; then
+        extra+=(-s "!{params.fetch_sleep_time}")
     fi
 
     python !{scripts_dir}/GenBankFetcher.py --taxid !{TAX_ID} -b !{params.fetch_batch_size} \
-             ${extra} -e !{params.email} -o . 
+             "${extra[@]}" -e !{params.email} -o . 
     #--update tmp/GenBank-matrix/gB_matrix_raw.tsv is gonna be problematic for this!
     #what's update doing with a tmp dir?
 
@@ -438,6 +458,10 @@ process GENBANK_PARSER{
         if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
             extra="${extra} --update !{params.update_db}"
         fi
+
+        if [ -n "!{params.gisaid_dir}" ] && [ "!{params.gisaid_dir}" != "null" ]; then
+            extra="${extra} --allow_external_refs"
+        fi
         
         echo "DEBUG: Final extra args: ${extra}"
         
@@ -459,6 +483,7 @@ process TIDY_GISAID {
     input:
        path gisaid_dir
        path db_file
+       path ref_list_path
     output:
        path "metadata.tsv", emit: gisaid_meta
        path "all_nuc.fas", emit: gisaid_nuc
@@ -470,13 +495,18 @@ process TIDY_GISAID {
            db_arg="--db_file !{db_file}"
        fi
 
-       extra_args=""
+       extra_args="--ref_list !{ref_list_path}"
        if [ "!{params.test}" = "1" ]; then
-           extra_args="--test"
+           extra_args="${extra_args} --test"
+       fi
+       if [ "!{params.min_total_length}" != "null" ] && [ -n "!{params.min_total_length}" ]; then
+           extra_args="${extra_args} --min_seq_length !{params.min_total_length}"
+       fi
+       if [ "!{params.max_n_count}" != "null" ] && [ -n "!{params.max_n_count}" ]; then
+           extra_args="${extra_args} --max_n_count !{params.max_n_count}"
        fi
 
-       # Default to tsv if no xls/xlsx found, logic handled largely by glob inside but the arg switches mode
-       # To make it robust we could check, but for now assuming tsv as per GISAID standard downloads
+       # Default to tsv/csv unless only xls/xlsx files are present
        python !{scripts_dir}/gisaid_tidy.py --data_dir !{gisaid_dir} --output_dir . --filetype tsv $db_arg $extra_args
        '''
 }
@@ -489,6 +519,8 @@ process MERGE_GISAID {
        path gisaid_meta
        path gisaid_nuc
        path column_mapping
+       path ref_list_path
+       val gisaid_key
     output:
        path "gB_matrix_merged.tsv", emit: merged_matrix
        path "gisaid_dedup.fas", emit: gisaid_dedup_nuc
@@ -496,15 +528,20 @@ process MERGE_GISAID {
     shell:
        '''
        UPDATE_DB_ARG=""
-       if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ] && [ -f "!{params.update_db}" ]; then
-           UPDATE_DB_ARG="--update_db !{params.update_db}"
+       REQ_REFS_ARG="--require_refs"
+       if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
+           REQ_REFS_ARG=""
+           if [ -f "!{params.update_db}" ]; then
+               UPDATE_DB_ARG="--update_db !{params.update_db}"
+           fi
        fi
        python !{scripts_dir}/merge_into_gB_matrix.py -g !{gb_matrix} \
            --base_fasta !{gb_seqs} \
            -t !{gisaid_meta} -f !{gisaid_nuc} -o gB_matrix_merged.tsv \
            --dedup_fasta_out gisaid_dedup.fas \
            --dedup_report gisaid_cross_source_dedup_report.tsv \
-           -k Segment_Id --dataset_source gisaid -m !{column_mapping} ${UPDATE_DB_ARG}
+           -k "!{gisaid_key}" --dataset_source gisaid -m !{column_mapping} \
+           -r !{ref_list_path} ${REQ_REFS_ARG} ${UPDATE_DB_ARG}
        '''
 }
 
@@ -574,6 +611,18 @@ process FILTER_AND_EXTRACT{
         EXTRA_ARGS=""
         if [ "!{params.update_db}" != "null" ] && [ -n "!{params.update_db}" ]; then
             EXTRA_ARGS="--update_db !{params.update_db}"
+        fi
+        if [ "!{params.min_total_length}" != "null" ] && [ -n "!{params.min_total_length}" ]; then
+            EXTRA_ARGS="${EXTRA_ARGS} -l !{params.min_total_length}"
+        fi
+        if [ "!{params.min_real_length}" != "null" ] && [ -n "!{params.min_real_length}" ]; then
+            EXTRA_ARGS="${EXTRA_ARGS} -n !{params.min_real_length}"
+        fi
+        if [ "!{params.max_n_count}" != "null" ] && [ -n "!{params.max_n_count}" ]; then
+            EXTRA_ARGS="${EXTRA_ARGS} --max_n_count !{params.max_n_count}"
+        fi
+        if [ "!{params.max_ambig_fraction}" != "null" ] && [ -n "!{params.max_ambig_fraction}" ]; then
+            EXTRA_ARGS="${EXTRA_ARGS} --max_ambig_fraction !{params.max_ambig_fraction}"
         fi
 
         python !{scripts_dir}/FilterAndExtractSequences.py -b . -o . -r !{ref_list_path} \
@@ -935,13 +984,17 @@ process MMSEQS_CLUSTERING{
         if [ "!{params.mmseqs_two_step}" = "true" ]; then
             TWO_STEP_ARGS="--two-step --min-completeness !{params.mmseqs_min_completeness}"
         fi
+        FAST_ARGS=""
+        if [ "!{params.mmseqs_fast}" = "true" ]; then
+            FAST_ARGS="--fast"
+        fi
 
         python !{scripts_dir}/MMseqsClustering.py \
             -i mmseqs_input \
             -o MMseqClusters_!{padded_aln.baseName} \
             --min-seq-id !{params.mmseqs_min_seq_id} \
             --ref_list "!{params.ref_list}" \
-            --threads !{task.cpus} --test_mode !{params.test} ${TWO_STEP_ARGS}
+            --threads !{task.cpus} --test_mode !{params.test} ${TWO_STEP_ARGS} ${FAST_ARGS}
     '''
 }
 
@@ -1690,9 +1743,14 @@ workflow {
     def UPDATE_MODE = params.update_db && params.update_db != 'null'
     def TREE_FREE_MODE = params.tree_free.toString().toBoolean()
     def BASE_TREE_ONLY_MODE = params.base_tree_only.toString().toBoolean()
+    def SKIP_CLUSTERING_MODE = (params.skip_clustering ?: false).toString().toBoolean()
 
     if( TREE_FREE_MODE && BASE_TREE_ONLY_MODE ){
         error("ERROR: params.tree_free and params.base_tree_only are mutually exclusive")
+    }
+
+    if( SKIP_CLUSTERING_MODE && !TREE_FREE_MODE && !UPDATE_MODE ){
+        error("ERROR: params.skip_clustering=true requires params.tree_free=true (tree construction depends on MMseqs representatives)")
     }
 
     if( UPDATE_MODE && BASE_TREE_ONLY_MODE ){
@@ -1748,12 +1806,15 @@ workflow {
 
     if (params.gisaid_dir) {
             def fallbackDbPath = params.scripts_dir ?: "${projectDir}/scripts"
-            def db_in = params.previous_db ? file(params.previous_db) : (UPDATE_MODE ? file(params.update_db) : file(fallbackDbPath))
-         TIDY_GISAID(params.gisaid_dir, db_in)
+            def prevDbCandidate = params.previous_db ?: ((params.update_db && params.update_db != 'null') ? params.update_db : null)
+            def db_in = prevDbCandidate ? file(prevDbCandidate) : file(fallbackDbPath)
+         TIDY_GISAID(params.gisaid_dir, db_in, effective_ref_list)
          
-         // Define column mapping path relative to project
-         col_map = file("${projectDir}/generic/influenza/column_mapping.tsv")
-         MERGE_GISAID(gb_matrix_ch, gb_seqs_ch, TIDY_GISAID.out.gisaid_meta, TIDY_GISAID.out.gisaid_nuc, col_map)
+         // Select GISAID column mapping and join key (defaults preserve Influenza EpiFlu behaviour)
+         def col_map_path = params.gisaid_col_map ?: (params.is_segmented == 'N' ? "${projectDir}/generic/sc2/column_mapping.tsv" : "${projectDir}/generic/influenza/column_mapping.tsv")
+         col_map = file(col_map_path)
+         def effective_gisaid_key = params.gisaid_key ?: (params.is_segmented == 'N' ? 'Accession_Id' : 'Segment_Id')
+         MERGE_GISAID(gb_matrix_ch, gb_seqs_ch, TIDY_GISAID.out.gisaid_meta, TIDY_GISAID.out.gisaid_nuc, col_map, effective_ref_list, effective_gisaid_key)
          VALIDATE_MERGED_HOSTS(MERGE_GISAID.out.merged_matrix, GENBANK_PARSER.out.taxa_names, GENBANK_PARSER.out.taxa_nodes)
          gb_matrix_ch = VALIDATE_MERGED_HOSTS.out.validated_matrix
          
@@ -1872,7 +1933,9 @@ workflow {
     DEDUP_ALIGNMENT(padded_msa_ch)
 
     // Keep clustered input small in test mode to speed up CI and avoid long MMseqs runs
-    if( params.test == "1" ){
+    if( SKIP_CLUSTERING_MODE ){
+        cluster_input_ch = DEDUP_ALIGNMENT.out.dedup_msa
+    } else if( params.test == "1" ){
         TEST_SUBSAMPLE_CLUSTER_INPUT(DEDUP_ALIGNMENT.out.dedup_msa, file(params.ref_list))
         cluster_input_ch = TEST_SUBSAMPLE_CLUSTER_INPUT.out.dedup_for_cluster
     } else {
@@ -1898,6 +1961,11 @@ workflow {
                     tuple('UNSET', 'UNSET', fasta, "UsherUpdate_${fasta.baseName}", retired_ids)
                 }
         }
+    } else if( TREE_FREE_MODE && SKIP_CLUSTERING_MODE ){
+        log.info("params.tree_free=true and params.skip_clustering=true: skipping MMseqs clustering (run scripts/AddPosthocClustersToDb.py afterwards if needed)")
+        mmseq_collected = Channel.value([])
+        iqtree_collected = Channel.value([])
+        usher_collected = Channel.value([])
     } else {
         MMSEQS_CLUSTERING(cluster_input_ch)
         mmseq_collected = MMSEQS_CLUSTERING.out.mmseq_clusters.collect()

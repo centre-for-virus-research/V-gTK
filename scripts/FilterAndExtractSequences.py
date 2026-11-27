@@ -12,7 +12,7 @@ import accession_utils
 #genbank_divisions = ['VRL', 'PAT', 'SYN', 'ENV']
 
 class FilterAndExtractSequences:
-	def __init__(self, genbank_matrix, sequence_file, genbank_matrix_filtered, ref_file, base_dir, output_dir, total_length, real_length, prop_ambigious, segmented_virus, gb_division, valid_divisions, seq_type, update_db=None):
+	def __init__(self, genbank_matrix, sequence_file, genbank_matrix_filtered, ref_file, base_dir, output_dir, total_length, real_length, prop_ambigious, segmented_virus, gb_division, valid_divisions, seq_type, update_db=None, max_n_count=None, max_ambig_fraction=None):
 		self.genbank_matrix = genbank_matrix
 		self.sequence_file = sequence_file
 		self.genbank_matrix_filtered = genbank_matrix_filtered
@@ -27,16 +27,46 @@ class FilterAndExtractSequences:
 		self.valid_divisions = valid_divisions
 		self.seq_type = seq_type
 		self.update_db = update_db
+		self.max_n_count = int(max_n_count) if max_n_count is not None and str(max_n_count).strip().lower() not in ("", "null", "none", "unset") else None
+		self.max_ambig_fraction = float(max_ambig_fraction) if max_ambig_fraction is not None and str(max_ambig_fraction).strip().lower() not in ("", "null", "none", "unset") else None
 		os.makedirs(join(self.base_dir, self.output_dir), exist_ok=True)
 
-	def fasta_to_dict(self):
+	def fasta_to_dict(self, allowed_ids=None):
 		seq_dict = {}
-		for record in SeqIO.parse(self.sequence_file, "fasta"):
-			seq_str = str(record.seq)
-			seq_dict[record.id] = seq_str
-			norm = accession_utils.normalise_accession(record.id)
+		cur_id = None
+		chunks = []
+		def _store(rec_id, seq_chunks):
+			seq_str = "".join(seq_chunks)
+			seq_dict[rec_id] = seq_str
+			norm = accession_utils.normalise_accession(rec_id)
 			if norm and norm not in seq_dict:
 				seq_dict[norm] = seq_str
+
+		with open(self.sequence_file, "r", encoding="utf-8", errors="replace") as fh:
+			for raw_line in fh:
+				line = raw_line.strip()
+				if not line:
+					continue
+				if line.startswith(">"):
+					if cur_id is not None:
+						_store(cur_id, chunks)
+					parts = line[1:].strip().split(None, 1)
+					cand_id = parts[0] if parts else ""
+					cand_norm = accession_utils.normalise_accession(cand_id) if cand_id else ""
+					if cand_id and (
+						allowed_ids is None
+						or cand_id in allowed_ids
+						or (cand_norm and cand_norm in allowed_ids)
+					):
+						cur_id = cand_id
+						chunks = []
+					else:
+						cur_id = None
+						chunks = []
+				elif cur_id is not None:
+					chunks.append(line)
+			if cur_id is not None:
+				_store(cur_id, chunks)
 		return seq_dict
 
 	def read_ref_list(self):
@@ -105,11 +135,62 @@ class FilterAndExtractSequences:
 		with open(summary_path, 'w', encoding='utf-8') as handle:
 			handle.write(summary_text + "\n")
 
+	def _collect_needed_fasta_ids(self, ref_list):
+		"""Pre-scan metadata so multi-million-row runs only load FASTA records that can survive QC."""
+		needed = set()
+		with open(self.genbank_matrix, encoding="utf-8", errors="replace") as file:
+			csv_reader = csv.DictReader(file, delimiter='\t')
+			for row in csv_reader:
+				if str(row.get('exclusion_status', '')).strip() == '1':
+					continue
+				raw_acc = (row.get('gi_number') or row.get('primary_accession') or '').strip()
+				if not raw_acc:
+					continue
+				accession = accession_utils.normalise_accession(raw_acc) or raw_acc
+				acc_type = self._classify_accession(row, accession, ref_list, raw_accession=raw_acc)
+				if acc_type == 'exclusion_list':
+					continue
+				if acc_type != 'query':
+					needed.add(raw_acc)
+					needed.add(accession)
+					continue
+				gb_division = (row.get('division') or '').strip()
+				data_source = str(row.get('data_source') or row.get('dataset_source') or '').strip().lower()
+				is_genbank_row = data_source in ('', 'ncbi', 'genbank')
+				if is_genbank_row and gb_division:
+					if self.gb_division is not None and gb_division not in self.gb_division:
+						continue
+					if self.valid_divisions is not None and gb_division not in self.valid_divisions:
+						continue
+				try:
+					seq_len = int(row['length'])
+					n_count = int(row['n'])
+				except (KeyError, ValueError, TypeError):
+					# Missing numeric length/n in matrix: inspect sequence directly
+					needed.add(raw_acc)
+					needed.add(accession)
+					continue
+				if seq_len < self.total_length or (seq_len - n_count) < self.real_length:
+					continue
+				if self.max_n_count is not None and n_count > self.max_n_count:
+					continue
+				if self.max_ambig_fraction is not None and seq_len > 0:
+					raw_real = str(row.get('real_length', '')).strip()
+					if raw_real != '':
+						try:
+							atgc_count = int(raw_real)
+							if (max(0, seq_len - atgc_count) / seq_len) > self.max_ambig_fraction:
+								continue
+						except (ValueError, TypeError):
+							pass
+				needed.add(raw_acc)
+				needed.add(accession)
+		return needed
+
 	def filter_columns(self):
 		#if not self.check_gb_division():
 		#	print("Error: Invalid GenBank division specified.")
 		#	return
-		sequence_dict = self.fasta_to_dict()
 		exclusion_dict = {}
 	
 		# Both methods now return dict {accession: type}
@@ -123,6 +204,9 @@ class FilterAndExtractSequences:
 			norm_k = accession_utils.normalise_accession(acc_key)
 			if norm_k and norm_k not in ref_list:
 				ref_list[norm_k] = acc_type
+
+		needed_ids = self._collect_needed_fasta_ids(ref_list)
+		sequence_dict = self.fasta_to_dict(allowed_ids=needed_ids)
 
 		# Identify which refs are exclusion_list type
 		exclusion_list_refs = {
@@ -221,6 +305,21 @@ class FilterAndExtractSequences:
 								exclusion_status = 1
 								exclusion_criteria = "Real sequence length (length - Ns) less than the threshold"
 
+							if self.max_n_count is not None and n_count > self.max_n_count:
+								exclusion_status = 1
+								exclusion_criteria = f"N count ({n_count}) exceeds max_n_count ({self.max_n_count})"
+
+							if self.max_ambig_fraction is not None and seq_len > 0:
+								try:
+									atgc_count = int(row['real_length']) if 'real_length' in row and str(row['real_length']).strip() != '' else sum(sequence.upper().count(b) for b in 'ATGC')
+								except (ValueError, TypeError):
+									atgc_count = sum(sequence.upper().count(b) for b in 'ATGC') if sequence else seq_len_without_n
+								ambig_count = max(0, seq_len - atgc_count)
+								ambig_frac = ambig_count / seq_len
+								if ambig_frac > self.max_ambig_fraction:
+									exclusion_status = 1
+									exclusion_criteria = f"Ambiguous/N fraction ({ambig_frac:.5f}) exceeds max_ambig_fraction ({self.max_ambig_fraction})"
+
 						existing_criteria = (row.get('exclusion_criteria') or '').strip()
 						if existing_criteria:
 							row['exclusion_criteria'] = f"{existing_criteria}; {exclusion_criteria}" if exclusion_criteria else existing_criteria
@@ -286,6 +385,8 @@ if __name__ == "__main__":
 	parser.add_argument('-vd', '--valid_divisions', help="Valid GenBank divisions to be considered for the analysis", nargs='+', default=['VRL', 'ENV', 'PHG'], type=str)
 	parser.add_argument('-s', '--seq_type', help='Sequence type', default=None, type=str)
 	parser.add_argument('--update_db', help='Existing update DB; when set, derive reference accessions from DB instead of ref_file', default=None)
+	parser.add_argument('--max_n_count', help='Maximum allowed N bases in query sequences (default: unlimited)', default=None, type=int)
+	parser.add_argument('--max_ambig_fraction', help='Maximum allowed non-ATGC fraction in query sequences (default: unlimited)', default=None, type=float)
 	args = parser.parse_args()
 
 	processor = FilterAndExtractSequences(
@@ -302,6 +403,8 @@ if __name__ == "__main__":
 		gb_division=args.genbank_division,
 		valid_divisions=args.valid_divisions,
 		seq_type=args.seq_type,
-		update_db=args.update_db
+		update_db=args.update_db,
+		max_n_count=args.max_n_count,
+		max_ambig_fraction=args.max_ambig_fraction,
 	)
 	processor.process()

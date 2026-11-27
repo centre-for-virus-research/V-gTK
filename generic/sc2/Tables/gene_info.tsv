@@ -1,0 +1,28 @@
+description	display_name	name	parent_name
+Leader protein (nsp1)	nsp1	leader protein	whole_genome
+Non-structural protein 2	nsp2	nsp2	whole_genome
+Papain-like proteinase (nsp3)	nsp3	nsp3	whole_genome
+Non-structural protein 4	nsp4	nsp4	whole_genome
+Main protease / 3C-like proteinase (nsp5)	nsp5	3C-like proteinase	whole_genome
+Non-structural protein 6	nsp6	nsp6	whole_genome
+Non-structural protein 7	nsp7	nsp7	whole_genome
+Non-structural protein 8	nsp8	nsp8	whole_genome
+ssRNA-binding protein (nsp9)	nsp9	nsp9	whole_genome
+Non-structural protein 10	nsp10	nsp10	whole_genome
+pp1a C-terminal peptide (nsp11)	nsp11	nsp11	whole_genome
+RNA-dependent RNA polymerase (nsp12)	nsp12	RNA-dependent RNA polymerase	whole_genome
+Helicase / NTPase (nsp13)	nsp13	helicase	whole_genome
+3'-to-5' exonuclease (nsp14)	nsp14	3'-to-5' exonuclease	whole_genome
+Uridylate-specific endoribonuclease (nsp15)	nsp15	endoRNAse	whole_genome
+2'-O-ribose methyltransferase (nsp16)	nsp16	2'-O-ribose methyltransferase	whole_genome
+Spike surface glycoprotein	S	surface glycoprotein	whole_genome
+ORF3a accessory protein	ORF3a	ORF3a protein	whole_genome
+Envelope protein	E	envelope protein	whole_genome
+Membrane glycoprotein	M	membrane glycoprotein	whole_genome
+ORF6 accessory protein	ORF6	ORF6 protein	whole_genome
+ORF7a accessory protein	ORF7a	ORF7a protein	whole_genome
+ORF7b accessory protein	ORF7b	ORF7b	whole_genome
+ORF8 accessory protein	ORF8	ORF8 protein	whole_genome
+Nucleocapsid phosphoprotein	N	nucleocapsid phosphoprotein	whole_genome
+ORF10 putative protein	ORF10	ORF10 protein	whole_genome
+Whole genome	Whole genome	whole_genome	NULL

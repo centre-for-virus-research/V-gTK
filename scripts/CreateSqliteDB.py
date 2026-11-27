@@ -36,6 +36,7 @@ from strain_linkage import (
 	load_location_aliases,
 	write_strain_linkage_tables,
 )
+import usher_assets
 
 
 class CreateSqliteDB:
@@ -183,6 +184,29 @@ class CreateSqliteDB:
 			newick = self._root_newick(newick, tree_path)
 		self._rooted_trees[tree_path] = newick
 		return newick
+
+	def _store_usher_bundles(self, conn, tree_records, created_at):
+		"""Store each UShER row's usher.pb and sidecars under the row's own key.
+
+		A row written this run always loses its old bundle, so a tree with no
+		verifiable .pb ends up with none rather than with the previous tree's.
+		"""
+		usher_assets.ensure_schema(conn)
+		stored = 0
+		for record in tree_records:
+			if record["source"] != "usher":
+				continue
+			usher_assets.delete_bundle(conn, record)
+			bundle = usher_assets.collect_bundle(record.get("path"))
+			if bundle is None:
+				print(f"[CreateSqliteDB] No UShER mutation-annotated tree stored for {record['name']}")
+				continue
+			usher_assets.store_bundle(conn, record, bundle, record["newick"], created_at)
+			stored += 1
+			if bundle["status"] != "verified":
+				print(f"[CreateSqliteDB] Stored {bundle['status']} UShER bundle for {record['name']}: {bundle['note']}")
+		removed, marked = usher_assets.reconcile(conn)
+		print(f"[CreateSqliteDB] Stored {stored} UShER bundle(s); dropped {removed} orphaned, marked {marked} stale")
 
 	def _reference_accessions(self):
 		"""Bare accessions of every row in the run's reference list."""
@@ -656,10 +680,10 @@ class CreateSqliteDB:
 		for origin, fields in vendor_columns.items():
 			if not fields:
 				continue
-			vendor_values[origin] = {
-				field: df_meta_data[col].fillna("").astype(str).str.strip().tolist()
-				for field, col in fields.items()
-			}
+			vendor_values[origin] = (
+				df_meta_data[fields["genotype"]].fillna("").astype(str).str.strip().tolist() if "genotype" in fields else None,
+				df_meta_data[fields["subtype"]].fillna("").astype(str).str.strip().tolist() if "subtype" in fields else None,
+			)
 
 		def _clean(value):
 			return self._normalize_reference_field(value)
@@ -694,13 +718,14 @@ class CreateSqliteDB:
 				))
 
 			for origin in ("gisaid_declared", "ncbi_declared"):
-				fields = vendor_values.get(origin)
-				if not fields:
+				pair = vendor_values.get(origin)
+				if pair is None:
 					continue
+				g_col_vals, s_col_vals = pair
 				candidates.append((
 					origin,
-					_clean(fields.get("genotype", [""] * len(meta_accessions))[position] if "genotype" in fields else ""),
-					_clean(fields.get("subtype", [""] * len(meta_accessions))[position] if "subtype" in fields else ""),
+					_clean(g_col_vals[position]) if g_col_vals is not None else "",
+					_clean(s_col_vals[position]) if s_col_vals is not None else "",
 				))
 
 			genotype = subtype = ""
@@ -726,9 +751,30 @@ class CreateSqliteDB:
 		return df_meta_data
 
 	def load_fasta(self):
+		allowed = getattr(self, "_allowed_fasta_headers", None)
 		fasta_data = []
-		for record in SeqIO.parse(self.fasta_sequence_file, "fasta"):
-			fasta_data.append({"header": record.id, "sequence": str(record.seq)})
+		cur_id = None
+		chunks = []
+		with open(self.fasta_sequence_file, "r", encoding="utf-8", errors="replace") as fh:
+			for raw_line in fh:
+				line = raw_line.strip()
+				if not line:
+					continue
+				if line.startswith(">"):
+					if cur_id is not None:
+						fasta_data.append({"header": cur_id, "sequence": "".join(chunks)})
+					parts = line[1:].strip().split(None, 1)
+					cand_id = parts[0] if parts else ""
+					if cand_id and (allowed is None or cand_id in allowed or normalise_accession(cand_id) in allowed):
+						cur_id = cand_id
+						chunks = []
+					else:
+						cur_id = None
+						chunks = []
+				elif cur_id is not None:
+					chunks.append(line)
+			if cur_id is not None:
+				fasta_data.append({"header": cur_id, "sequence": "".join(chunks)})
 		return pd.DataFrame(fasta_data, columns=["header", "sequence"])
 
 	@staticmethod
@@ -1565,10 +1611,79 @@ class CreateSqliteDB:
 		conn.executemany(sql, payload)
 		return len(df)
 
+	#: Sensible 1 TB ceiling per process: tables up to 10 GiB load directly in RAM,
+	#: while multi-hundred-GB tables (e.g. 14.5M SC2 alignments/features/sequences)
+	#: stream in large chunks backed by a 128 GiB SQLite page cache + 512 GiB mmap.
+	MAX_MEMORY_BUDGET_BYTES = 1000 * (1024 ** 3)
+	STREAM_FILE_BYTES_THRESHOLD = 10 * (1024 ** 3)
+
+	def _finalize_streamed_fresh_table(self, conn, table, key_cols, dropped_within_chunks=0):
+		"""Deduplicate cross-chunk duplicates if needed and build the table's UNIQUE index."""
+		if table not in self.UPSERT_TABLES:
+			return
+		try:
+			self._create_table_unique_indexes(conn, table, key_cols)
+			if dropped_within_chunks:
+				print(f"[CreateSqliteDB] Dropped {dropped_within_chunks} duplicate incoming rows in '{table}' by key {key_cols}")
+		except ValueError:
+			existing_cols = self._table_columns(conn, table)
+			existing_lower = {str(c).casefold(): c for c in existing_cols}
+			resolved = [existing_lower[str(c).casefold()] for c in (key_cols or []) if str(c).casefold() in existing_lower]
+			if resolved:
+				self._blank_out_null_key_columns(conn, table, resolved)
+				cols_sql = ", ".join(self._quote_identifier(c) for c in resolved)
+				cur = conn.execute(
+					f"DELETE FROM {table} WHERE rowid NOT IN ("
+					f"SELECT MIN(rowid) FROM {table} GROUP BY {cols_sql})"
+				)
+				total_dropped = dropped_within_chunks + max(0, int(cur.rowcount or 0))
+				if total_dropped:
+					print(f"[CreateSqliteDB] Dropped {total_dropped} duplicate incoming rows in '{table}' by key {key_cols}")
+			self._create_table_unique_indexes(conn, table, key_cols)
+
+	def _stream_fresh_df_generator_to_sql(self, conn, table, empty_schema_df, chunk_iter):
+		"""Stream normalized DataFrames into a fresh SQLite table with bounded memory."""
+		key_cols = self._infer_key_cols(table, empty_schema_df)
+		for c in key_cols:
+			if c not in empty_schema_df.columns:
+				raise ValueError(f"Incoming '{table}' dataframe missing key column '{c}'")
+		self.assert_no_case_insensitive_duplicates(empty_schema_df.columns, f"incoming {table}")
+
+		wrote_any = False
+		total_rows = 0
+		dropped_within = 0
+		for chunk in chunk_iter:
+			if chunk is None or chunk.empty:
+				continue
+			for c in key_cols:
+				chunk[c] = self._normalize_key_series(chunk[c])
+			chunk, dropped = self._dedupe_incoming_df(chunk, key_cols)
+			dropped_within += dropped
+			if chunk.empty:
+				continue
+			chunk.to_sql(
+				table,
+				conn,
+				if_exists=("replace" if not wrote_any else "append"),
+				index=False,
+				chunksize=100000,
+			)
+			wrote_any = True
+			total_rows += len(chunk)
+
+		if not wrote_any:
+			for c in key_cols:
+				empty_schema_df[c] = self._normalize_key_series(empty_schema_df[c])
+			empty_schema_df.iloc[0:0].to_sql(table, conn, if_exists="replace", index=False)
+
+		self._finalize_streamed_fresh_table(conn, table, key_cols, dropped_within_chunks=dropped_within)
+		return total_rows
+
 	def merge_table_append_nonredundant(self, conn, df, table, key_cols=None, update_exclusions=None):
 		if df is None:
 			return 0
-		df = df.copy()
+		if self.update or len(df) <= 250000:
+			df = df.copy()
 		key_cols = key_cols if key_cols is not None else self._infer_key_cols(table, df)
 		
 		if self.update and self._table_exists(conn, table):
@@ -1591,8 +1706,9 @@ class CreateSqliteDB:
 		# so check once here rather than letting either fail opaquely.
 		self.assert_no_case_insensitive_duplicates(df.columns, f"incoming {table}")
 
+		sql_chunksize = 50000 if len(df) > 100000 else None
 		if not self.update:
-			df.to_sql(table, conn, if_exists="replace", index=False)
+			df.to_sql(table, conn, if_exists="replace", index=False, chunksize=sql_chunksize)
 			# Build the index on a fresh build too. to_sql(if_exists='replace') drops
 			# the table and its indexes, so this has to run after the write - and
 			# without it the very first --update against a new database is the first
@@ -1603,7 +1719,7 @@ class CreateSqliteDB:
 			return len(df)
 
 		if not self._table_exists(conn, table):
-			df.to_sql(table, conn, if_exists="replace", index=False)
+			df.to_sql(table, conn, if_exists="replace", index=False, chunksize=sql_chunksize)
 			if table in self.UPSERT_TABLES:
 				self._create_table_unique_indexes(conn, table, key_cols)
 			print(f"[CreateSqliteDB] Created table '{table}' with {len(df)} rows (table did not exist)")
@@ -2361,97 +2477,164 @@ class CreateSqliteDB:
 		excluded_rows = df_meta_data[exclusion_mask]
 		if not excluded_rows.empty:
 			print(f"[CreateSqliteDB] Found {len(excluded_rows)} segment rows with exclusions in meta_data")
-			for idx, row in excluded_rows.iterrows():
-				acc = str(row.get("primary_accession", "")).strip()
-				reason = str(exclusion_reason.loc[idx]).strip()
-				if acc:
-					excluded_records.append({"primary_accession": acc, "reason": reason})
+			excl_accs = excluded_rows["primary_accession"].astype(str).str.strip().tolist()
+			excl_reasons = exclusion_reason.loc[excluded_rows.index].astype(str).str.strip().tolist()
+			excluded_records = [
+				{"primary_accession": acc, "reason": rsn}
+				for acc, rsn in zip(excl_accs, excl_reasons)
+				if acc
+			]
+		del excluded_rows
 
-		# Load alignment data with strict string type casting (keep literal "NA" for Flu neuraminidase)
-		df_aln = self._read_tsv_required(self.pad_aln, [], "pad_aln", dtype=str, keep_na_strings=True)
-		df_aln = self._normalize_alignment_columns(df_aln, "pad_aln")
-		df_aln["primary_accession"] = df_aln["primary_accession"].fillna("").astype(str).str.strip()
-		df_aln["sequence_id"] = df_aln["sequence_id"].fillna("").astype(str).str.strip()
-		# Before valid_pairs is built from meta_data: a versioned accession here is
-		# simply absent from it, and the alignment row is filtered away in silence.
-		df_aln = self._normalise_identity_columns(df_aln, "sequence_alignment")
-
-		# Ingest and normalise/backfill segment values safely within df_aln
-		if "segment" not in df_aln.columns:
-			df_aln["segment"] = df_aln["primary_accession"].map(acc_to_seg_map).fillna("")
-		else:
-			df_aln["segment"] = df_aln["segment"].fillna("").astype(str).str.strip()
-			df_aln["segment"] = df_aln["segment"].replace("", float("NaN")).fillna(df_aln["primary_accession"].map(acc_to_seg_map)).fillna("")
-		df_aln["segment"] = df_aln["segment"].map(self._normalize_segment_value)
-
-		df_meta_data, retired_batch_map, superseded_update_list, update_winner_patches = self._reconcile_strain_duplicates(
-			df_meta_data, df_aln, is_ref_or_master
+		stream_large_tables = (not self.update) and any(
+			os.path.getsize(p) > self.STREAM_FILE_BYTES_THRESHOLD
+			for p in (self.pad_aln, self.features, self.fasta_sequence_file)
 		)
-		if retired_batch_map:
-			# Refresh exclusion_mask, passed_qc_query_accessions, and excluded_records after strain deduplication
-			status_values = df_meta_data["exclusion_status"].fillna("").astype(str).str.strip()
-			status_mask = ~status_values.str.lower().isin(["", "0", "false", "no", "na", "none", "nan"])
-			crit_values = df_meta_data["exclusion_criteria"].fillna("").astype(str).str.strip()
-			exclusion_mask = status_mask | (crit_values != "")
-			if "primary_accession" in df_meta_data.columns:
-				passed_qc_query_accessions = set(
-					df_meta_data.loc[(~is_ref_or_master) & (~exclusion_mask), "primary_accession"]
-				)
-				passed_qc_query_accessions.discard("")
-			for (r_acc, _r_seg), (_w_acc, reason) in retired_batch_map.items():
-				if r_acc:
-					excluded_records.append({"primary_accession": r_acc, "reason": reason})
 
-		df_meta_data = self._add_cluster_column(df_meta_data)
-		if retired_batch_map:
-			cluster_cols = self._cluster_placeholder_columns(df_meta_data.columns)
-			if cluster_cols:
-				for (r_acc, r_seg), (w_acc, _reason) in retired_batch_map.items():
-					seg_mask = (df_meta_data["segment"] == r_seg) if r_seg else pd.Series(True, index=df_meta_data.index)
-					for ccol in cluster_cols:
-						df_meta_data.loc[seg_mask & (df_meta_data[ccol] == r_acc), ccol] = w_acc
-		df_meta_data = self._add_reference_columns(df_meta_data, df_aln)
-		
-		# Establish reference sets using pure python string primitives
-		valid_df = df_meta_data.loc[(~exclusion_mask) | is_ref_or_master, ["primary_accession", "segment"]].dropna()
-		valid_pairs = set(zip(
-			valid_df["primary_accession"].astype(str).str.strip(),
-			valid_df["segment"].astype(str).str.strip()
-		))
+		def _prepare_aln_df(frame):
+			frame = self._normalize_alignment_columns(frame, "pad_aln")
+			frame["primary_accession"] = frame["primary_accession"].fillna("").astype(str).str.strip()
+			frame["sequence_id"] = frame["sequence_id"].fillna("").astype(str).str.strip()
+			# Before valid_pairs is built from meta_data: a versioned accession here is
+			# simply absent from it, and the alignment row is filtered away in silence.
+			frame = self._normalise_identity_columns(frame, "sequence_alignment")
+			if "segment" not in frame.columns:
+				frame["segment"] = frame["primary_accession"].map(acc_to_seg_map).fillna("")
+			else:
+				frame["segment"] = frame["segment"].fillna("").astype(str).str.strip()
+				frame["segment"] = frame["segment"].replace("", float("NaN")).fillna(frame["primary_accession"].map(acc_to_seg_map)).fillna("")
+			frame["segment"] = frame["segment"].map(self._normalize_segment_value)
+			return frame
 
-		acc_to_seg_map = dict(zip(
-			df_meta_data["primary_accession"].astype(str).str.strip(),
-			df_meta_data["segment"].astype(str).str.strip()
-		))
+		def _prepare_features_df(frame):
+			f_acc = "accession" if "accession" in frame.columns else "primary_accession"
+			if f_acc in frame.columns:
+				frame[f_acc] = frame[f_acc].fillna("").astype(str).str.strip()
+			# master_ref_accession and reference_accession are normalised here too: they
+			# are joined against meta_data by VerifyMutations, not by this file, so a
+			# version leak in either survives the valid_pairs filter and only shows up
+			# much later as a feature map with no reference.
+			frame = self._normalise_identity_columns(frame, "features")
+			if "segment" not in frame.columns:
+				frame["segment"] = frame[f_acc].map(acc_to_seg_map).fillna("") if f_acc in frame.columns else ""
+			else:
+				frame["segment"] = frame["segment"].fillna("").astype(str).str.strip()
+				if f_acc in frame.columns:
+					frame["segment"] = frame["segment"].replace("", float("NaN")).fillna(frame[f_acc].map(acc_to_seg_map)).fillna("")
+			frame["segment"] = frame["segment"].map(self._normalize_segment_value)
+			return frame, f_acc
 
-		df_features = self._read_tsv_required(self.features, [], "features", dtype=str, keep_na_strings=True)
-		feat_acc_col = "accession" if "accession" in df_features.columns else "primary_accession"
-		if feat_acc_col in df_features.columns:
-			df_features[feat_acc_col] = df_features[feat_acc_col].fillna("").astype(str).str.strip()
-		# master_ref_accession and reference_accession are normalised here too: they
-		# are joined against meta_data by VerifyMutations, not by this file, so a
-		# version leak in either survives the valid_pairs filter and only shows up
-		# much later as a feature map with no reference.
-		df_features = self._normalise_identity_columns(df_features, "features")
+		aln_observed_segs = set()
+		feat_observed_segs = set()
+		streamed_unique_products = []
+		retired_batch_map = {}
+		superseded_update_list = []
+		update_winner_patches = {}
 
-		# Ingest and normalise/backfill segment values safely within df_features
-		if "segment" not in df_features.columns:
-			df_features["segment"] = df_features[feat_acc_col].map(acc_to_seg_map).fillna("") if feat_acc_col in df_features.columns else ""
+		if stream_large_tables:
+			print("[CreateSqliteDB] Large input table(s) detected; enabling bounded-memory chunked SQLite ingestion.")
+			df_aln = None
+			df_features = None
+			df_fasta_sequences = None
+
+			df_aln_meta = pd.read_csv(self.pad_aln, sep="\t", dtype=str, keep_default_na=False, usecols=lambda c: c != "alignment")
+			df_aln_meta = _prepare_aln_df(df_aln_meta)
+			df_meta_data = self._add_cluster_column(df_meta_data)
+			df_meta_data = self._add_reference_columns(df_meta_data, df_aln_meta)
+
+			valid_df = df_meta_data.loc[(~exclusion_mask) | is_ref_or_master, ["primary_accession", "segment"]].dropna()
+			valid_pairs = set(zip(
+				valid_df["primary_accession"].astype(str).str.strip(),
+				valid_df["segment"].astype(str).str.strip()
+			))
+			del valid_df
+
+			acc_to_seg_map = dict(zip(
+				df_meta_data["primary_accession"].astype(str).str.strip(),
+				df_meta_data["segment"].astype(str).str.strip()
+			))
+
+			if valid_pairs and not df_aln_meta.empty:
+				df_aln_meta = df_aln_meta[[t in valid_pairs for t in zip(df_aln_meta["primary_accession"], df_aln_meta["segment"])]]
+			aln_observed_segs = self._collect_nonblank_segments_from_df(df_aln_meta)
+			del df_aln_meta
+
+			feat_header_df = pd.read_csv(self.features, sep="\t", dtype=str, keep_default_na=False, nrows=0)
+			need_feat_products = self.gene_info is None
+			need_feat_segs = getattr(self, "is_segmented", None) is None
+			if need_feat_products or need_feat_segs:
+				seen_prods = OrderedDict() if "OrderedDict" in globals() else {}
+				wanted_cols = {"accession", "primary_accession", "segment", "product", "feature"}
+				for fchunk in pd.read_csv(
+					self.features, sep="\t", dtype=str, keep_default_na=False, chunksize=250000,
+					usecols=lambda c: c in wanted_cols,
+				):
+					fchunk, f_acc = _prepare_features_df(fchunk)
+					if valid_pairs and not fchunk.empty and f_acc in fchunk.columns:
+						fchunk = fchunk[[t in valid_pairs for t in zip(fchunk[f_acc], fchunk["segment"])]]
+					if need_feat_segs:
+						feat_observed_segs.update(self._collect_nonblank_segments_from_df(fchunk))
+					if need_feat_products:
+						pcol = "product" if "product" in fchunk.columns else ("feature" if "feature" in fchunk.columns else None)
+						if pcol:
+							for p in fchunk[pcol].dropna().unique():
+								ps = str(p).strip()
+								if ps and ps not in seen_prods:
+									seen_prods[ps] = None
+				streamed_unique_products = list(seen_prods.keys())
 		else:
-			df_features["segment"] = df_features["segment"].fillna("").astype(str).str.strip()
-			if feat_acc_col in df_features.columns:
-				df_features["segment"] = df_features["segment"].replace("", float("NaN")).fillna(df_features[feat_acc_col].map(acc_to_seg_map)).fillna("")
-		df_features["segment"] = df_features["segment"].map(self._normalize_segment_value)
+			# Load alignment data with strict string type casting (keep literal "NA" for Flu neuraminidase)
+			df_aln = self._read_tsv_required(self.pad_aln, [], "pad_aln", dtype=str, keep_na_strings=True)
+			df_aln = _prepare_aln_df(df_aln)
 
-		# Apply high-performance structural list comprehension filters against valid_pairs
-	
-		if valid_pairs:
-			if feat_acc_col in df_features.columns and not df_features.empty:
-				df_features = df_features[[t in valid_pairs for t in zip(df_features[feat_acc_col], df_features["segment"])]]
+			df_meta_data, retired_batch_map, superseded_update_list, update_winner_patches = self._reconcile_strain_duplicates(
+				df_meta_data, df_aln, is_ref_or_master
+			)
+			if retired_batch_map:
+				# Refresh exclusion_mask, passed_qc_query_accessions, and excluded_records after strain deduplication
+				status_values = df_meta_data["exclusion_status"].fillna("").astype(str).str.strip()
+				status_mask = ~status_values.str.lower().isin(["", "0", "false", "no", "na", "none", "nan"])
+				crit_values = df_meta_data["exclusion_criteria"].fillna("").astype(str).str.strip()
+				exclusion_mask = status_mask | (crit_values != "")
+				if "primary_accession" in df_meta_data.columns:
+					passed_qc_query_accessions = set(
+						df_meta_data.loc[(~is_ref_or_master) & (~exclusion_mask), "primary_accession"]
+					)
+					passed_qc_query_accessions.discard("")
+				for (r_acc, _r_seg), (_w_acc, reason) in retired_batch_map.items():
+					if r_acc:
+						excluded_records.append({"primary_accession": r_acc, "reason": reason})
+
+			df_meta_data = self._add_cluster_column(df_meta_data)
+			if retired_batch_map:
+				cluster_cols = self._cluster_placeholder_columns(df_meta_data.columns)
+				if cluster_cols:
+					for (r_acc, r_seg), (w_acc, _reason) in retired_batch_map.items():
+						seg_mask = (df_meta_data["segment"] == r_seg) if r_seg else pd.Series(True, index=df_meta_data.index)
+						for ccol in cluster_cols:
+							df_meta_data.loc[seg_mask & (df_meta_data[ccol] == r_acc), ccol] = w_acc
+			df_meta_data = self._add_reference_columns(df_meta_data, df_aln)
 			
-			# FIX: Filter using the clean primary_accession column to match valid_pairs structural layout
-			if not df_aln.empty:
-				df_aln = df_aln[[t in valid_pairs for t in zip(df_aln["primary_accession"], df_aln["segment"])]]
+			# Establish reference sets using pure python string primitives
+			valid_df = df_meta_data.loc[(~exclusion_mask) | is_ref_or_master, ["primary_accession", "segment"]].dropna()
+			valid_pairs = set(zip(
+				valid_df["primary_accession"].astype(str).str.strip(),
+				valid_df["segment"].astype(str).str.strip()
+			))
+
+			acc_to_seg_map = dict(zip(
+				df_meta_data["primary_accession"].astype(str).str.strip(),
+				df_meta_data["segment"].astype(str).str.strip()
+			))
+
+			df_features = self._read_tsv_required(self.features, [], "features", dtype=str, keep_na_strings=True)
+			df_features, feat_acc_col = _prepare_features_df(df_features)
+
+			if valid_pairs:
+				if not df_features.empty and feat_acc_col in df_features.columns:
+					df_features = df_features[[t in valid_pairs for t in zip(df_features[feat_acc_col], df_features["segment"])]]
+				if not df_aln.empty:
+					df_aln = df_aln[[t in valid_pairs for t in zip(df_aln["primary_accession"], df_aln["segment"])]]
 
 		if self.gene_info is not None:
 			# keep_na_strings: influenza's neuraminidase gene is named "NA". Without
@@ -2459,12 +2642,15 @@ class CreateSqliteDB:
 			# 'whole_genome') - a gene with no name.
 			df_gene = self._read_tsv_required(self.gene_info, [], "gene_info", keep_na_strings=True)
 		else:
-			unique_products = []
-			if "product" in df_features.columns:
-				unique_products = df_features["product"].dropna().unique()
-			elif "feature" in df_features.columns:
-				unique_products = df_features["feature"].dropna().unique()
-			unique_products = [str(p).strip() for p in unique_products if str(p).strip()]
+			if stream_large_tables:
+				unique_products = streamed_unique_products
+			else:
+				unique_products = []
+				if "product" in df_features.columns:
+					unique_products = df_features["product"].dropna().unique()
+				elif "feature" in df_features.columns:
+					unique_products = df_features["feature"].dropna().unique()
+				unique_products = [str(p).strip() for p in unique_products if str(p).strip()]
 			gene_records = []
 			for p in unique_products:
 				gene_records.append({
@@ -2500,7 +2686,7 @@ class CreateSqliteDB:
 			df_insertions["segment"] = df_insertions["segment"].replace("", float("NaN")).fillna(df_insertions["primary_accession"].map(acc_to_seg_map)).fillna("")
 		df_insertions["segment"] = df_insertions["segment"].map(self._normalize_segment_value)
 			
-		if valid_pairs and "primary_accession" in df_insertions.columns and not df_insertions.empty:
+		if valid_pairs and not df_insertions.empty and "primary_accession" in df_insertions.columns:
 			df_insertions = df_insertions[[t in valid_pairs for t in zip(df_insertions["primary_accession"], df_insertions["segment"])]]
 		
 		df_host_taxa = self._read_tsv_required(self.host_taxa_file, [], "host_taxa_file", dtype=str)
@@ -2520,20 +2706,23 @@ class CreateSqliteDB:
 		df_host_taxa_lineage = _read_optional_host_tsv(self.host_taxa_lineage_file, "host_taxa_lineage_file")
 		df_host_taxa_lineage_lookup = _read_optional_host_tsv(self.host_taxa_lineage_lookup_file, "host_taxa_lineage_lookup_file")
 		
-		df_fasta_sequences = self.load_fasta()
-		df_fasta_sequences["header"] = df_fasta_sequences["header"].fillna("").astype(str).str.strip()
-		# record.id keeps whatever the FASTA carried, so this is the one identity
-		# column the pipeline does not control the spelling of at all.
-		df_fasta_sequences = self._normalise_identity_columns(df_fasta_sequences, "sequences")
-		if "segment" not in df_fasta_sequences.columns:
-			df_fasta_sequences["segment"] = df_fasta_sequences["header"].map(acc_to_seg_map).fillna("")
-		else:
-			df_fasta_sequences["segment"] = df_fasta_sequences["segment"].fillna("").astype(str).str.strip()
-			df_fasta_sequences["segment"] = df_fasta_sequences["segment"].replace("", float("NaN")).fillna(df_fasta_sequences["header"].map(acc_to_seg_map)).fillna("")
-		df_fasta_sequences["segment"] = df_fasta_sequences["segment"].map(self._normalize_segment_value)
+		self._allowed_fasta_headers = {acc for acc, _ in valid_pairs if acc} if valid_pairs else None
 
-		if valid_pairs and "header" in df_fasta_sequences.columns and not df_fasta_sequences.empty:
-			df_fasta_sequences = df_fasta_sequences[[t in valid_pairs for t in zip(df_fasta_sequences["header"], df_fasta_sequences["segment"])]]
+		def _prepare_fasta_df(frame):
+			frame["header"] = frame["header"].fillna("").astype(str).str.strip()
+			frame = self._normalise_identity_columns(frame, "sequences")
+			if "segment" not in frame.columns:
+				frame["segment"] = frame["header"].map(acc_to_seg_map).fillna("")
+			else:
+				frame["segment"] = frame["segment"].fillna("").astype(str).str.strip()
+				frame["segment"] = frame["segment"].replace("", float("NaN")).fillna(frame["header"].map(acc_to_seg_map)).fillna("")
+			frame["segment"] = frame["segment"].map(self._normalize_segment_value)
+			if valid_pairs and not frame.empty and "header" in frame.columns:
+				frame = frame[[t in valid_pairs for t in zip(frame["header"], frame["segment"])]]
+			return frame
+
+		if not stream_large_tables:
+			df_fasta_sequences = _prepare_fasta_df(self.load_fasta())
 
 		db_path = self._db_path()
 		db_dir = os.path.dirname(db_path) or "."
@@ -2549,6 +2738,13 @@ class CreateSqliteDB:
 		try:
 			cursor = conn.cursor()
 			cursor.execute("PRAGMA foreign_keys = ON;")
+			if stream_large_tables:
+				cursor.execute("PRAGMA journal_mode = WAL;")
+				cursor.execute("PRAGMA synchronous = NORMAL;")
+				cursor.execute("PRAGMA temp_store = MEMORY;")
+				# 128 GiB page cache + 512 GiB mmap keeps index builds fast within a 1 TB ceiling
+				cursor.execute("PRAGMA cache_size = -134217728;")
+				cursor.execute("PRAGMA mmap_size = 549755813888;")
 			self._check_update_history(conn)
 			cursor.execute("DROP TABLE IF EXISTS excluded_accessions;")
 			cursor.execute("CREATE TABLE IF NOT EXISTS trees (name TEXT, source TEXT, segment_key TEXT, segment TEXT, newick TEXT, created_at TEXT);")
@@ -2561,12 +2757,61 @@ class CreateSqliteDB:
 
 			cursor.execute("INSERT OR REPLACE INTO update_batches (batch_id, started_at, finished_at, update_db, mode) VALUES (?, ?, ?, ?, ?)", (self.batch_id, now_str, None, self.update_db if self.update else None, "update" if self.update else "create"))
 
-			if self._should_force_unsegmented_segment_one(conn, [df_meta_data, df_features, df_aln, df_insertions]):
+			if stream_large_tables:
+				declared_seg = getattr(self, "is_segmented", None)
+				if declared_seg is not None:
+					force_seg_one = not declared_seg
+				else:
+					obs_segs = set()
+					obs_segs.update(self._collect_nonblank_segments_from_df(df_meta_data))
+					obs_segs.update(self._collect_nonblank_segments_from_df(df_insertions))
+					obs_segs.update(aln_observed_segs)
+					obs_segs.update(feat_observed_segs)
+					force_seg_one = obs_segs.issubset({"1"})
+			else:
+				force_seg_one = self._should_force_unsegmented_segment_one(conn, [df_meta_data, df_features, df_aln, df_insertions])
+
+			if force_seg_one:
 				df_meta_data = self._force_segment_one_df(df_meta_data, create_if_missing=True)
-				df_features = self._force_segment_one_df(df_features, create_if_missing=True)
-				df_aln = self._force_segment_one_df(df_aln, create_if_missing=True)
 				df_insertions = self._force_segment_one_df(df_insertions, create_if_missing=True)
-				df_fasta_sequences = self._force_segment_one_df(df_fasta_sequences, create_if_missing=True)
+				if not stream_large_tables:
+					df_features = self._force_segment_one_df(df_features, create_if_missing=True)
+					df_aln = self._force_segment_one_df(df_aln, create_if_missing=True)
+					df_fasta_sequences = self._force_segment_one_df(df_fasta_sequences, create_if_missing=True)
+
+			total_meta_rows = len(df_meta_data)
+			accession_to_segment = {}
+			if "primary_accession" in df_meta_data.columns and "segment" in df_meta_data.columns:
+				sub_meta = df_meta_data[["primary_accession", "segment"]].dropna()
+				for acc_raw, seg_raw in zip(sub_meta["primary_accession"], sub_meta["segment"]):
+					acc = str(acc_raw).strip()
+					seg = str(seg_raw).strip()
+					if acc and seg and acc not in accession_to_segment:
+						accession_to_segment[acc] = seg
+				del sub_meta
+
+			segment_summary = None
+			if "segment" in df_meta_data.columns:
+				query_rows = df_meta_data.loc[~is_ref_or_master, ["segment"]]
+				query_exclusion_mask = exclusion_mask.loc[query_rows.index]
+				segment_series = query_rows["segment"].fillna("").astype(str).str.strip()
+				nonblank_segment_values = {seg for seg in segment_series.unique() if seg}
+				if len(nonblank_segment_values) > 1:
+					normalized_segment = segment_series.mask(segment_series == "", "NA")
+					segment_frame = pd.DataFrame({
+						"segment": normalized_segment,
+						"included": (~query_exclusion_mask).astype(int),
+						"excluded": query_exclusion_mask.astype(int),
+					})
+					segment_summary = (
+						segment_frame.groupby("segment", as_index=False)[["included", "excluded"]]
+						.sum()
+					)
+					segment_summary["_segment_num"] = pd.to_numeric(segment_summary["segment"], errors="coerce")
+					segment_summary = (
+						segment_summary.sort_values(["_segment_num", "segment"], na_position="last")
+						.drop(columns=["_segment_num"])
+					)
 
 			tables_for_delta = [
 				"meta_data", "features", "sequence_alignment", "genes", "sequences", "insertions",
@@ -2574,22 +2819,105 @@ class CreateSqliteDB:
 				"strain_segment_linkage",
 			]
 			before_counts = {t: self._table_row_count(conn, t) for t in tables_for_delta}
-			before_query_count = self._count_distinct_nonexcluded_query_accessions(conn)
+			before_query_count = self._count_distinct_nonexcluded_query_accessions(conn) if self.update else 0
 
 			self._apply_update_db_strain_retirements(
 				conn, superseded_update_list, update_winner_patches, update_exclusions, now_str
 			)
 
 			self.merge_table_append_nonredundant(conn, df_meta_data, "meta_data", None, update_exclusions)
-			self.merge_table_append_nonredundant(conn, df_features, "features", None, update_exclusions)
-			self.merge_table_append_nonredundant(conn, df_aln, "sequence_alignment", None, update_exclusions)
+			if stream_large_tables:
+				conn.commit()
+				del df_meta_data
+
+				feat_empty, _ = _prepare_features_df(pd.read_csv(self.features, sep="\t", dtype=str, keep_default_na=False, nrows=0))
+				if force_seg_one:
+					feat_empty = self._force_segment_one_df(feat_empty, create_if_missing=True)
+
+				def _iter_feature_chunks():
+					for ch in pd.read_csv(self.features, sep="\t", dtype=str, keep_default_na=False, chunksize=1000000):
+						ch, f_acc = _prepare_features_df(ch)
+						if valid_pairs and not ch.empty and f_acc in ch.columns:
+							ch = ch[[t in valid_pairs for t in zip(ch[f_acc], ch["segment"])]]
+						if force_seg_one:
+							ch = self._force_segment_one_df(ch, create_if_missing=True)
+						yield ch
+
+				self._stream_fresh_df_generator_to_sql(conn, "features", feat_empty, _iter_feature_chunks())
+				conn.commit()
+
+				aln_empty = _prepare_aln_df(pd.read_csv(self.pad_aln, sep="\t", dtype=str, keep_default_na=False, nrows=0))
+				if force_seg_one:
+					aln_empty = self._force_segment_one_df(aln_empty, create_if_missing=True)
+
+				def _iter_aln_chunks():
+					for ch in pd.read_csv(self.pad_aln, sep="\t", dtype=str, keep_default_na=False, chunksize=250000):
+						ch = _prepare_aln_df(ch)
+						if valid_pairs and not ch.empty:
+							ch = ch[[t in valid_pairs for t in zip(ch["primary_accession"], ch["segment"])]]
+						if force_seg_one:
+							ch = self._force_segment_one_df(ch, create_if_missing=True)
+						yield ch
+
+				self._stream_fresh_df_generator_to_sql(conn, "sequence_alignment", aln_empty, _iter_aln_chunks())
+				conn.commit()
+			else:
+				self.merge_table_append_nonredundant(conn, df_features, "features", None, update_exclusions)
+				self.merge_table_append_nonredundant(conn, df_aln, "sequence_alignment", None, update_exclusions)
+
 			self.merge_table_append_nonredundant(conn, df_gene, "genes", None, update_exclusions)
 			self.merge_table_append_nonredundant(conn, df_m49_country, "m49_country", ["m49_code"], update_exclusions)
 			self.merge_table_append_nonredundant(conn, df_m49_interm, "m49_intermediate", None, update_exclusions)
 			self.merge_table_append_nonredundant(conn, df_m49_region, "m49_regions", None, update_exclusions)
 			self.merge_table_append_nonredundant(conn, df_m49_sub_region, "m49_sub_regions", None, update_exclusions)
 			self.merge_table_append_nonredundant(conn, df_proj_setting, "project_settings", None, update_exclusions)
-			self.merge_table_append_nonredundant(conn, df_fasta_sequences, "sequences", None, update_exclusions)
+
+			if stream_large_tables:
+				seq_empty = _prepare_fasta_df(pd.DataFrame(columns=["header", "sequence"]))
+				if force_seg_one:
+					seq_empty = self._force_segment_one_df(seq_empty, create_if_missing=True)
+
+				def _iter_fasta_chunks(batch_records=250000):
+					allowed = self._allowed_fasta_headers
+					batch = []
+					cur_id = None
+					seq_parts = []
+					with open(self.fasta_sequence_file, "r", encoding="utf-8", errors="replace") as fh:
+						for raw_line in fh:
+							line = raw_line.strip()
+							if not line:
+								continue
+							if line.startswith(">"):
+								if cur_id is not None:
+									batch.append({"header": cur_id, "sequence": "".join(seq_parts)})
+									if len(batch) >= batch_records:
+										ch = _prepare_fasta_df(pd.DataFrame(batch, columns=["header", "sequence"]))
+										if force_seg_one:
+											ch = self._force_segment_one_df(ch, create_if_missing=True)
+										yield ch
+										batch = []
+								parts = line[1:].strip().split(None, 1)
+								cand_id = parts[0] if parts else ""
+								if cand_id and (allowed is None or cand_id in allowed or normalise_accession(cand_id) in allowed):
+									cur_id = cand_id
+								else:
+									cur_id = None
+								seq_parts = []
+							elif cur_id is not None:
+								seq_parts.append(line)
+						if cur_id is not None:
+							batch.append({"header": cur_id, "sequence": "".join(seq_parts)})
+					if batch:
+						ch = _prepare_fasta_df(pd.DataFrame(batch, columns=["header", "sequence"]))
+						if force_seg_one:
+							ch = self._force_segment_one_df(ch, create_if_missing=True)
+						yield ch
+
+				self._stream_fresh_df_generator_to_sql(conn, "sequences", seq_empty, _iter_fasta_chunks())
+				conn.commit()
+			else:
+				self.merge_table_append_nonredundant(conn, df_fasta_sequences, "sequences", None, update_exclusions)
+
 			self.merge_table_append_nonredundant(conn, df_insertions, "insertions", None, update_exclusions)
 			self.merge_table_append_nonredundant(conn, df_host_taxa, "host_taxa", None, update_exclusions)
 			if df_host_taxa_children is not None:
@@ -2616,7 +2944,7 @@ class CreateSqliteDB:
 				if "desc_taxa_id" in htll_cols:
 					cursor.execute("CREATE INDEX IF NOT EXISTS idx_htll_desc ON host_taxa_lineage_lookup (desc_taxa_id)")
 
-			if self._should_force_unsegmented_segment_one(conn, [df_meta_data, df_features, df_aln, df_insertions]):
+			if force_seg_one and not stream_large_tables:
 				# 'sequences' belongs here: it carries a segment column and is upserted on
 				# (header, segment), so a row left blank is a row no later batch can reach.
 				self._backfill_segment_one_in_db(conn, ["meta_data", "features", "sequence_alignment", "insertions", "sequences"])
@@ -2685,15 +3013,7 @@ class CreateSqliteDB:
 				pd.DataFrame(update_exclusions).to_sql("update_exclusions", conn, if_exists="append", index=False)
 				print(f"[CreateSqliteDB] Logged {len(update_exclusions)} update-mode duplicate keys into update_exclusions")
 
-			accession_to_segment = {}
-			if "primary_accession" in df_meta_data.columns and "segment" in df_meta_data.columns:
-				for _, row in df_meta_data[["primary_accession", "segment"]].dropna().iterrows():
-					acc = str(row["primary_accession"]).strip()
-					seg = str(row["segment"]).strip()
-					if acc and seg and acc not in accession_to_segment:
-						accession_to_segment[acc] = seg
-
-			is_single_segment = self._should_force_unsegmented_segment_one(conn, [df_meta_data, df_features, df_aln, df_insertions])
+			is_single_segment = force_seg_one if stream_large_tables else self._should_force_unsegmented_segment_one(conn, [df_meta_data, df_features, df_aln, df_insertions])
 
 			tree_records = []
 			# Both callers pass the first IQ-TREE/UShER file as -it/-ut AND list it in
@@ -2728,13 +3048,16 @@ class CreateSqliteDB:
 
 			if is_single_segment:
 				usher_newick = None
+				usher_path = None
 				if self.usher_tree:
 					usher_newick = self._read_rooted_tree_file(self.usher_tree)
+					usher_path = self.usher_tree
 				if not usher_newick and self.tree_manifest:
 					for entry in self._load_tree_manifest(self.tree_manifest):
 						if entry.get("source") == "usher":
 							usher_newick = self._read_rooted_tree_file(entry["path"])
 							if usher_newick:
+								usher_path = entry["path"]
 								break
 				if usher_newick:
 					tree_records.append({
@@ -2742,7 +3065,8 @@ class CreateSqliteDB:
 						"source": "usher",
 						"segment_key": None,
 						"segment": "1",
-						"newick": usher_newick
+						"newick": usher_newick,
+						"path": usher_path,
 					})
 
 			# One reference-only tree per IQ-TREE, under its own source so nothing that
@@ -2803,6 +3127,7 @@ class CreateSqliteDB:
 				).rowcount
 				if removed:
 					print(f"[CreateSqliteDB] Removed {removed} unlabelled duplicate tree row(s)")
+				self._store_usher_bundles(conn, tree_records, now_str)
 
 			creation_type = self._resolve_creation_type()
 			# Two columns, appended - the info table's shape is unchanged, so anything
@@ -2810,7 +3135,7 @@ class CreateSqliteDB:
 			pd.DataFrame([{"creation_type": creation_type, "date": now_str}]).to_sql("info", conn, if_exists="append", index=False)
 
 			after_counts = {t: self._table_row_count(conn, t) for t in tables_for_delta}
-			after_query_count = self._count_distinct_nonexcluded_query_accessions(conn)
+			after_query_count = self._count_distinct_nonexcluded_query_accessions(conn) if self.update else len(passed_qc_query_accessions)
 			deltas = []
 			for table_name in tables_for_delta:
 				before = before_counts.get(table_name, 0)
@@ -2834,34 +3159,11 @@ class CreateSqliteDB:
 			summary_lines.append("\n" + "="*80)
 			summary_lines.append("[CreateSqliteDB] DB Construction Summary:")
 			summary_lines.append("="*80)
-			summary_lines.append(f"Total sequences loaded      : {len(df_meta_data)}")
+			summary_lines.append(f"Total sequences loaded      : {total_meta_rows}")
 			summary_lines.append(f"  (includes references/masters and query sequences)")
 			summary_lines.append(f"Query sequences passing QC  : {len(passed_qc_query_accessions)}")
 			summary_lines.append(f"Sequences marked as excluded: {len(df_excluded)}")
 			summary_lines.append(f"  (references/masters + failed QC)")
-
-			segment_summary = None
-			if "segment" in df_meta_data.columns:
-				query_rows = df_meta_data.loc[~is_ref_or_master].copy()
-				query_exclusion_mask = exclusion_mask.loc[query_rows.index]
-				segment_series = query_rows["segment"].fillna("").astype(str).str.strip()
-				nonblank_segment_values = {seg for seg in segment_series.unique() if seg}
-				if len(nonblank_segment_values) > 1:
-					normalized_segment = segment_series.mask(segment_series == "", "NA")
-					segment_frame = pd.DataFrame({
-						"segment": normalized_segment,
-						"included": (~query_exclusion_mask).astype(int),
-						"excluded": query_exclusion_mask.astype(int),
-					})
-					segment_summary = (
-						segment_frame.groupby("segment", as_index=False)[["included", "excluded"]]
-						.sum()
-					)
-					segment_summary["_segment_num"] = pd.to_numeric(segment_summary["segment"], errors="coerce")
-					segment_summary = (
-						segment_summary.sort_values(["_segment_num", "segment"], na_position="last")
-						.drop(columns=["_segment_num"])
-					)
 
 			if segment_summary is not None and not segment_summary.empty:
 				summary_lines.append("-" * 80)
@@ -2899,6 +3201,9 @@ class CreateSqliteDB:
 				sf.write(summary_str)
 
 			conn.commit()
+			if stream_large_tables:
+				cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+				cursor.execute("PRAGMA journal_mode = DELETE;")
 			conn.close()
 			conn = None
 			os.replace(tmp_db_path, db_path)

@@ -167,3 +167,72 @@ class TestColumnPopulationStillDetectsWhatItIsFor:
         assert "col_63" not in flagged and "col_64" not in flagged
         assert "col_0" in flagged and f"col_{n - 1}" in flagged
         assert len(flagged) == n - 2
+
+
+class _NoFetchallFeaturesCursor(CountingCursor):
+    """Forbids fetchall() when reading the features table (~378M rows on SC2)."""
+
+    def __init__(self, cursor, sink):
+        super().__init__(cursor, sink)
+        self._last_sql = ""
+
+    def execute(self, sql, *args, **kwargs):
+        self._last_sql = sql
+        return super().execute(sql, *args, **kwargs)
+
+    def fetchall(self):
+        if "FROM features" in self._last_sql and "DISTINCT" not in self._last_sql:
+            raise AssertionError(
+                f"fetchall() called on unbounded features query (OOM on 378M rows): {self._last_sql}"
+            )
+        return self._cursor.fetchall()
+
+
+class _NoFetchallFeaturesConn(CountingConnection):
+    def cursor(self):
+        return _NoFetchallFeaturesCursor(self._conn.cursor(), self.statements)
+
+
+class TestFeatureProjectionScalability:
+    """validate_feature_projection_integrity must stream features via fetchmany()
+    and load sequence_alignment ONLY for distinct master_ref_accession rows."""
+
+    def test_streams_features_with_fetchmany_and_loads_only_master_alignments(self):
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE sequence_alignment (primary_accession TEXT, alignment TEXT, segment TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE features (accession TEXT, master_ref_accession TEXT, segment TEXT, "
+            "product TEXT, aln_start TEXT, aln_end TEXT, cds_start TEXT, cds_end TEXT, "
+            "cds_start_OG_seq TEXT, cds_end_OG_seq TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO sequence_alignment VALUES (?, ?, ?)",
+            [("MASTER1", "--ACGTACGT--", "1")] + [(f"Q{i}", "--ACGTACGT--", "1") for i in range(50)],
+        )
+        conn.executemany(
+            "INSERT INTO features VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("MASTER1", "MASTER1", "1", "ORF1", "3", "10", "3", "10", "1", "8"),
+                # Q0 has cds_start=5 instead of expected 3 -> must be flagged as cds_span_mismatch
+                ("Q0", "MASTER1", "1", "ORF1", "3", "10", "5", "10", "1", "6"),
+            ]
+            + [
+                (f"Q{i}", "MASTER1", "1", "ORF1", "3", "10", "3", "10", "1", "8")
+                for i in range(1, 50)
+            ],
+        )
+        conn.commit()
+
+        wrapped = _NoFetchallFeaturesConn(conn)
+        result = V.validate_feature_projection_integrity(wrapped)
+
+        # Must filter sequence_alignment by master accessions rather than loading all 14.5M query alignments
+        aln_queries = [s for s in wrapped.statements if "FROM sequence_alignment" in s]
+        assert aln_queries and all("WHERE primary_accession IN" in s for s in aln_queries), aln_queries
+
+        # Must still catch Q0's mismatched CDS projection
+        assert result["ok"] is False
+        assert result["mismatched_cds_rows"] == 1
+        assert result["examples"][0]["accession"] == "Q0"

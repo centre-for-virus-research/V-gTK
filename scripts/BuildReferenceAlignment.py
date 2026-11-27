@@ -71,8 +71,8 @@ import accession_utils
 import segment_utils
 from ExportRefListFromUpdateDb import load_reference_file_table
 
-#: The shared server caps any single job at 14 threads.
-MAX_THREADS = 14
+#: Maximum threads allowed per MAFFT job.
+MAX_THREADS = 64
 
 #: Pairwise DP cells above which L-INS-i is too slow and FFT-NS-i is used.
 #: ``pairs * length^2``. 28 RABV references of 12 kb (5e10) take L-INS-i; 238
@@ -327,13 +327,23 @@ def read_cds(gff_path):
 	return cds, region_length
 
 
+#: Minimum whole codons required to keep the non-overlapping 3' remainder of a
+#: frameshifted/overlapping CDS (e.g. SARS-CoV-2 ORF1ab's ORF1b segment after ORF1a).
+MIN_TRIMMED_OVERLAP_CODONS = 30
+
+
 def choose_codon_regions(cds, master_seq):
 	"""Non-overlapping, plus-strand CDS that translate cleanly from the master.
 
 	Longest first, so a polyprotein beats the short frameshift product nested in
-	it and influenza M1 beats the spliced M2 exons. Everything else - minus strand,
-	wrapped, not a whole number of codons, internal stops in the master - stays
-	nucleotide-aligned rather than being forced into a frame it does not have.
+	it and influenza M1 beats the spliced M2 exons. When a long downstream CDS
+	overlaps an already-chosen upstream CDS only at its 5' end (e.g. coronavirus
+	ORF1ab's second frameshift block 13468..21555 overlapping ORF1a 266..13483),
+	its non-overlapping 3' remainder is trimmed in whole-codon steps so its own
+	reading frame is preserved rather than leaving 8 kb un-codon-aligned.
+	Everything else - minus strand, wrapped, not a whole number of codons,
+	internal stops in the master - stays nucleotide-aligned rather than being
+	forced into a frame it does not have.
 	"""
 	usable = []
 	skipped = []
@@ -361,6 +371,39 @@ def choose_codon_regions(cds, master_seq):
 	for entry in sorted(usable, key=lambda e: (-(e["end"] - e["start"]), e["start"])):
 		if all(entry["end"] < c["start"] or entry["start"] > c["end"] for c in chosen):
 			chosen.append(entry)
+			continue
+		overlapping = [c for c in chosen if not (entry["end"] < c["start"] or entry["start"] > c["end"])]
+		# Trim 5' or 3' frameshift overlap in whole-codon steps when the non-overlapping part is clean.
+		max_overlap_end = max(c["end"] for c in overlapping)
+		min_overlap_start = min(c["start"] for c in overlapping)
+		if max_overlap_end >= entry["start"] and entry["end"] > max_overlap_end:
+			trim_codons = math.ceil((max_overlap_end + 1 - entry["start"]) / 3)
+			new_start = entry["start"] + 3 * trim_codons
+			rem_nt = entry["end"] - new_start + 1
+			if (
+				rem_nt >= MIN_TRIMMED_OVERLAP_CODONS * 3
+				and rem_nt % 3 == 0
+				and all(entry["end"] < c["start"] or new_start > c["end"] for c in chosen)
+			):
+				rem_protein = translate(master_seq[new_start - 1:entry["end"]])
+				if "*" not in rem_protein[:-1]:
+					trimmed = dict(entry)
+					trimmed["start"] = new_start
+					chosen.append(trimmed)
+		elif min_overlap_start <= entry["end"] and entry["start"] < min_overlap_start:
+			trim_codons = math.ceil((entry["end"] - min_overlap_start + 1) / 3)
+			new_end = entry["end"] - 3 * trim_codons
+			rem_nt = new_end - entry["start"] + 1
+			if (
+				rem_nt >= MIN_TRIMMED_OVERLAP_CODONS * 3
+				and rem_nt % 3 == 0
+				and all(new_end < c["start"] or entry["start"] > c["end"] for c in chosen)
+			):
+				rem_protein = translate(master_seq[entry["start"] - 1:new_end])
+				if "*" not in rem_protein[:-1]:
+					trimmed = dict(entry)
+					trimmed["end"] = new_end
+					chosen.append(trimmed)
 	return sorted(chosen, key=lambda e: e["start"]), skipped
 
 

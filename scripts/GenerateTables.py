@@ -204,6 +204,33 @@ class GenerateTables:
 		# Handle single file or list of files
 		paded_aln_files = self.paded_aln if isinstance(self.paded_aln, list) else [self.paded_aln]
 		
+		def _iter_fasta_fast(path, chunk_bytes=16 * 1024 * 1024):
+			with open(path, "r", encoding="utf-8", errors="replace") as fh:
+				carry = ""
+				first_chunk = True
+				while True:
+					chunk = fh.read(chunk_bytes)
+					if not chunk:
+						break
+					data = carry + chunk
+					if first_chunk:
+						gt = data.find(">")
+						if gt == -1:
+							carry = ""
+							continue
+						data = data[gt + 1:]
+						first_chunk = False
+					parts = data.split("\n>")
+					carry = parts[-1]
+					for blk in parts[:-1]:
+						hdr, sep_nl, body = blk.partition("\n")
+						if sep_nl or hdr:
+							yield hdr.strip(), body.replace("\n", "").replace("\r", "")
+				if carry and not first_chunk:
+					hdr, sep_nl, body = carry.partition("\n")
+					if sep_nl or hdr:
+						yield hdr.strip(), body.replace("\n", "").replace("\r", "")
+
 		for paded_file in paded_aln_files:
 			if not os.path.exists(paded_file):
 				print(f"Warning: Padded alignment file not found: {paded_file}")
@@ -213,20 +240,19 @@ class GenerateTables:
 			match = re.search(r"refset_(\d+)_", os.path.basename(paded_file))
 			inferred_seg = match.group(1) if match else ""
 			
-			rds = read_file.fasta(paded_file)
-			for rows in rds:
-				acc = rows[0].strip()
+			for raw_acc, raw_seq in _iter_fasta_fast(paded_file):
+				acc = raw_acc.strip()
 				if acc not in accessions:
-					seqs[acc] = rows[1]
 					accessions[acc] = 1
 					inferred_segs[acc] = inferred_seg
 					seg = segment_map.get(acc, "")
 					if not seg:
 						seg = inferred_seg
 					if acc in blast_dict:
-						write_file.write(acc + '\t' + blast_dict[acc] + '\t' + rows[1] + '\t' + seg + '\n')
+						write_file.write(acc + '\t' + blast_dict[acc] + '\t' + raw_seq + '\t' + seg + '\n')
 						written_accessions.add(acc)
 					else:
+						seqs[acc] = raw_seq
 						missing_accs.append(acc)
 
 		for each_ref_aln in os.listdir(join(self.nextalign_dir)):
@@ -265,29 +291,32 @@ class GenerateTables:
 
 	def remove_redundancy_from_alignment(self, file_path, delimiter="\t"):
 		seen = set()
-		lines_to_write = []
+		tmp_path = file_path + ".dedup.tmp"
 
-		with open(file_path, "r") as infile:
-			header = infile.readline()
-			if header:
-				lines_to_write.append(header)
-				cols = header.strip().split(delimiter)
-				segment_idx = cols.index("segment") if "segment" in cols else None
-			else:
-				segment_idx = None
-			for line in infile:
-				if not line.strip():
-					continue  # skip empty lines
-				parts = line.strip().split(delimiter)
-				acc = parts[0] if len(parts) > 0 else ""
-				seg = parts[segment_idx] if segment_idx is not None and segment_idx < len(parts) else ""
-				key = (acc, seg)
-				if key not in seen:
-					seen.add(key)
-					lines_to_write.append(line)
-
-		with open(file_path, "w") as outfile:
-			outfile.writelines(lines_to_write)
+		try:
+			with open(file_path, "r", encoding="utf-8", errors="replace") as infile, \
+			     open(tmp_path, "w", encoding="utf-8") as outfile:
+				header = infile.readline()
+				if header:
+					outfile.write(header)
+					cols = header.strip().split(delimiter)
+					segment_idx = cols.index("segment") if "segment" in cols else None
+				else:
+					segment_idx = None
+				for line in infile:
+					if not line.strip():
+						continue
+					parts = line.rstrip("\r\n").split(delimiter)
+					acc = parts[0] if len(parts) > 0 else ""
+					seg = parts[segment_idx] if segment_idx is not None and segment_idx < len(parts) else ""
+					key = (acc, seg)
+					if key not in seen:
+						seen.add(key)
+						outfile.write(line)
+			os.replace(tmp_path, file_path)
+		finally:
+			if os.path.exists(tmp_path):
+				os.remove(tmp_path)
 		print(f"Redundancy removed. File updated: {file_path}")
 
 	def create_insertion_table(self, segment_map=None):

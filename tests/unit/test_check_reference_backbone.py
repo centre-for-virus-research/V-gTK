@@ -94,6 +94,20 @@ def test_query_rows_are_not_expected_in_the_backbone(tmp_path):
     CRB.write_manifest(str(cache), str(ref_list), 2, "with queries")
 
 
+def test_manifest_accepts_backbone_containing_listed_query_rows(tmp_path):
+    """Regression for RABV clade list: when a backbone built before rows were
+    relabelled from 'reference' to 'query' still holds those listed query rows,
+    coverage() and check() accept it, so write_manifest() must accept it too."""
+    cache = tmp_path / "cache_with_query"
+    cache.mkdir()
+    (cache / "refset_1_aln.fasta").write_text(">NC_1\nACGT\n>R1\nACGT\n>Q_FORMER_REF\nACGT\n")
+    ref_list = tmp_path / "ref_list.txt"
+    ref_list.write_text("NC_1\tmaster\t1\nR1\treference\t1\nQ_FORMER_REF\tquery\t1\n")
+    CRB.write_manifest(str(cache), str(ref_list), 2, "former ref relabelled query")
+    failures, warnings, _ = CRB.check(str(cache), str(ref_list), 2)
+    assert failures == [] and warnings == []
+
+
 def test_different_insertion_support_fails(tmp_path):
     cache, ref_list = _tiny_cache(tmp_path)
     failures = CRB.check(str(cache), str(ref_list), 1)[0]

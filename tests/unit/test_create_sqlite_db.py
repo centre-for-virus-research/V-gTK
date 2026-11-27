@@ -1748,3 +1748,167 @@ def test_create_sqlite_db_stores_one_iqtree_when_manifest_repeats_the_file(tmp_p
     rows = conn.execute("SELECT name, source, segment FROM trees WHERE source='iqtree'").fetchall()
     conn.close()
     assert rows == [("iqtree_refset_1", "iqtree", "1")]
+
+
+# ---------------------------------------------------------------------------
+# Large-table streaming mode & empty-DataFrame column-preservation regressions
+# ---------------------------------------------------------------------------
+
+
+def test_streamed_large_table_ingestion_matches_in_memory_and_dedupes_across_chunks(tmp_path: Path):
+    """Streaming mode (triggered above STREAM_FILE_BYTES_THRESHOLD) must produce
+    identical tables, UNIQUE indexes, and cross-chunk deduplication as in-memory
+    mode, and must checkpoint WAL back to a clean single-file SQLite DB."""
+    meta = tmp_path / "meta.tsv"
+    features = tmp_path / "features.tsv"
+    aln = tmp_path / "sequence_alignment.tsv"
+    m49_country = tmp_path / "m49_country.csv"
+    m49_inter = tmp_path / "m49_inter.csv"
+    m49_region = tmp_path / "m49_region.csv"
+    m49_sub = tmp_path / "m49_sub.csv"
+    proj = tmp_path / "software.tsv"
+    insertions = tmp_path / "insertions.tsv"
+    host_taxa = tmp_path / "host.tsv"
+    fasta = tmp_path / "seqs.fa"
+
+    write_tsv(
+        meta,
+        [
+            ["M1", "M1", "M1", "master", "9606", "0", ""],
+            ["Q1", "Q1", "Q1", "query", "9606", "0", ""],
+            ["Q2", "Q2", "Q2", "query", "9606", "1", "bad_qc"],
+        ],
+        ["primary_accession", "gi_number", "locus", "accession_type", "host_taxa_id", "exclusion_status", "exclusion_criteria"],
+    )
+    write_tsv(
+        aln,
+        [
+            ["M1", "M1", "ACGT", "1"],
+            ["Q1", "M1", "ACGA", "1"],
+            ["Q1", "M1", "ACGA", "1"],  # duplicate row
+            ["Q2", "M1", "ACGT", "1"],  # excluded in meta_data -> must be filtered
+        ],
+        ["primary_accession", "alignment_name", "alignment", "segment"],
+    )
+    write_tsv(
+        features,
+        [
+            ["M1", "1", "4", "ORF1", "M1", "M1"],
+            ["Q1", "1", "4", "ORF1", "M1", "M1"],
+            ["Q1", "1", "4", "ORF1", "M1", "M1"],  # duplicate row
+            ["Q2", "1", "4", "ORF1", "M1", "M1"],  # excluded -> filtered
+        ],
+        ["accession", "cds_start_OG_seq", "cds_end_OG_seq", "product", "master_ref_accession", "reference_accession"],
+    )
+    write_csv(m49_country, [["001", "World"]], ["m49_code", "name"])
+    write_csv(m49_inter, [["X", "Inter"]], ["code", "name"])
+    write_csv(m49_region, [["Y", "Region"]], ["code", "name"])
+    write_csv(m49_sub, [["Z", "SubRegion"]], ["code", "name"])
+    write_tsv(proj, [["Python", "3.10"]], ["Software", "Version"])
+    write_tsv(insertions, [["Q1", "M1", "2:AA"], ["Q2", "M1", "2:TT"]], ["primary_accession", "reference", "insertion"])
+    write_tsv(host_taxa, [["9606", "Homo sapiens"]], ["taxonomy_id", "scientific_name"])
+    fasta.write_text(">M1\nACGT\n>Q1\nACGA\n>Q1\nACGA\n>Q2\nACGT\n", encoding="utf-8")
+
+    def _run_mode(subdir: str, threshold: int) -> Path:
+        builder = CreateSqliteDB(
+            meta_data=str(meta),
+            features=str(features),
+            pad_aln=str(aln),
+            gene_info=None,
+            m49_countries=str(m49_country),
+            m49_interm_region=str(m49_inter),
+            m49_regions=str(m49_region),
+            m49_sub_regions=str(m49_sub),
+            proj_settings=str(proj),
+            fasta_sequence_file=str(fasta),
+            insertions=str(insertions),
+            host_taxa_file=str(host_taxa),
+            base_dir=str(tmp_path),
+            output_dir=subdir,
+            db_name="cmp",
+            db_status=None,
+            batch_id="batch_cmp",
+        )
+        builder.STREAM_FILE_BYTES_THRESHOLD = threshold
+        builder.create_db()
+        return tmp_path / subdir / "cmp.db"
+
+    db_mem = _run_mode("mem", 10**12)
+    db_stream = _run_mode("stream", 0)
+
+    assert not (tmp_path / "stream" / "cmp.db-wal").exists()
+    with sqlite3.connect(db_mem) as c1, sqlite3.connect(db_stream) as c2:
+        for tbl in ("meta_data", "features", "sequence_alignment", "sequences", "genes", "insertions", "host_taxa", "update_table_deltas"):
+            df1 = pd.read_sql_query(f"SELECT * FROM {tbl}", c1)
+            df2 = pd.read_sql_query(f"SELECT * FROM {tbl}", c2)
+            pd.testing.assert_frame_equal(df1, df2)
+        idx1 = sorted(r[0] for r in c1.execute("SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"))
+        idx2 = sorted(r[0] for r in c2.execute("SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"))
+        assert idx1 == idx2
+        assert {"idx_features_upsert", "idx_seq_alignment_upsert", "idx_sequences_upsert", "idx_metadata_upsert", "idx_insertions_upsert"} <= set(idx2)
+
+
+@pytest.mark.parametrize("threshold", [10**12, 0], ids=["in_memory", "streamed"])
+def test_empty_and_all_excluded_tables_preserve_schema_columns(tmp_path: Path, threshold: int):
+    """Regression for pandas `df[[]]` dropping all columns when filtering an empty
+    DataFrame against non-empty `valid_pairs` (which raised
+    `ValueError: Incoming 'sequences' dataframe missing key column 'header'`)."""
+    meta = tmp_path / "meta.tsv"
+    features = tmp_path / "features.tsv"
+    aln = tmp_path / "sequence_alignment.tsv"
+    m49_country = tmp_path / "m49_country.csv"
+    m49_inter = tmp_path / "m49_inter.csv"
+    m49_region = tmp_path / "m49_region.csv"
+    m49_sub = tmp_path / "m49_sub.csv"
+    proj = tmp_path / "software.tsv"
+    insertions = tmp_path / "insertions.tsv"
+    host_taxa = tmp_path / "host.tsv"
+    fasta = tmp_path / "seqs.fa"
+
+    write_tsv(
+        meta,
+        [
+            ["M1", "master", "0", ""],
+            ["Q_EXCL", "query", "1", "failed_qc"],
+        ],
+        ["primary_accession", "accession_type", "exclusion_status", "exclusion_criteria"],
+    )
+    # Header-only features and insertions, and only excluded query rows in aln/fasta
+    write_tsv(features, [], ["accession", "cds_start_OG_seq", "cds_end_OG_seq", "product"])
+    write_tsv(insertions, [], ["primary_accession", "reference", "insertion"])
+    write_tsv(aln, [["Q_EXCL", "M1", "ACGT", "1"]], ["primary_accession", "alignment_name", "alignment", "segment"])
+    write_csv(m49_country, [["001", "World"]], ["m49_code", "name"])
+    write_csv(m49_inter, [["X", "Inter"]], ["code", "name"])
+    write_csv(m49_region, [["Y", "Region"]], ["code", "name"])
+    write_csv(m49_sub, [["Z", "SubRegion"]], ["code", "name"])
+    write_tsv(proj, [["Python", "3.10"]], ["Software", "Version"])
+    write_tsv(host_taxa, [], ["taxonomy_id", "scientific_name"])
+    fasta.write_text(">Q_EXCL\nACGT\n", encoding="utf-8")
+
+    builder = CreateSqliteDB(
+        meta_data=str(meta),
+        features=str(features),
+        pad_aln=str(aln),
+        gene_info=None,
+        m49_countries=str(m49_country),
+        m49_interm_region=str(m49_inter),
+        m49_regions=str(m49_region),
+        m49_sub_regions=str(m49_sub),
+        proj_settings=str(proj),
+        fasta_sequence_file=str(fasta),
+        insertions=str(insertions),
+        host_taxa_file=str(host_taxa),
+        base_dir=str(tmp_path),
+        output_dir=f"out_{threshold}",
+        db_name="empty_ok",
+        db_status=None,
+    )
+    builder.STREAM_FILE_BYTES_THRESHOLD = threshold
+    builder.create_db()
+
+    with sqlite3.connect(tmp_path / f"out_{threshold}" / "empty_ok.db") as conn:
+        for tbl, expected_col in (("features", "accession"), ("sequence_alignment", "primary_accession"), ("sequences", "header"), ("insertions", "primary_accession")):
+            cols = [r[1] for r in conn.execute(f"PRAGMA table_info({tbl})").fetchall()]
+            assert expected_col in cols
+            count = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+            assert count == 0
