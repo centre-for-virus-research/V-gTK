@@ -28,6 +28,10 @@ coverage.xml
 scripts/rescue
 claude.md
 CLAUDE.md
+GEMINI.md
+PLANS.md
+VERIFIED_UPGRADES.md
+TESTING_PLANS.md
 # Run outputs that land in the repo root when scripts are driven by hand
 /Tables/
 /pad_out/
